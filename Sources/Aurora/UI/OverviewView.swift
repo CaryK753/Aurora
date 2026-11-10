@@ -44,18 +44,17 @@ struct OverviewView: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            cpuCard
-            gpuCard
-            memoryCard
-            networkCard
-            HStack(spacing: 12) {
-                diskCard
-                batteryCard
-            }
-            devicesCard
-            processCard
-        }
+        AdaptiveCardGrid(
+            cards: [
+                AnyView(cpuCard),
+                AnyView(gpuCard),
+                AnyView(memoryCard),
+                AnyView(networkCard),
+                AnyView(diskCard),
+                AnyView(batteryCard)
+            ],
+            wide: [AnyView(devicesCard), AnyView(processCard)]
+        )
     }
 
     // MARK: - CPU

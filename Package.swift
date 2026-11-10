@@ -21,7 +21,10 @@ let package = Package(
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreGraphics"),
-                .linkedFramework("ApplicationServices")
+                .linkedFramework("ApplicationServices"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("ImageIO"),
+                .linkedFramework("QuartzCore")
             ]
         )
     ]

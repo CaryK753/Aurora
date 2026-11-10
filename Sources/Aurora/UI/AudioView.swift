@@ -19,14 +19,12 @@ struct AudioView: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            if let device = currentOutput {
-                currentCard(device)
-            }
-            appVolumeCard
-            outputsCard
-            inputsCard
-        }
+        AdaptiveCardGrid(cards: [
+            currentOutput.map { AnyView(currentCard($0)) },
+            AnyView(appVolumeCard),
+            AnyView(outputsCard),
+            AnyView(inputsCard)
+        ].compactMap { $0 })
     }
 
     private func isSilent(_ device: AudioDeviceInfo) -> Bool {

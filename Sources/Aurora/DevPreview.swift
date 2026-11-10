@@ -78,7 +78,7 @@ enum DevPreview {
         return 0
     }
 
-    static func render(module: String, to path: String, appearance: String, height: CGFloat = 0) -> Int32 {
+    static func render(module: String, to path: String, appearance: String, height: CGFloat = 0, width: CGFloat = 0) -> Int32 {
         // SwiftUI 的渲染需要 NSApplication 存在
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -101,7 +101,7 @@ enum DevPreview {
         }
 
         let base = PanelController.panelSize
-        let size = CGSize(width: base.width, height: height > 0 ? height : base.height)
+        let size = CGSize(width: width > 0 ? width : base.width, height: height > 0 ? height : base.height)
         // 直接用模块视图（不带 ScrollView），ImageRenderer 才能把它们完整排版出来
         let content = VStack(spacing: 0) {
             HStack(spacing: 9) {
@@ -122,6 +122,7 @@ enum DevPreview {
         .frame(width: size.width, height: size.height, alignment: .top)
         .background(appearance == "light" ? Color(white: 0.97) : Color(white: 0.09))
         .environment(\.colorScheme, appearance == "light" ? .light : .dark)
+        .environment(\.auroraContentWidth, size.width - 54 - 28)
         // 关掉动画，避免快照抓到过渡中的半透明状态
         .transaction { transaction in transaction.animation = nil }
 
@@ -156,18 +157,28 @@ enum WindowSnapshot {
         app.appearance = appearance == "light" ? NSAppearance(named: .aqua) : NSAppearance(named: .darkAqua)
 
         let state = AppState(preview: true)
+        let pinned = ProcessInfo.processInfo.arguments.contains("--preview-pinned")
+        state.setPinned(pinned)
         // SettingsService 初始化时会按偏好覆盖外观，这里以参数为准
         state.settings.appearance = appearance == "light" ? .light : .dark
         if let target = AuroraModule(rawValue: module) { state.module = target }
+        // 开发调试：--preview-wallpaper 直接摆出壁纸覆盖页
+        if ProcessInfo.processInfo.arguments.contains("--preview-wallpaper") {
+            state.showWallpaper = true
+        }
+        if ProcessInfo.processInfo.arguments.contains("--preview-import") { state.showImport = true }
         RunLoop.main.run(until: Date().addingTimeInterval(1.5))
 
         let size = PanelController.panelSize
-        let window = NSWindow(
+        let window = AuroraPanel(
             contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.borderless, .fullSizeContentView],
+            styleMask: pinned ? [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView] : [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
+        window.allowsMain = pinned
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
@@ -177,7 +188,8 @@ enum WindowSnapshot {
         glass.cornerRadius = 26
         glass.style = .regular
 
-        let hosting = NSHostingView(rootView: AuroraRootView(state: state))
+        let hosting = TransparentHostingView(rootView: AuroraRootView(state: state))
+        hosting.safeAreaRegions = []
         hosting.frame = glass.bounds
         hosting.autoresizingMask = [.width, .height]
         glass.contentView = hosting
@@ -186,7 +198,7 @@ enum WindowSnapshot {
 
         RunLoop.main.run(until: Date().addingTimeInterval(0.9))
 
-        guard let view = window.contentView else { return 1 }
+        guard let view = window.contentView?.superview else { return 1 }
         let bounds = view.bounds
         guard let rep = view.bitmapImageRepForCachingDisplay(in: bounds) else {
             print("无法创建位图")

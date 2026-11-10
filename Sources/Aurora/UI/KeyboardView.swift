@@ -17,14 +17,14 @@ struct KeyboardView: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            if !permissions.accessibility { permissionCard }
-            devicesCard
-            typeCard
-            testCard
-            cleanCard
-            repeatCard
-        }
+        AdaptiveCardGrid(cards: [
+            permissions.accessibility ? nil : AnyView(permissionCard),
+            AnyView(devicesCard),
+            AnyView(typeCard),
+            AnyView(testCard),
+            AnyView(cleanCard),
+            AnyView(repeatCard)
+        ].compactMap { $0 })
         .onAppear { service.reloadTypes() }
     }
 

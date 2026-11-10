@@ -21,6 +21,10 @@ Display & screen tests · Mouse & keyboard · Finder context menu · Clipboard �
 
 Aurora is a native macOS menu bar utility written in SwiftUI, using the Liquid Glass design of macOS 26. It gathers the things you usually do in System Settings, in a terminal, or across half a dozen tiny utilities into a single panel — one click on the menu bar icon, or **⌥⌘A**.
 
+By default it is a floating panel that disappears when you click away. The **pin** button in the top-right corner turns it into a regular macOS window — native traffic lights in the top-left, minimizable, ⌘W closes it, and clicking elsewhere no longer dismisses it. Unpin and it goes straight back. While pinned you can also resize the window by its edges (with sensible limits), go full-screen with the green button, and the traffic lights align precisely with the interface; widen the window and module cards rearrange into two columns automatically.
+
+Dynamic wallpaper renders on the desktop layer (above Finder's wallpaper, below desktop icons) and ignores all mouse clicks. Quitting Aurora or flipping the switch restores the system wallpaper untouched. The lock / login screen keeps showing the system wallpaper.
+
 Three rules shaped the implementation:
 
 - **Use the system APIs that actually exist.** No invented numbers — for example, there is no public per-process GPU API, so Aurora does not fake one.
@@ -33,13 +37,13 @@ Three rules shaped the implementation:
 | --- | --- |
 | **Overview** | CPU (per core + graph), GPU, memory breakdown, network (VPN status + speed test), disk capacity and read/write throughput, battery health and cycle count. **External devices** lists Bluetooth and USB hardware — Apple devices get their own icons and real model names, AirPods report left/right/case levels, external volumes show usage. Top processes can be sorted by CPU, GPU, memory or network |
 | **Display** | Built-in brightness, DDC/CI brightness · volume · contrast for external monitors, brightness presets with smooth transitions, resolution switching, restore on launch, **⌃⌥↑/↓ global brightness**; **screen tests** cover solid colours, grey steps, gradient, colour bars, checkerboard, grid, text and dead pixels, filling every connected display |
-| **Pointer** | Every attached mouse, plus a live pointer probe; cursor speed and acceleration, wheel speed and acceleration, **smooth scrolling**, **separate reversal for mouse and trackpad**, Shift-to-horizontal, modifier inversion; side-button mapping with press-to-identify |
+| **Pointer** | Every attached mouse, plus a live pointer probe; cursor speed and acceleration, wheel speed and acceleration, **smooth scrolling**, **separate reversal for mouse and trackpad**, Shift-to-horizontal, modifier inversion; **button capture mapping** — hit Capture, press a single button like Mos, then pick an action; the panel pins itself while capturing so no shortcut can close it |
 | **Trackpad** | Tracking speed, tap to click, two-finger secondary click, natural scrolling, zoom/rotate, swipe between pages, three-finger drag — written straight to system preferences |
 | **Keyboard** | Lists every keyboard (built-in / USB / Bluetooth, battery, VID:PID); ANSI / ISO / JIS keyboard type; a **key test** window that highlights physical keys and decodes ⌃⌥⇧⌘ combinations; **clean mode** swallows all key input; repeat delay/rate and F1–F12 function-key priority |
 | **Menu** | A **real custom Finder context menu** built on a FinderSync extension: copy path, open in Terminal, open with app, run command, create file — add, edit, reorder, toggle individually, effective immediately. Also manages Quick Actions, Services and Finder extensions |
-| **Desktop** | Show or hide desktop icons, hide files and extensions, restart Finder |
+| **Desktop** | Show or hide desktop icons, hide files and extensions, restart Finder. **Dynamic wallpaper**: looping video / GIF (with head-tail trimming), four auto rules — one fixed, follow Light/Dark appearance (soft cross-fade), time-of-day schedule, shuffle; four built-in **procedural dynamic scenes** (Aurora / Waves / Glow / Sunset — no disk space, recolorable); drag-and-drop library with type filters, full-screen preview, five fill modes (fill / fit / stretch / center / tile), per-display settings; bundled Apple wallpapers (including aerial videos the system has downloaded), an online sources section (Unsplash / Pixabay / Wallhaven / NASA / Coverr) and download-by-URL |
 | **Clipboard** | Six record types — text, rich text, link, image, file, colour; search, filter, pinning, duplicate merging with counts, keyboard copy/paste, paste as plain text, edit and detail views; ignore rules for confidential types, apps, regex and one-shot skips; recording pauses automatically while secure input is active |
-| **Energy** | Keep the Mac awake from 15 minutes to 2 hours, optionally keep the display on; stop automatically under 20% battery; start at login |
+| **Energy** | Keep the Mac awake from 15 minutes to 2 hours, optionally keep the display on; stop automatically under 20% battery; start at login; **remember the state** — if keep-awake was still on when you quit, the next launch restores it (optional) |
 | **Audio** | Input/output device switching, volume and mute, **per-app volume** (0–150%) |
 | **AI usage** | Per-harness adapters: Codex (rollout logs plus real quota windows), Claude Code, opencode, WorkBuddy and more; desktop clients are detected and reported honestly. Aggregates the last 7 days, today and the 5-hour window |
 | **Settings** | Language (system / Chinese / English), appearance, launch at login, module toggles, live permission checks, automatic updates, GitHub entry and reset |
@@ -134,7 +138,8 @@ Permission state is re-checked every 3 seconds and can be refreshed manually fro
 | **⌘ + drag a sidebar icon** | Reorder modules; drop outside the panel to be asked whether to disable it |
 | **⌘1 – ⌘9** | Copy a pinned clipboard entry (add ⌥ to paste into the previous app) |
 | **⌃⌥⌘K** | Leave keyboard clean mode |
-| **ESC** | Close the panel or exit a screen test |
+| **ESC** | Close the panel, exit a screen test, or cancel a button capture |
+| **⌘W / ⌘M** | Close / minimize once the panel is pinned as a window |
 
 ## Automatic updates
 

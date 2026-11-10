@@ -5,20 +5,121 @@ import SwiftUI
 
 struct DesktopView: View {
     @ObservedObject var service: DesktopService
+    @ObservedObject var wallpaper: WallpaperService
     @ObservedObject var state: AppState
+    @State private var wallpaperGlow = false
 
     init(state: AppState) {
         self.state = state
         self.service = state.desktop
+        self.wallpaper = state.wallpaper
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            heroCard
-            finderCard
-            actionCard
-            tipCard
+        AdaptiveCardGrid(
+            cards: [
+                AnyView(heroCard),
+                AnyView(wallpaperCard),
+                AnyView(finderCard),
+                AnyView(actionCard)
+            ],
+            wide: [AnyView(tipCard)]
+        )
+    }
+
+    // MARK: - 动态壁纸入口
+
+    private var wallpaperCard: some View {
+        GlassCard(padding: 16) {
+            HStack(spacing: 12) {
+                wallpaperBadge
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(T("动态壁纸"))
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    statusLine
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .layoutPriority(1)
+
+                Spacer(minLength: 8)
+
+                Button(T("壁纸库")) {
+                    withAnimation(.smooth(duration: 0.28)) { state.showWallpaper = true }
+                }
+                .buttonStyle(SoftButtonStyle(prominent: true))
+                .lineLimit(1)
+                .fixedSize()
+                .help(T("打开壁纸库"))
+
+                AuroraToggle(isOn: Binding(
+                    get: { wallpaper.config.enabled },
+                    set: { on in
+                        wallpaper.setEnabled(on)
+                        state.showToast(
+                            on ? T("动态壁纸已开启") : T("已恢复系统壁纸"),
+                            symbol: on ? "sparkles" : "pause.circle"
+                        )
+                    }
+                ))
+            }
         }
+        .onAppear { wallpaperGlow = true }
+    }
+
+    /// 一行状态：开着显示当前壁纸，关着显示一句话简介；壁纸名不再出现两次
+    private var statusLine: Text {
+        if wallpaper.config.enabled, let item = wallpaper.previewResolution() {
+            return Text(TF("当前 · %@", item.name))
+        }
+        return Text(T("视频、GIF、按时间或外观自动换"))
+    }
+
+    /// 一块缓缓流动的彩虹渐变：色相环 8 秒转一圈，整体调淡；未开启时暗淡，开启后恢复
+    private var wallpaperBadge: some View {
+        let enabled = wallpaper.config.enabled
+        return ZStack {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(
+                    AngularGradient(
+                        colors: [
+                            AuroraTheme.accent,
+                            AuroraTheme.ok,
+                            AuroraTheme.warn,
+                            Color.purple,
+                            Color.pink,
+                            AuroraTheme.accent
+                        ],
+                        center: .center
+                    )
+                )
+                .hueRotation(.degrees(wallpaperGlow ? 360 : 0))
+                .saturation(enabled ? 0.52 : 0.30)
+                .brightness(enabled ? 0.16 : -0.02)
+
+            Image(systemName: "photo.on.rectangle.angled")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white.opacity(enabled ? 0.92 : 0.55))
+        }
+        .frame(width: 60, height: 44)
+        .overlay {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .strokeBorder(.white.opacity(0.28), lineWidth: 0.8)
+        }
+        .overlay(alignment: .top) {
+            Capsule().fill(.white.opacity(0.32)).frame(width: 20, height: 2.5).padding(.top, 4)
+        }
+        .animation(.linear(duration: 8).repeatForever(autoreverses: false), value: wallpaperGlow)
+        .animation(.smooth(duration: 0.7), value: enabled)
+        .mask {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .frame(width: 60, height: 44)
+        }
+        .shadow(color: AuroraTheme.accent.opacity(enabled ? 0.22 : 0.10), radius: 6, y: 2)
     }
 
     private var heroCard: some View {

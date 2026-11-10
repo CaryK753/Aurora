@@ -201,6 +201,13 @@ final class PointerEngine: @unchecked Sendable {
     /// 按键探测回调（Mos 那种「按一下就知道是哪个键」）
     var onButtonDetected: ((Int) -> Void)?
     var onNativeButton: ((Int) -> Bool)?
+    /// 捕获模式：命中后把按键号回传，并吞掉这次事件（不触发旧映射，也不传给前台 App）
+    var captureHandler: ((Int) -> Void)?
+    private(set) var isCapturing = false
+
+    func setCapturing(_ capturing: Bool) {
+        isCapturing = capturing
+    }
 
     var isRunning: Bool { tap != nil }
 
@@ -216,6 +223,7 @@ final class PointerEngine: @unchecked Sendable {
             || newConfig.smoothScroll
             || newConfig.shiftToHorizontal
             || newConfig.modifierInvert != .none || hasMacro
+            || isCapturing
         if needsEngine { start() } else { stop() }
         if !newConfig.smoothScroll { smooth.stop() }
     }
@@ -299,6 +307,12 @@ final class PointerEngine: @unchecked Sendable {
         case .otherMouseDown:
             let button = Int(event.getIntegerValueField(.mouseEventButtonNumber))
             onButtonDetected?(button)
+            if isCapturing, button >= 2 {
+                // 捕获中：这一下既不触发旧映射，也不传给前台 App
+                swallowedButtons.insert(button)
+                captureHandler?(button)
+                return nil
+            }
             if swallowedButtons.contains(button) { return nil }
             if onNativeButton?(button) == true { swallowedButtons.insert(button); return nil }
             if let raw = config.macroBindings[button],
@@ -450,6 +464,12 @@ final class PointerService: ObservableObject {
         didSet { engine.onNativeButton = onNativeButton; sync() }
     }
     @Published var macroBindings: [Int: MacroAction] { didSet { persist(); sync() } }
+    /// 通过捕获单独添加的按键（默认侧键 3/4 之外的）
+    @Published private(set) var extraButtons: [Int] = [] { didSet { persist() } }
+    /// 正在等待用户按下鼠标上的某个键
+    @Published private(set) var isCapturing = false
+    /// 捕获到按键的回调（用来自动解除临时固定）
+    var onCaptureFinished: ((Int) -> Void)?
     /// 最近一次按下的鼠标键号：用来认出「侧键到底是 3 还是 4」
     @Published private(set) var lastPressedButton: Int?
     @Published private(set) var isTrusted: Bool = AXIsProcessTrusted()
@@ -493,8 +513,12 @@ final class PointerService: ObservableObject {
         macroApplications = Dictionary(uniqueKeysWithValues: (defaults.dictionary(forKey: "pointer.macroApplications") as? [String: String] ?? [:]).compactMap {
             guard let key = Int($0.key) else { return nil }; return (key, $0.value)
         })
+        extraButtons = defaults.array(forKey: "pointer.extraButtons") as? [Int] ?? []
         engine.onButtonDetected = { [weak self] button in
             Task { @MainActor in self?.lastPressedButton = button }
+        }
+        engine.captureHandler = { [weak self] button in
+            Task { @MainActor in self?.finishCapture(button) }
         }
 
         sync()
@@ -516,6 +540,7 @@ final class PointerService: ObservableObject {
         var mapped: [String: String] = [:]
         for (button, action) in macroBindings { mapped["\(button)"] = action.rawValue }
         defaults.set(mapped, forKey: "pointer.macros")
+        defaults.set(extraButtons, forKey: "pointer.extraButtons")
         defaults.set(Dictionary(uniqueKeysWithValues: macroApplications.map { (String($0.key), $0.value) }), forKey: "pointer.macroApplications")
     }
 
@@ -582,6 +607,7 @@ final class PointerService: ObservableObject {
     }
 
     func reset() {
+        cancelCapture()
         speed = 1.0
         acceleration = 0.0
         scrollSpeed = 1.0
@@ -596,6 +622,7 @@ final class PointerService: ObservableObject {
         modifierInvert = .none
         macroBindings = [3: .back, 4: .forward]
         macroApplications = [:]
+        extraButtons = []
         lastPressedButton = nil
     }
 
@@ -606,6 +633,60 @@ final class PointerService: ObservableObject {
             && smoothScroll && abs(smoothDuration - 0.24) < 0.001 && smoothBypass
             && modifierInvert == .none
             && macroBindings == [3: .back, 4: .forward]
+            && extraButtons.isEmpty
+    }
+
+    // MARK: - 按键捕获（Mos 的「先按一下，再指定动作」）
+
+    /// 进入捕获状态：引擎必须已经在跑，否则按下按键也没人听见
+    @discardableResult
+    func beginCapture() -> Bool {
+        guard !isCapturing else { return true }
+        guard isTrusted else {
+            requestPermission()
+            return false
+        }
+        guard engine.start() else { return false }
+        isCapturing = true
+        engine.setCapturing(true)
+        engineReady = engine.isRunning
+        return true
+    }
+
+    func cancelCapture() {
+        guard isCapturing else { return }
+        isCapturing = false
+        engine.setCapturing(false)
+        sync()
+    }
+
+    private func finishCapture(_ button: Int) {
+        guard isCapturing, button >= 2, button <= 31 else { return }
+        isCapturing = false
+        engine.setCapturing(false)
+        lastPressedButton = button
+        if button != 3, button != 4, !extraButtons.contains(button) {
+            extraButtons.append(button)
+        }
+        sync()
+        onCaptureFinished?(button)
+    }
+
+    /// 列表里要显示的按键：默认侧键 + 捕获过的按键 + 已有映射
+    var mappedButtons: [Int] {
+        Array(Set([3, 4]).union(macroBindings.keys).union(extraButtons)).sorted()
+    }
+
+    /// 默认侧键始终留在列表里，其余捕获来的键可以移除
+    func canForget(_ button: Int) -> Bool {
+        button != 3 && button != 4 && extraButtons.contains(button)
+    }
+
+    func forget(_ button: Int) {
+        macroBindings.removeValue(forKey: button)
+        macroApplications.removeValue(forKey: button)
+        extraButtons.removeAll { $0 == button }
+        if lastPressedButton == button { lastPressedButton = nil }
     }
 
     func setMacro(_ action: MacroAction, for button: Int) {

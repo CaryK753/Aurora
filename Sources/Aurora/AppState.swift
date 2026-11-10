@@ -11,8 +11,59 @@ final class AppState: ObservableObject {
     @Published var module: AuroraModule = .overview
     @Published var showImport = false
     @Published var showWelcome = false
+    /// 「动态壁纸」全屏覆盖层
+    @Published var showWallpaper = false
+    /// 固定窗口进入 macOS 全屏时为 true（圆角与红绿灯布局要跟着变）
+    @Published var isFullscreen = false
     var onShowMainPanel: (() -> Void)?
     var onDismissMainPanel: (() -> Void)?
+
+    // MARK: - 窗口固定
+
+    /// 固定后主面板不再是弹出式临时窗口，而是正经的 macOS 窗口（原生红绿灯）
+    @Published private(set) var isPinned = false
+    /// 由 PanelController 接管真正的窗口形态切换
+    var onSetPinned: ((Bool) -> Void)?
+    /// 捕获按键时临时固定，结束后恢复成原样
+    private var pinnedByCapture = false
+
+    func setPinned(_ pinned: Bool) {
+        guard isPinned != pinned else { return }
+        isPinned = pinned
+        onSetPinned?(pinned)
+    }
+
+    func togglePinned() {
+        guard !pointer.isCapturing else { return }
+        setPinned(!isPinned)
+    }
+
+    /// 像 Mos 那样先单独捕获按键、再指定动作；捕获期间窗口保持固定，
+    /// 免得按到 ⌥⌘A 之类的快捷键把面板收起来
+    func beginButtonCapture() {
+        guard !pointer.isCapturing else { return }
+        guard pointer.beginCapture() else {
+            showToast(T("无法捕获按键，请先授予辅助功能权限"), symbol: "exclamationmark.triangle")
+            return
+        }
+        if !isPinned {
+            pinnedByCapture = true
+            setPinned(true)
+        }
+    }
+
+    func endButtonCapture() {
+        let wasCapturing = pointer.isCapturing
+        pointer.cancelCapture()
+        releaseCapturePin()
+        if wasCapturing { showToast(T("已取消捕获"), symbol: "xmark.circle") }
+    }
+
+    private func releaseCapturePin() {
+        guard pinnedByCapture else { return }
+        pinnedByCapture = false
+        setPinned(false)
+    }
 
     /// 欢迎页点「开始使用」后，从菜单栏图标位置弹出主面板。
     /// 欢迎窗正在收起，直接同步弹出会被当成「点在面板外面」而立刻收起，
@@ -35,6 +86,13 @@ final class AppState: ObservableObject {
 
     func dismissMainPanel() {
         onDismissMainPanel?()
+    }
+
+    // MARK: - 动态壁纸
+
+    /// 全屏预览一张壁纸（Esc / 点击退出）
+    func previewWallpaper(_ item: WallpaperItem, fill: WallpaperFill) {
+        WallpaperPreview.present(item: item, fill: fill)
     }
 
     /// 统一的退出入口：默认先问一句，用户勾了「不再询问」就直接退出
@@ -69,6 +127,8 @@ final class AppState: ObservableObject {
     let finderExt = FinderExtensionService()
     let updates = UpdateService()
     let settings: SettingsService
+    let wallpapers: WallpaperLibrary
+    let wallpaper: WallpaperService
     let permissions = PermissionService()
 
     private var toastTask: Task<Void, Never>?
@@ -82,6 +142,8 @@ final class AppState: ObservableObject {
     /// preview=true：离屏渲染/快照用，外观等偏好只存在内存里，不污染真实设置
     init(preview: Bool = false) {
         settings = SettingsService(persistPreferences: !preview)
+        wallpapers = WallpaperLibrary(scanSystem: !preview)
+        wallpaper = WallpaperService(library: wallpapers)
         if !preview {
             hardwareSink = trackpad.$hasHardware.removeDuplicates().sink { [weak self] available in
                 guard let self, !UserDefaults.standard.bool(forKey: "settings.trackpadUserChoice") else { return }
@@ -128,6 +190,11 @@ final class AppState: ObservableObject {
         }
         pointer.onPermissionRequest = { [weak self] in self?.permissions.requestAccessibility() }
         permissions.onRestart = { [weak self] in self?.restartForPermissions() }
+        pointer.onCaptureFinished = { [weak self] button in
+            guard let self else { return }
+            self.releaseCapturePin()
+            self.showToast(TF("已捕获 按键 %d", button), symbol: "computermouse.fill")
+        }
 
         energy.onAutoStop = { [weak self] message in
             self?.showToast(message, symbol: "battery.25percent")

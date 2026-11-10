@@ -15,11 +15,11 @@ struct EnergyView: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            heroCard
-            durationCard
-            infoCard
-        }
+        AdaptiveCardGrid(cards: [
+            AnyView(heroCard),
+            AnyView(durationCard),
+            AnyView(infoCard)
+        ])
     }
 
     private var heroCard: some View {
@@ -167,6 +167,24 @@ struct EnergyView: View {
                     }
                     Spacer()
                     AuroraToggle(isOn: $service.activateOnLaunch)
+                }
+
+                Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 0.6)
+
+                HStack(spacing: 9) {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 14)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(T("记住节能状态"))
+                            .font(.system(size: 11.5, weight: .medium))
+                        Text(T("退出时保持唤醒还开着，下次打开 Aurora 自动恢复"))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    AuroraToggle(isOn: $service.rememberState)
                 }
             }
         }

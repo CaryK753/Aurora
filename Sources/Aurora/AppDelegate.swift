@@ -28,6 +28,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         panelController = PanelController(state: state)
+        // 固定的开关由面板右上角的按钮控制，这里只负责把窗口形态交给 PanelController
+        state.onSetPinned = { [weak self] pinned in self?.panelController.setPinned(pinned) }
         setupStatusItem()
         MacroRunner.startObservingApplications()
         MacroRunner.dismissPanel = { [weak self] in self?.panelController.hide(reason: "macro") }
@@ -44,7 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerHotKey()
         registerBrightnessHotKeys()
         state.onShowMainPanel = { [weak self] in self?.openPanel() }
-        state.onDismissMainPanel = { [weak self] in self?.panelController.hide(reason: "welcome") }
+        state.onDismissMainPanel = { [weak self] in self?.panelController.hide(reason: "welcome", force: true) }
         welcomeController = WelcomeWindowController(state: state)
         if !UserDefaults.standard.bool(forKey: "onboarding.completed")
             || UserDefaults.standard.bool(forKey: "onboarding.reopenAfterRestart") {
@@ -61,6 +63,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state.showImport = true
         }
 
+        // 之前开启过动态壁纸的话，登录后自动恢复
+        state.wallpaper.activateIfNeeded()
+
         // 每小时检查一次更新（已发过 release 才有意义，拉不到就静默失败）
         state.updates.start()
 
@@ -68,6 +73,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             || UserDefaults.standard.bool(forKey: "debugOpenPanel") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
                 self.panelController.show(relativeTo: self.statusItem.button)
+            }
+        }
+        // 开发调试：AURORA_OPEN_WALLPAPER=1 打开面板并进壁纸页
+        if ProcessInfo.processInfo.environment["AURORA_OPEN_WALLPAPER"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                self.state.showWelcome = false
+                self.panelController.show(relativeTo: self.statusItem.button)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.state.showWallpaper = true
+                }
             }
         }
     }
@@ -212,10 +227,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.requestQuit()
     }
 
+    /// 固定窗口菜单栏里的「关于」
+    @objc func aboutFromMenu() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: [:])
+    }
+
+    /// 固定窗口菜单栏里的「设置」：打开面板并跳到设置模块
+    @objc func settingsFromMenu() {
+        panelController.show(relativeTo: statusItem.button)
+        state.select(.settings)
+    }
+
+    /// 固定成普通窗口后，菜单栏里的「退出 Aurora」也走同一套确认流程
+    @objc func quitFromMenu() {
+        state.requestQuit()
+    }
+
+    /// 固定状态下点 Dock 图标：把窗口叫回来
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { panelController.show(relativeTo: statusItem.button) }
+        return true
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // 拆除按应用音量的 tap，避免退出瞬间把正在播放的声音吞掉
         state.logitech.shutdown()
         state.appAudio.shutdown()
+        // 收掉壁纸窗口，把桌面还给系统壁纸
+        state.wallpaper.teardown()
+        WallpaperPreview.dismiss()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }

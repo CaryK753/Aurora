@@ -63,8 +63,20 @@ final class EnergyService: ObservableObject {
         didSet { UserDefaults.standard.set(activateOnLaunch, forKey: "energy.activateOnLaunch") }
     }
 
+    /// 记住关闭前的节能状态：下次打开 Aurora 自动恢复
+    @Published var rememberState: Bool = (UserDefaults.standard.object(forKey: "energy.rememberState") as? Bool) ?? true {
+        didSet {
+            UserDefaults.standard.set(rememberState, forKey: "energy.rememberState")
+            if !rememberState {
+                UserDefaults.standard.removeObject(forKey: "energy.lastDuration")
+            }
+        }
+    }
+
     /// 自动结束时回调给上层弹提示
     var onAutoStop: ((String) -> Void)?
+    /// 启动恢复成功时回调给上层弹提示
+    var onRestored: ((Duration) -> Void)?
 
     @Published var keepDisplayOn: Bool {
         didSet {
@@ -80,6 +92,16 @@ final class EnergyService: ObservableObject {
 
     init() {
         keepDisplayOn = UserDefaults.standard.bool(forKey: "energy.keepDisplayOn")
+        // 上次退出前保持唤醒还开着的话，稍等模块都就绪后再恢复
+        if rememberState,
+           let saved = Duration(rawValue: UserDefaults.standard.string(forKey: "energy.lastDuration") ?? ""),
+           saved != .off {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                guard let self, self.rememberState, self.duration == .off else { return }
+                self.set(saved)
+                self.onRestored?(saved)
+            }
+        }
         if activateOnLaunch {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
                 guard let self, self.activateOnLaunch, self.duration == .off else { return }
@@ -111,6 +133,9 @@ final class EnergyService: ObservableObject {
     func set(_ newValue: Duration) {
         guard moduleEnabled || newValue == .off else { return }
         duration = newValue
+        if rememberState {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "energy.lastDuration")
+        }
         if newValue == .off {
             stop()
         } else {
@@ -170,6 +195,10 @@ final class EnergyService: ObservableObject {
         endsAt = nil
         duration = .off
         remainingText = ""
+        // 到期 / 低电量 / 手动关闭都算「退出前的状态已变」，不再自动恢复
+        if rememberState {
+            UserDefaults.standard.set(Duration.off.rawValue, forKey: "energy.lastDuration")
+        }
     }
 
     private func startTicker() {

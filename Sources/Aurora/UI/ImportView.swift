@@ -65,7 +65,9 @@ struct ImportView: View {
             .buttonStyle(.plain)
             .help(T("重新扫描"))
         }
-        .padding(.horizontal, 14)
+        // 固定窗口下左上角是红绿灯，顶栏内容往右让
+        .padding(.leading, state.isPinned ? 76 : 14)
+        .padding(.trailing, 14)
         .padding(.top, 14)
         .padding(.bottom, 10)
     }

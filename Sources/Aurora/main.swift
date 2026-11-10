@@ -128,9 +128,10 @@ if let index = CommandLine.arguments.firstIndex(of: "--render") {
     let path = index + 2 < args.count ? args[index + 2] : "/tmp/aurora-render.png"
     let appearance = index + 3 < args.count ? args[index + 3] : "dark"
     let height = index + 4 < args.count ? (Double(args[index + 4]) ?? 0) : 0
+    let width = index + 5 < args.count ? (Double(args[index + 5]) ?? 0) : 0
     var code: Int32 = 0
     MainActor.assumeIsolated {
-        code = DevPreview.render(module: module, to: path, appearance: appearance, height: height)
+        code = DevPreview.render(module: module, to: path, appearance: appearance, height: height, width: width)
     }
     exit(code)
 }

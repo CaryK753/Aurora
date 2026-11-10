@@ -217,7 +217,19 @@ struct PointerView: View {
                 HStack(spacing: 6) {
                     SectionLabel(text: T("按键映射"), symbol: "computermouse.fill")
                     Spacer(minLength: 0)
-                    if let button = service.lastPressedButton {
+                    if service.isCapturing {
+                        HStack(spacing: 3) {
+                            Circle()
+                                .fill(AuroraTheme.accent)
+                                .frame(width: 4, height: 4)
+                            Text(T("等待按键"))
+                                .font(.system(size: 8.5, weight: .medium))
+                        }
+                        .foregroundStyle(AuroraTheme.accent)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(AuroraTheme.accent.opacity(0.12)))
+                    } else if let button = service.lastPressedButton {
                         HStack(spacing: 3) {
                             Image(systemName: "hand.tap.fill")
                                 .font(.system(size: 7.5, weight: .bold))
@@ -230,54 +242,120 @@ struct PointerView: View {
                         .padding(.vertical, 3)
                         .background(Capsule().fill(AuroraTheme.accent.opacity(0.12)))
                     }
+
+                    Button {
+                        if service.isCapturing {
+                            state.endButtonCapture()
+                        } else {
+                            state.beginButtonCapture()
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: service.isCapturing ? "xmark" : "plus")
+                                .font(.system(size: 7.5, weight: .bold))
+                            Text(service.isCapturing ? T("取消") : T("捕获"))
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .foregroundStyle(service.isCapturing ? AnyShapeStyle(AuroraTheme.danger) : AnyShapeStyle(AuroraTheme.accent))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule().fill(
+                                (service.isCapturing ? AuroraTheme.danger : AuroraTheme.accent).opacity(0.12)
+                            )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help(T("先单独捕获一个鼠标按键，再为它指定动作"))
                 }
-                Text(T("按一下侧键就能识别编号；映射后这个键不会再传给前台 App。"))
+
+                Text(T("点「捕获」后按下鼠标上的按键即可识别编号；映射后这个键不会再传给前台 App。"))
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 VStack(spacing: 4) {
-                    ForEach(macroButtons, id: \.self) { button in
-                        HStack(spacing: 8) {
-                            HStack(spacing: 5) {
-                                Text(buttonTitle(button))
-                                    .font(.system(size: 10.5, weight: .medium))
-                                    .foregroundStyle(service.lastPressedButton == button
-                                                     ? AnyShapeStyle(AuroraTheme.accent)
-                                                     : AnyShapeStyle(Color.primary))
-                                Text(TF("按键 %d", button))
-                                    .font(.system(size: 8.5, design: .rounded))
-                                    .foregroundStyle(.tertiary)
-                                    .monospacedDigit()
-                            }
-                            Spacer(minLength: 6)
-                            Picker("", selection: Binding(
-                                get: { service.macroBindings[button] ?? .none },
-                                set: { service.setMacro($0, for: button) }
-                            )) {
-                                ForEach(MacroAction.allCases) { action in
-                                    Text(T(action.title)).tag(action)
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .labelsHidden()
-                            .fixedSize()
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(service.lastPressedButton == button
-                                      ? AuroraTheme.accent.opacity(0.10)
-                                      : Color.clear)
-                        }
+                    ForEach(service.mappedButtons, id: \.self) { button in
+                        macroRow(button)
+                    }
+                    if service.isCapturing {
+                        capturingRow
                     }
                 }
             }
         }
     }
 
-    private var macroButtons: [Int] {
-        Array(Set([3, 4, 5, 6]).union(service.macroBindings.keys)).sorted()
+    private func macroRow(_ button: Int) -> some View {
+        let highlighted = service.lastPressedButton == button
+        return HStack(spacing: 7) {
+            HStack(spacing: 5) {
+                Text(buttonTitle(button))
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(highlighted ? AnyShapeStyle(AuroraTheme.accent) : AnyShapeStyle(Color.primary))
+                Text(TF("按键 %d", button))
+                    .font(.system(size: 8.5, design: .rounded))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
+            Spacer(minLength: 6)
+
+            Picker("", selection: Binding(
+                get: { service.macroBindings[button] ?? .none },
+                set: { service.setMacro($0, for: button) }
+            )) {
+                ForEach(MacroAction.allCases) { action in
+                    Text(T(action.title)).tag(action)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+
+            if service.canForget(button) {
+                Button {
+                    service.forget(button)
+                } label: {
+                    Image(systemName: "minus.circle")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help(T("移除这个按键"))
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(highlighted ? AuroraTheme.accent.opacity(0.10) : Color.clear)
+        }
+    }
+
+    private var capturingRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "computermouse.fill")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(AuroraTheme.accent)
+            Text(T("正在等待按键…"))
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(AuroraTheme.accent)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(AuroraTheme.accent.opacity(0.08))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(
+                            AuroraTheme.accent.opacity(0.30),
+                            style: StrokeStyle(lineWidth: 0.8, dash: [3, 3])
+                        )
+                }
+        }
+        .transition(.opacity)
     }
 
     private func buttonTitle(_ button: Int) -> String {
@@ -286,10 +364,6 @@ struct PointerView: View {
         case 4: return T("侧键 2")
         default: return T("附加按键")
         }
-    }
-
-    private func currentAction(_ button: Int) -> MacroAction {
-        service.macroBindings[button] ?? .none
     }
 
     private var engineStatusText: String {
