@@ -127,6 +127,7 @@ The built-in updater reads this repository's GitHub releases:
 - Once downloaded, Aurora asks before doing anything: confirm to replace `Aurora.app` and relaunch, or choose "Later" and update whenever you want.
 - You can also run a manual check from **Settings › About**, or turn automatic updates off and keep manual checks.
 - Only the app bundle is replaced. Settings, clipboard history and custom menu items live in `~/Library/Application Support/Aurora` and are never touched.
+- Official builds are ad-hoc signed by CI. If you previously ran a build signed with your own developer certificate, the signature change makes macOS treat it as a different app — **re-grant Accessibility and friends once after that first update** (updates between your own fixed-identity builds are unaffected).
 
 ## Project layout
 
