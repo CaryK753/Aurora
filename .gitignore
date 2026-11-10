@@ -1,0 +1,16 @@
+# 构建产物
+.build/
+build/
+dist/
+.swiftpm/
+
+# 参考项目源码（仅本地）
+reference/
+
+# 本地工具与运行数据
+.codex/
+.workbuddy/
+
+# 系统文件
+.DS_Store
+*.xcuserstate

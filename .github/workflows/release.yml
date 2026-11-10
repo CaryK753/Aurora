@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号，例如 1.1.0（不要带 v）"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Package & Publish
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 解析版本号
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: 编译通用二进制
+        env:
+          AURORA_INSTALL: "0"
+          AURORA_UNIVERSAL: "1"
+          AURORA_VERSION: ${{ steps.version.outputs.version }}
+          AURORA_BUILD: ${{ steps.version.outputs.build }}
+        run: ./build.sh release
+
+      - name: 打包 zip 与校验和
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent build/Aurora.app "dist/Aurora-${VERSION}.zip"
+          cd dist
+          shasum -a 256 "Aurora-${VERSION}.zip" > "Aurora-${VERSION}.zip.sha256"
+          ls -lh
+
+      - name: 生成 release 说明
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          PREVIOUS="$(git describe --tags --abbrev=0 "v${VERSION}^" 2>/dev/null || true)"
+          {
+            echo "## Aurora v${VERSION}"
+            echo
+            echo "macOS 26 及以上，通用二进制（Apple Silicon / Intel）。"
+            echo
+            if [ -n "$PREVIOUS" ]; then
+              echo "### 变更"
+              echo
+              git log --no-merges --pretty=format:"- %s" "${PREVIOUS}..HEAD" | head -60
+              echo
+            fi
+            echo
+            echo "### 安装"
+            echo
+            echo '1. 下载 `Aurora-'"${VERSION}"'.zip` 并解压。'
+            echo "2. 把 \`Aurora.app\` 拖进「应用程序」，首次打开若被 Gatekeeper 拦下，右键 →「打开」。"
+            echo "3. 按提示授予辅助功能、屏幕录制等权限。"
+            echo
+            echo "### 校验"
+            echo
+            echo '```'
+            cat "dist/Aurora-${VERSION}.zip.sha256"
+            echo '```'
+          } > release-notes.md
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Aurora ${{ steps.version.outputs.version }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
+          files: |
+            dist/Aurora-${{ steps.version.outputs.version }}.zip
+            dist/Aurora-${{ steps.version.outputs.version }}.zip.sha256

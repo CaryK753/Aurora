@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: 缓存 SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: ${{ runner.os }}-spm-
+
+      - name: 编译（Debug）
+        run: swift build -c debug --disable-sandbox
+
+      - name: 单元测试
+        run: swift test --disable-sandbox
+
+      - name: 打包 .app
+        env:
+          AURORA_INSTALL: "0"
+          AURORA_VERSION: "0.0.0-ci"
+          AURORA_BUILD: ${{ github.run_number }}
+        run: ./build.sh release
+
+      - name: 校验产物
+        run: |
+          test -d build/Aurora.app
+          test -x build/Aurora.app/Contents/MacOS/Aurora
+          test -d build/Aurora.app/Contents/PlugIns/AuroraFinder.appex
+          codesign --verify --deep --strict build/Aurora.app
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" build/Aurora.app/Contents/Info.plist
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aurora-ci-${{ github.run_number }}
+          path: build/Aurora.app
+          if-no-files-found: error
+          retention-days: 7
