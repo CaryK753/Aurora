@@ -69,10 +69,27 @@ Aurora 是一个常驻菜单栏的原生 macOS 工具，用 SwiftUI 写成，界
 
 1. 到 [Releases](https://github.com/CaryK753/Aurora/releases/latest) 下载 `Aurora-<版本>.zip`。
 2. 解压后把 `Aurora.app` 拖进「应用程序」。
-3. 首次打开若被 Gatekeeper 拦下，在 Finder 里**右键 →「打开」**确认一次即可。
-4. 按提示授予需要的权限（见下一节）。
+3. 按提示授予需要的权限（见下一节）。
 
-> 安装包为 ad-hoc 签名，未经过 Apple 公证。这是开源项目在没有开发者账号时的常见做法；你也可以直接从源码构建。
+#### 提示「已损坏，无法打开」怎么办
+
+安装包没有经过 Apple 公证，在开启 Gatekeeper 的 macOS 上双击，可能直接弹窗：
+
+> “Aurora”已损坏，无法打开。你应该将它移到废纸篓。
+
+这**不是文件真的损坏**，而是下载后被打上了隔离属性（quarantine）。在终端执行一条命令即可解决：
+
+```bash
+sudo xattr -c /Applications/Aurora.app
+```
+
+然后重新打开应用（首次仍可能需要在 Finder 里**右键 →「打开」**确认一次）。应用不在「应用程序」目录时，把路径换成实际位置；如果只想移除隔离标记、保留其他扩展属性，也可以用：
+
+```bash
+sudo xattr -dr com.apple.quarantine /Applications/Aurora.app
+```
+
+> 安装包为 ad-hoc 签名、未公证，这是没有付费开发者账号的开源项目的常见做法，不代表应用有风险；你也可以直接从源码构建，构建出来的版本同样适用上面这条命令。
 
 ### 从源码构建
 

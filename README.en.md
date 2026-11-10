@@ -69,10 +69,27 @@ Three rules shaped the implementation:
 
 1. Grab `Aurora-<version>.zip` from [Releases](https://github.com/CaryK753/Aurora/releases/latest).
 2. Unzip it and drag `Aurora.app` into **Applications**.
-3. If Gatekeeper blocks the first launch, **right-click → Open** once in Finder.
-4. Grant the permissions you need (next section).
+3. Grant the permissions you need (next section).
 
-> The build is ad-hoc signed and not notarised by Apple — the usual trade-off for open-source projects without a paid developer account. It does not make the app less safe; building from source is equally supported.
+#### "Aurora is damaged and can't be opened"
+
+The build is not notarised by Apple, so on a Mac with Gatekeeper enabled you may see:
+
+> "Aurora" is damaged and can't be opened. You should move it to the Trash.
+
+The download is **not actually corrupted** — it just carries the quarantine attribute. Clear it from Terminal:
+
+```bash
+sudo xattr -c /Applications/Aurora.app
+```
+
+Then open the app again (the first launch may still need **right-click → Open** in Finder). Adjust the path if you installed it somewhere else. If you prefer to remove only the quarantine flag and keep other extended attributes:
+
+```bash
+sudo xattr -dr com.apple.quarantine /Applications/Aurora.app
+```
+
+> The build is ad-hoc signed and not notarised — the usual trade-off for open-source projects without a paid developer account. It does not make the app less safe; building from source is equally supported, and the command above applies to local builds too.
 
 ### Build from source
 
