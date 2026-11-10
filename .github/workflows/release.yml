@@ -75,6 +75,16 @@ jobs:
             echo "2. 把 \`Aurora.app\` 拖进「应用程序」，首次打开若被 Gatekeeper 拦下，右键 →「打开」。"
             echo "3. 按提示授予辅助功能、屏幕录制等权限。"
             echo
+            echo "### 打不开怎么办"
+            echo
+            echo '安装包未经过 Apple 公证。若双击提示「已损坏，无法打开」，这不是文件损坏，清除隔离属性即可：'
+            echo
+            echo '```bash'
+            echo 'sudo xattr -c /Applications/Aurora.app'
+            echo '```'
+            echo
+            echo '应用不在「应用程序」目录时，把路径换成实际位置。'
+            echo
             echo "### 校验"
             echo
             echo '```'
