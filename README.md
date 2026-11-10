@@ -164,6 +164,7 @@ Aurora --clip-e2e                # 剪贴板端到端：去重、RTF 落盘、�
 Aurora --keyboard-clean-test     # 清洁模式拦截与解锁
 Aurora --device-test             # 枚举键盘与指针设备
 Aurora --update-test             # 读取 GitHub Release 并比较版本，不下载
+Aurora --update-test --download  # 连同下载与解包一起验证（不弹窗、不安装）
 ```
 
 功能回归脚本在 `Tests/` 下：`bash Tests/Functional/run.sh`、`Tests/Panel/run.sh`、`Tests/Preferences/run.sh`、`Tests/Permissions/run.sh`。

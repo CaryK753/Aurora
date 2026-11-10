@@ -84,6 +84,8 @@ final class UpdateService: ObservableObject {
     private var task: Task<Void, Never>?
     /// 解包好的新版本 .app
     private var stagedApp: URL?
+    /// 用户点过「稍后」的版本：自动检查不再重复打扰，手动检查会重置
+    private var declinedVersion: String?
 
     init() {
         currentVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0.0"
@@ -120,6 +122,7 @@ final class UpdateService: ObservableObject {
 
     func check(manual: Bool = false) {
         guard task == nil, !phase.isBusy else { return }
+        if manual { declinedVersion = nil }
         phase = .checking
         task = Task { [weak self] in
             guard let self else { return }
@@ -151,6 +154,7 @@ final class UpdateService: ObservableObject {
 
     /// 用户点「立即更新」
     func install(_ release: AuroraRelease) {
+        declinedVersion = nil
         guard let app = stagedApp, FileManager.default.fileExists(atPath: app.path) else {
             if let asset = release.asset {
                 // 还没下载（用户关了自动更新），先下载再问
@@ -217,7 +221,7 @@ final class UpdateService: ObservableObject {
         _ = Self.shell("/usr/bin/xattr", ["-dr", "com.apple.quarantine", app.path])
 
         phase = .ready(release)
-        if !silent {
+        if !silent, declinedVersion != release.version {
             promptInstall(release)
         }
         _ = askAfter
@@ -245,6 +249,8 @@ final class UpdateService: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn, let app = stagedApp {
             replaceAndRelaunch(with: app)
+        } else {
+            declinedVersion = release.version
         }
     }
 
@@ -292,10 +298,10 @@ final class UpdateService: ObservableObject {
     }
 
     /// 等 Aurora 退出 → 备份旧包 → ditto 新包 → 清隔离属性 → 重新打开
-    static func installScript(target: URL, staged: URL) -> String {
+    nonisolated static func installScript(target: URL, staged: URL, pid: Int32? = nil) -> String {
         let app = target.path
         let src = staged.path
-        let pid = ProcessInfo.processInfo.processIdentifier
+        let pid = pid ?? ProcessInfo.processInfo.processIdentifier
         return """
         #!/bin/sh
         LOG=/tmp/aurora-update.log

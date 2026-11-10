@@ -22,6 +22,23 @@ if CommandLine.arguments.contains("--permission-probe") {
 // Swift 包的 main 入口：以 accessory 模式常驻菜单栏
 var auroraDelegate: AppDelegate?
 
+if let index = CommandLine.arguments.firstIndex(of: "--update-script") {
+    // 开发用：打印替换脚本，便于在临时目录里验证，不碰真实安装
+    let args = CommandLine.arguments
+    guard index + 3 < args.count else {
+        print("用法：Aurora --update-script <target.app> <staged.app> <pid>")
+        exit(1)
+    }
+    let pid = Int32(args[index + 3]) ?? 1
+    let script = UpdateService.installScript(
+        target: URL(fileURLWithPath: args[index + 1]),
+        staged: URL(fileURLWithPath: args[index + 2]),
+        pid: pid
+    )
+    print(script)
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--update-test") {
     final class Box: @unchecked Sendable {
         var done = false

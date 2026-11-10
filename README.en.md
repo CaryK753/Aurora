@@ -164,6 +164,7 @@ Aurora --clip-e2e                # clipboard end-to-end: dedupe, RTF on disk, im
 Aurora --keyboard-clean-test     # clean-mode interception and unlock
 Aurora --device-test             # enumerate keyboards and pointing devices
 Aurora --update-test             # read the latest GitHub release and compare versions, no download
+Aurora --update-test --download  # also download and unpack (no prompt, no install)
 ```
 
 Regression scripts live in `Tests/`: `bash Tests/Functional/run.sh`, `Tests/Panel/run.sh`, `Tests/Preferences/run.sh`, `Tests/Permissions/run.sh`.

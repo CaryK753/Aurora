@@ -50,8 +50,9 @@ final class PanelController {
         glass.style = .regular
         glass.cornerRadius = 26
         glass.tintColor = NSColor.white.withAlphaComponent(0.03)
-        if #available(macOS 27.0, *) {
-            glass.effectIsInteractive = false
+        // macOS 27 SDK 才有 effectIsInteractive；用运行时探测，避免在旧 SDK 上编译失败
+        if glass.responds(to: Selector(("setEffectIsInteractive:"))) {
+            glass.setValue(false, forKey: "effectIsInteractive")
         }
         let bounds = NSRect(origin: .zero, size: Self.panelSize)
         glass.frame = bounds
