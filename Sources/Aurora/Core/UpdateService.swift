@@ -454,15 +454,59 @@ final class UpdateService: ObservableObject {
             }
         }
 
+        // 备用渠道拿不到 API 的 body，用 releases.atom 补更新说明（不计入 REST 限额）
+        let notes = await releaseNotesFromAtom(tag: tag) ?? ""
+
         return AuroraRelease(
             version: version,
             tag: tag,
-            notes: "",
+            notes: notes,
             publishedAt: nil,
             asset: assetURL,
             assetName: assetName,
             page: URL(string: "https://github.com/\(repository)/releases/tag/\(tag)") ?? releasesPage
         )
+    }
+
+
+    /// 从 releases.atom 取某个 tag 的正文（HTML → 纯文本），失败就返回 nil
+    nonisolated private static func releaseNotesFromAtom(tag: String) async -> String? {
+        guard let url = URL(string: "https://github.com/\(repository)/releases.atom") else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("Aurora-macOS", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 20
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let xml = String(data: data, encoding: .utf8) else { return nil }
+        // 找出含该 tag 的 <entry>，取其中的 <content type="html">…</content>
+        let entries = xml.components(separatedBy: "<entry>")
+        guard let entry = entries.first(where: { $0.contains("/releases/tag/\(tag)") }) else { return nil }
+        guard let open = entry.range(of: "<content"),
+              let openEnd = entry.range(of: ">", range: open.lowerBound..<entry.endIndex)?.upperBound,
+              let close = entry.range(of: "</content>", range: openEnd..<entry.endIndex) else { return nil }
+        let html = String(entry[openEnd..<close.lowerBound])
+        let text = htmlToPlainText(html)
+        return text.isEmpty ? nil : text
+    }
+
+    /// 极简 HTML → 文本：去标签、解实体、压空行
+    nonisolated private static func htmlToPlainText(_ html: String) -> String {
+        var text = html
+        // 换行标签转成换行
+        for tag in ["</p>", "<br>", "<br/>", "<br />", "</li>", "</h1>", "</h2>", "</h3>"] {
+            text = text.replacingOccurrences(of: tag, with: "\n", options: .caseInsensitive)
+        }
+        text = text.replacingOccurrences(of: "<li>", with: "· ", options: .caseInsensitive)
+        // 去掉剩余标签
+        text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        // 常用实体
+        let entities = ["&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"", "&#39;": "'", "&nbsp;": " "]
+        for (key, value) in entities { text = text.replacingOccurrences(of: key, with: value) }
+        // 压掉多余空行
+        let lines = text.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return lines.joined(separator: "\n")
     }
 
     /// 从 expanded_assets 的 HTML 里提取 /releases/download/... 链接
