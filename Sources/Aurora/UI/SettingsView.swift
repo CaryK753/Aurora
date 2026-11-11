@@ -214,7 +214,7 @@ struct SettingsView: View {
                 Text(T("参考项目"))
                     .font(.system(size: 8.5))
                     .foregroundStyle(.tertiary)
-                + Text(" LinearMouse · MonitorControl · Stats · Mos · RClick · Maccy · KeepingYouAwake · switchaudio-osx · CodexBar")
+                + Text(" LinearMouse · MonitorControl · Stats · Mos · RClick · Maccy · KeepingYouAwake · switchaudio-osx · CodexBar · QuickRecorder · Recordly · Snapzy")
                     .font(.system(size: 8.5))
                     .foregroundStyle(.tertiary)
             }

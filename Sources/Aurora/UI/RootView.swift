@@ -12,12 +12,14 @@ struct AuroraRootView: View {
     @Environment(\.colorScheme) private var scheme
     /// 内容是否已经滚到标题栏下面：只有这时才铺模糊层，静止时保持通透
     @State private var scrolledUnderHeader = true
-    // ⌘ + 拖动侧边栏排序；拖出窗口松手停用模块（原生拖动会话，可拖到屏幕任意位置）
+    // ⌘ + 拖动侧边栏排序；拖出窗口松手停用模块（窗口级事件监听，可拖到屏幕任意位置）
     @State private var railFrames: [String: CGRect] = [:]
     @State private var draggingModule: AuroraModule?
     @State private var dragCoordinator = RailDragCoordinator()
+    @State private var dragDownMonitor: Any?
     /// 捕获按键时呼吸的小圆点
     @State private var capturePulse = false
+    /// 快捷键页走 state.showHotkeys（与设置页同层的单层内容页）
     /// 主内容区宽度：传给各模块做自适应排版
     @State private var contentWidth: CGFloat = PanelController.panelSize.width - 54 - 28
 
@@ -43,6 +45,12 @@ struct AuroraRootView: View {
                     .background {
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                             .fill(.ultraThinMaterial)
+                            .overlay {
+                                // 材质模糊在玻璃窗口上不可靠，垫一层主题色底保证可读；
+                                // 迁移页卡片稀疏、内容又不多，底色要接近不透明
+                                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                    .fill(scheme == .light ? Color.white.opacity(0.95) : Color.black.opacity(0.92))
+                            }
                     }
                     .transition(.move(edge: .trailing).combined(with: .opacity))
                     .zIndex(2)
@@ -92,9 +100,28 @@ struct AuroraRootView: View {
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .opacity(appeared ? 1 : 0)
         .onAppear {
+            dragCoordinator.hitModule = { point in
+                let railPoint = railPoint(from: point)
+                // 只接管落在侧栏 54pt 宽度内的按下，别误伤内容区的 ⌘ + 点击
+                guard railPoint.x >= 0, railPoint.x <= 60 else { return nil }
+                guard let index = dropIndex(at: railPoint) else { return nil }
+                let middle = state.visibleModules.filter(\.isToggleable)
+                return middle[safe: index]
+            }
             dragCoordinator.onMove = { module, point in handleDragMove(module, to: point) }
             dragCoordinator.onEnd = { module, point in handleDragEnd(module, at: point) }
+            if dragDownMonitor == nil {
+                // ⌘ + 按下侧栏图标 → 接管为拖动排序；其余点击原样放行
+                dragDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+                    if dragCoordinator.mouseDown(at: NSEvent.mouseLocation) { return nil }
+                    return event
+                }
+            }
             Debug.log("root appeared")
+            // 调试钩子：AURORA_SHOW_HOTKEYS=1 时直接打开快捷键页（供快照预览）
+            if ProcessInfo.processInfo.environment["AURORA_SHOW_HOTKEYS"] == "1" {
+                state.showHotkeys = true
+            }
             withAnimation(.smooth(duration: 0.25)) { appeared = true }
         }
     }
@@ -116,6 +143,11 @@ struct AuroraRootView: View {
                         .frame(width: 20, height: 1)
                         .padding(.vertical, 4)
                 }
+                // 设置按钮上方放一个快捷键入口
+                if module == .settings {
+                    hotkeyRailButton
+                        .padding(.bottom, 2)
+                }
                 railButton(module)
                     .opacity(draggingModule == module ? 0.32 : 1)
                     .background {
@@ -125,9 +157,6 @@ struct AuroraRootView: View {
                                 value: [module.rawValue: proxy.frame(in: .named("auroraRail"))]
                             )
                         }
-                    }
-                    .overlay {
-                        RailDragHandle(module: module, coordinator: dragCoordinator)
                     }
             }
             Spacer(minLength: 0)
@@ -196,7 +225,9 @@ struct AuroraRootView: View {
     }
 
     private func handleDragMove(_ module: AuroraModule, to screenPoint: CGPoint) {
-        draggingModule = module
+        withAnimation(.smooth(duration: 0.14)) {
+            draggingModule = module
+        }
         guard let index = dropIndex(at: railPoint(from: screenPoint)) else { return }
         state.settings.moveModule(module, to: index)
     }
@@ -268,12 +299,44 @@ struct AuroraRootView: View {
         .accessibilityLabel(T(module.title))
     }
 
+    /// 全局快捷键设置入口（与设置页同层的单层内容页）
+    private var hotkeyRailButton: some View {
+        Button {
+            withAnimation(.smooth(duration: 0.22)) { state.showHotkeys = true }
+        } label: {
+            ZStack {
+                if state.showHotkeys {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(AuroraTheme.accent.opacity(0.16))
+                }
+                Image(systemName: "command.square")
+                    .font(.system(size: 14, weight: .regular))
+                    .foregroundStyle(state.showHotkeys ? AnyShapeStyle(AuroraTheme.accent) : AnyShapeStyle(Color.secondary))
+            }
+            .frame(width: 36, height: 32)
+        }
+        .buttonStyle(.plain)
+        .help(T("全局快捷键"))
+    }
+
     // MARK: - 顶部
 
     private var header: some View {
         HStack(spacing: 9) {
-            Text(T(state.module.title))
+            Text(T(state.showHotkeys ? "全局快捷键" : state.module.title))
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .lineLimit(1)
+                .layoutPriority(1)
+
+            if !state.showHotkeys, state.module.isBeta {
+                Text("Beta")
+                    .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                    .foregroundStyle(AuroraTheme.accent)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(Capsule().fill(AuroraTheme.accent.opacity(0.14)))
+                    .help(T("功能仍在完善，欢迎反馈"))
+            }
 
             Spacer(minLength: 4)
 
@@ -375,31 +438,39 @@ struct AuroraRootView: View {
     private var content: some View {
         ScrollView(.vertical) {
             VStack(spacing: 12) {
-                switch state.module {
-                case .overview:
-                    OverviewView(state: state)
-                case .display:
-                    DisplayView(state: state)
-                case .pointer:
-                    PointerView(state: state)
-                case .trackpad:
-                    TrackpadView(service: state.trackpad)
-                case .keyboard:
-                    KeyboardView(state: state)
-                case .menu:
-                    ContextMenuView(state: state)
-                case .desktop:
-                    DesktopView(state: state)
-                case .clipboard:
-                    ClipboardView(state: state)
-                case .energy:
-                    EnergyView(state: state)
-                case .audio:
-                    AudioView(state: state)
-                case .ai:
-                    AIView(state: state)
-                case .settings:
-                    SettingsView(state: state)
+                if state.showHotkeys {
+                    HotkeySettingsView(hotkeys: state.hotkeys)
+                } else {
+                    switch state.module {
+                    case .overview:
+                        OverviewView(state: state)
+                    case .display:
+                        DisplayView(state: state)
+                    case .pointer:
+                        PointerView(state: state)
+                    case .trackpad:
+                        TrackpadView(service: state.trackpad)
+                    case .keyboard:
+                        KeyboardView(state: state)
+                    case .menu:
+                        ContextMenuView(state: state)
+                    case .desktop:
+                        DesktopView(state: state)
+                    case .clipboard:
+                        ClipboardView(state: state)
+                    case .screenshot:
+                        ScreenshotView(state: state)
+                    case .recorder:
+                        RecorderView(state: state)
+                    case .energy:
+                        EnergyView(state: state)
+                    case .audio:
+                        AudioView(state: state)
+                    case .ai:
+                        AIView(state: state)
+                    case .settings:
+                        SettingsView(state: state)
+                    }
                 }
             }
             .padding(.top, 54)

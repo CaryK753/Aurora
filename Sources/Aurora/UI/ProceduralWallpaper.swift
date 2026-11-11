@@ -43,16 +43,17 @@ struct ProceduralWallpaperView: View {
     /// 用户自定义的色相偏移（度），0 = 默认配色
     var hueShift: Double = 0
 
+    @ObservedObject private var clock = ProceduralClock.shared
+
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
-            ZStack {
-                backdrop
-                scene(t: t)
-            }
+        ZStack {
+            backdrop
+            scene(t: clock.time)
         }
         .clipped()
         .ignoresSafeArea()
+        .onAppear { clock.retain() }
+        .onDisappear { clock.release() }
     }
 
     private var backdrop: some View {
@@ -240,5 +241,46 @@ struct ProceduralStaticPreview: View {
                 endPoint: .bottom
             )
         }
+    }
+}
+
+// MARK: - 动画时钟
+//
+// 桌面层窗口（desktopWindow + 1）会被桌面图标层盖住，SwiftUI 的
+// TimelineView(.animation) 在"被遮挡"的窗口里会暂停刷新——表现就是
+// 程序化壁纸设上去以后完全静止。这里用自建 Timer 驱动时间，
+// 不依赖窗口可见性，只要视图在刷新就会重绘。
+
+@MainActor
+final class ProceduralClock: ObservableObject {
+    static let shared = ProceduralClock()
+
+    /// 绝对时间（秒），与之前 TimelineView 的 date 语义一致
+    @Published private(set) var time: Double = Date().timeIntervalSinceReferenceDate
+
+    private var timer: Timer?
+    private var users = 0
+    // 壁纸是缓慢漂移的渐变，20fps 足够顺滑，也能省电
+    private let fps: Double = 20
+
+    func retain() {
+        users += 1
+        guard timer == nil else { return }
+        let interval = 1.0 / fps
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.time = Date().timeIntervalSinceReferenceDate
+            }
+        }
+        timer.tolerance = interval * 0.35
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func release() {
+        users = max(0, users - 1)
+        guard users == 0 else { return }
+        timer?.invalidate()
+        timer = nil
     }
 }

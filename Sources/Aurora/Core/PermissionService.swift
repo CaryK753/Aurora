@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Combine
 import CoreGraphics
+import UserNotifications
 
 @MainActor
 final class PermissionService: ObservableObject {
@@ -19,6 +20,8 @@ final class PermissionService: ObservableObject {
     @Published private(set) var screenRecording = false
     @Published private(set) var inputMonitoring = false
     @Published private(set) var fullDiskAccess = false
+    /// 通知授权（更新、录制完成等即时提醒）
+    @Published private(set) var notifications = false
     @Published private(set) var lastCheck = Date.distantPast
     @Published private(set) var isChecking = false
     @Published private(set) var checkError: String?
@@ -70,6 +73,14 @@ final class PermissionService: ObservableObject {
         screenRecording = statuses["screen"] == .granted
         inputMonitoring = statuses["input"] == .granted
         fullDiskAccess = statuses["disk"] == .granted
+        // 通知状态由 NotificationService 缓存，这里只读，避免每 3 秒打一次 UN 接口
+        let notify = NotificationService.shared
+        notifications = notify.authorized
+        switch notify.status {
+        case .authorized, .provisional, .ephemeral: statuses["notifications"] = .granted
+        case .denied: statuses["notifications"] = .denied
+        default: statuses["notifications"] = .unknown
+        }
         lastCheck = Date()
     }
 
@@ -98,12 +109,15 @@ final class PermissionService: ObservableObject {
             Item(id: "accessibility", title: T("辅助功能"), subtitle: T("鼠标调校、侧键动作与粘贴"), symbol: "accessibility",
                  state: statuses["accessibility"] ?? .unknown, pane: "Privacy_Accessibility",
                  prompt: { [weak self] in self?.requestAccessibility() }),
-            Item(id: "screen", title: T("屏幕录制"), subtitle: T("仅截图动作需要，可稍后授权"), symbol: "rectangle.dashed.badge.record",
+            Item(id: "screen", title: T("屏幕录制"), subtitle: T("截图与录屏共用，可稍后授权"), symbol: "rectangle.dashed.badge.record",
                  state: statuses["screen"] ?? .unknown, pane: "Privacy_ScreenCapture",
                  prompt: { [weak self] in self?.requestScreenRecording() }),
             Item(id: "input", title: T("输入监控"), subtitle: T("读取原始设备事件，可选"), symbol: "keyboard",
                  state: statuses["input"] ?? .unknown, pane: "Privacy_ListenEvent",
                  prompt: { [weak self] in self?.requestInputMonitoring() }),
+            Item(id: "notifications", title: T("通知"), subtitle: T("新版本、录制完成等即时提醒，可稍后授权"), symbol: "bell.badge",
+                 state: statuses["notifications"] ?? .unknown, pane: "Notifications",
+                 prompt: { [weak self] in self?.requestNotifications() }),
             Item(id: "disk", title: T("完全磁盘访问"), subtitle: T("读取受保护的本地用量或配置，可选"), symbol: "externaldrive.badge.checkmark",
                  state: statuses["disk"] ?? .unknown, pane: "Privacy_AllFiles", prompt: nil)
         ]
@@ -123,6 +137,16 @@ final class PermissionService: ObservableObject {
     func requestInputMonitoring() {
         _ = CGRequestListenEventAccess()
         openPane("Privacy_ListenEvent")
+    }
+
+    func requestNotifications() {
+        Task { [weak self] in
+            let granted = await NotificationService.shared.request()
+            guard let self else { return }
+            NotificationService.shared.refresh()
+            self.refresh()
+            if !granted { self.openPane("Notifications") }
+        }
     }
 
     func openPane(_ anchor: String) {

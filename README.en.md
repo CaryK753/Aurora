@@ -4,7 +4,7 @@
 
 **Everything you tweak on macOS, in one menu bar panel**
 
-Display & screen tests · Mouse & keyboard · Finder context menu · Clipboard · Keep-awake · Audio · AI usage · External devices
+Display & screen tests · Mouse & keyboard · Finder context menu · Clipboard · Screenshots & recording · Dynamic wallpaper · Keep-awake · Audio · AI usage · External devices
 
 [![CI](https://github.com/CaryK753/Aurora/actions/workflows/ci.yml/badge.svg)](https://github.com/CaryK753/Aurora/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/CaryK753/Aurora?label=release)](https://github.com/CaryK753/Aurora/releases/latest)
@@ -43,6 +43,8 @@ Three rules shaped the implementation:
 | **Menu** | A **real custom Finder context menu** built on a FinderSync extension: copy path, open in Terminal, open with app, run command, create file — add, edit, reorder, toggle individually, effective immediately. Also manages Quick Actions, Services and Finder extensions |
 | **Desktop** | Show or hide desktop icons, hide files and extensions, restart Finder. **Dynamic wallpaper**: looping video / GIF (with head-tail trimming), four auto rules — one fixed, follow Light/Dark appearance (soft cross-fade), time-of-day schedule, shuffle; four built-in **procedural dynamic scenes** (Aurora / Waves / Glow / Sunset — no disk space, recolorable); drag-and-drop library with type filters, full-screen preview, five fill modes (fill / fit / stretch / center / tile), per-display settings; bundled Apple wallpapers (including aerial videos the system has downloaded), an online sources section (Unsplash / Pixabay / Wallhaven / NASA / Coverr) and download-by-URL |
 | **Clipboard** | Six record types — text, rich text, link, image, file, colour; search, filter, pinning, duplicate merging with counts, keyboard copy/paste, paste as plain text, edit and detail views; ignore rules for confidential types, apps, regex and one-shot skips; recording pauses automatically while secure input is active |
+| **Screenshots** | Area, window (hover to highlight, click to capture the whole window), full screen and scrolling capture; global ⌥⌘S. The editor ships 13 tools (select/move, pen, line, arrow, rectangle, filled rectangle, ellipse, highlighter, gaussian blur, mosaic, spotlight, step counter, text), snapshot-based undo/redo, Apple device bezels with automatic model detection, and AirDrop to an iPhone or iPad for markup, then retrieve the result |
+| **Recording** (Beta) | Record a whole display, a specific window, or a dragged region; system audio and microphone are muxed into one MP4 as two audio tracks — never more than one output file. Pause/resume remaps timestamps so the result has no gaps and audio stays in sync. Picture-in-picture camera bubble, mouse-click highlights and live keystrokes. Frame rate, H.265/H.264, native Retina pixels, pointer visibility; ⌥⌘R toggles recording and a draggable floating bar lets you switch sources |
 | **Energy** | Keep the Mac awake from 15 minutes to 2 hours, optionally keep the display on; stop automatically under 20% battery; start at login; **remember the state** — if keep-awake was still on when you quit, the next launch restores it (optional) |
 | **Audio** | Input/output device switching, volume and mute, **per-app volume** (0–150%) |
 | **AI usage** | Per-harness adapters: Codex (rollout logs plus real quota windows), Claude Code, opencode, WorkBuddy and more; desktop clients are detected and reported honestly. Aggregates the last 7 days, today and the 5-hour window |
@@ -110,7 +112,7 @@ Useful flags:
 ```bash
 AURORA_INSTALL=0 ./build.sh release       # package only
 AURORA_UNIVERSAL=1 ./build.sh release     # arm64 + x86_64
-AURORA_VERSION=1.2.0 AURORA_BUILD=120 ./build.sh release
+AURORA_VERSION=1.3.0 AURORA_BUILD=130 ./build.sh release
 AURORA_SIGN_ID="Apple Development: ..." ./build.sh release
 ```
 
@@ -126,6 +128,7 @@ The first launch walks you through three steps: what Aurora does, which modules 
 | Screen Recording | Screenshot actions, window previews | Screenshot features only |
 | Input Monitoring | Raw buttons from external mice | External mouse macros only |
 | Full Disk Access | Reading other apps' settings and local usage databases | Optional |
+| Notifications | Instant alerts for new versions, finished recordings, saved screenshots and finished breaks | Optional |
 
 Permission state is re-checked every 3 seconds and can be refreshed manually from **Settings › Permissions**. If the system says a permission is granted but Aurora disagrees, remove the old Aurora entry and add `/Applications/Aurora.app` again.
 
@@ -138,6 +141,9 @@ Permission state is re-checked every 3 seconds and can be refreshed manually fro
 | **⌘ + drag a sidebar icon** | Reorder modules; drop outside the panel to be asked whether to disable it |
 | **⌘1 – ⌘9** | Copy a pinned clipboard entry (add ⌥ to paste into the previous app) |
 | **⌃⌥⌘K** | Leave keyboard clean mode |
+| **⇧⌘V** | Open the mini clipboard (↑↓ to select, ⏎ to paste, ⌘1–9 to paste directly, ⌘⌫ to delete) |
+| **⌥⌘S** | Area screenshot, straight into the annotation editor |
+| **⌥⌘R** | Start / stop screen recording |
 | **ESC** | Close the panel, exit a screen test, or cancel a button capture |
 | **⌘W / ⌘M** | Close / minimize once the panel is pinned as a window |
 
@@ -233,4 +239,7 @@ Interactions and feature sets were inspired by these projects — ideas and conf
 [KeepingYouAwake](https://github.com/newmarcel/KeepingYouAwake) ·
 [switchaudio-osx](https://github.com/deweller/switchaudio-osx) ·
 [CodexBar](https://github.com/steipete/CodexBar) ·
-[usage](https://github.com/aqua5230/usage)
+[usage](https://github.com/aqua5230/usage) ·
+[QuickRecorder](https://github.com/lihaoyun6/QuickRecorder) ·
+[Recordly](https://github.com/webadderallorg/Recordly) ·
+[Snapzy](https://github.com/duongductrong/Snapzy)

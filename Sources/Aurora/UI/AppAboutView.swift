@@ -15,7 +15,7 @@ struct AppAboutView: View {
         VStack(alignment: .leading, spacing: 11) {
             identity
 
-            Text(T("一站式 Mac 优化与增强工具，把显示、鼠标、触控板、剪贴板、声音与节能管理收进菜单栏。"))
+            Text(T("一站式 Mac 优化与增强工具：显示、鼠标、触控板、键盘、剪贴板、声音、节能，以及截图、录屏与动态壁纸，全部收进菜单栏。"))
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

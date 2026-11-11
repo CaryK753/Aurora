@@ -112,7 +112,8 @@ struct WallpaperItem: Identifiable, Codable, Equatable, Hashable {
 
     var url: URL { URL(fileURLWithPath: path) }
 
-    var fileExists: Bool { FileManager.default.fileExists(atPath: path) }
+    /// 程序生成的场景没有文件，永远视为「存在」，否则 apply() 会被 guard 挡掉导致设置无反应
+    var fileExists: Bool { kind == .procedural || FileManager.default.fileExists(atPath: path) }
 
     var byteText: String {
         guard bytes > 0 else { return "" }

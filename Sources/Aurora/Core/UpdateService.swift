@@ -46,7 +46,10 @@ enum UpdateError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .network: return T("网络不可用")
-        case .server(let code): return TF("服务器返回 %d", code)
+        case .server(let code):
+            // GitHub API 未认证限额（60 次/小时/IP）耗尽会返回 403，与网络无关
+            if code == 403 { return T("GitHub 接口被限流（403），备用渠道也不可用，请稍后再试") }
+            return TF("服务器返回 %d", code)
         case .decode: return T("返回内容无法解析")
         case .noAsset: return T("这个版本没有可下载的安装包")
         case .unpack: return T("安装包解压失败")
@@ -56,9 +59,9 @@ enum UpdateError: LocalizedError {
 
 @MainActor
 final class UpdateService: ObservableObject {
-    static let repository = "CaryK753/Aurora"
-    static let homepage = URL(string: "https://github.com/CaryK753/Aurora")!
-    static let releasesPage = URL(string: "https://github.com/CaryK753/Aurora/releases")!
+    nonisolated static let repository = "CaryK753/Aurora"
+    nonisolated static let homepage = URL(string: "https://github.com/CaryK753/Aurora")!
+    nonisolated static let releasesPage = URL(string: "https://github.com/CaryK753/Aurora/releases")!
     /// 自动检查间隔：一小时
     static let checkInterval: TimeInterval = 3600
 
@@ -222,6 +225,7 @@ final class UpdateService: ObservableObject {
 
         phase = .ready(release)
         if !silent, declinedVersion != release.version {
+            NotificationService.shared.notifyUpdateReady(version: release.version, currentVersion: currentVersion)
             promptInstall(release)
         }
         _ = askAfter
@@ -341,6 +345,21 @@ final class UpdateService: ObservableObject {
     // MARK: - 远端
 
     nonisolated static func fetchLatest() async throws -> AuroraRelease? {
+        do {
+            return try await fetchViaAPI()
+        } catch let error as UpdateError {
+            switch error {
+            case .server(403), .server(429):
+                // API 限额耗尽（403/429）走网页渠道：releases/latest 重定向拿 tag
+                return try await fetchViaWeb()
+            default:
+                throw error
+            }
+        }
+    }
+
+    /// 主渠道：GitHub REST API（信息最全，但未认证每小时只有 60 次/IP）
+    nonisolated private static func fetchViaAPI() async throws -> AuroraRelease? {
         var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(repository)/releases/latest")!)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Aurora-macOS", forHTTPHeaderField: "User-Agent")
@@ -389,6 +408,70 @@ final class UpdateService: ObservableObject {
             assetName: assetName,
             page: page
         )
+    }
+
+    /// 备用渠道：不经过 api.github.com，不受 REST 限额约束
+    /// 1) releases/latest 会 302 到 /releases/tag/<tag>，从最终 URL 解析 tag；
+    /// 2) 再拉 expanded_assets/<tag> 页面，从 HTML 里解析安装包下载链接。
+    nonisolated private static func fetchViaWeb() async throws -> AuroraRelease? {
+        var request = URLRequest(url: URL(string: "https://github.com/\(repository)/releases/latest")!)
+        request.setValue("Aurora-macOS", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 20
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw UpdateError.network }
+        guard (200..<300).contains(http.statusCode) else { throw UpdateError.server(http.statusCode) }
+        guard let finalURL = response.url else { throw UpdateError.decode }
+
+        let parts = finalURL.path.split(separator: "/").map(String.init)
+        // /releases/latest 没有重定向（仓库还没有 release）时最后一节就是 latest
+        guard let tag = parts.last, tag != "latest", parts.count >= 2, parts[parts.count - 2] == "tag" else {
+            return nil
+        }
+        let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+
+        var assetURL: URL?
+        var assetName: String?
+        if let assetsURL = URL(string: "https://github.com/\(repository)/releases/expanded_assets/\(tag)") {
+            var assetsRequest = URLRequest(url: assetsURL)
+            assetsRequest.setValue("Aurora-macOS", forHTTPHeaderField: "User-Agent")
+            assetsRequest.timeoutInterval = 20
+            if let (data, assetsResponse) = try? await URLSession.shared.data(for: assetsRequest),
+               let assetsHTTP = assetsResponse as? HTTPURLResponse, assetsHTTP.statusCode == 200,
+               let html = String(data: data, encoding: .utf8) {
+                for link in Self.downloadLinks(in: html) {
+                    let lower = link.lowercased()
+                    if lower.hasSuffix(".zip") {
+                        assetURL = URL(string: link)
+                        assetName = (link as NSString).lastPathComponent
+                        break
+                    }
+                    if lower.hasSuffix(".dmg"), assetURL == nil {
+                        assetURL = URL(string: link)
+                        assetName = (link as NSString).lastPathComponent
+                    }
+                }
+            }
+        }
+
+        return AuroraRelease(
+            version: version,
+            tag: tag,
+            notes: "",
+            publishedAt: nil,
+            asset: assetURL,
+            assetName: assetName,
+            page: URL(string: "https://github.com/\(repository)/releases/tag/\(tag)") ?? releasesPage
+        )
+    }
+
+    /// 从 expanded_assets 的 HTML 里提取 /releases/download/... 链接
+    nonisolated private static func downloadLinks(in html: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: #"/[^"\s<>]+/releases/download/[^"\s<>]+"#) else { return [] }
+        let range = NSRange(html.startIndex..., in: html)
+        return regex.matches(in: html, range: range)
+            .compactMap { Range($0.range, in: html).map { String(html[$0]) } }
+            .map { $0.hasPrefix("http") ? $0 : "https://github.com\($0)" }
     }
 
     /// 开发诊断：只拉远端信息，不下载

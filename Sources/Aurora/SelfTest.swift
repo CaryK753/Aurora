@@ -2,6 +2,7 @@
 //  Aurora — 自检模式：`Aurora --selftest` 逐项验证底层能力是否可用
 
 import AppKit
+import AVFoundation
 import ApplicationServices
 import os
 import CoreAudio
@@ -821,5 +822,137 @@ enum SelfTest {
             print("  · \(device.name) · \(device.transportLabel) · \(device.vendorLabel) · 电量 \(device.battery.map { "\($0)%" } ?? "—")")
         }
         return service.keyboards.isEmpty ? 1 : 0
+    }
+
+    /// 画布交互自测：用合成鼠标事件驱动 CanvasMouseNSView，
+    /// 确认「按住拖动」能连续出点、形状只保留起终点、单击不出图形。
+    static func canvasInteraction() -> Int32 {
+        var failures = 0
+        func check(_ name: String, _ ok: Bool, _ detail: String) {
+            print(ok ? "✓ \(name)：\(detail)" : "✗ \(name)：\(detail)")
+            if !ok { failures += 1 }
+        }
+
+        func makeView(tool: AnnotationTool, onDraft: @escaping (Annotation?) -> Void,
+                      onCommit: @escaping (Annotation) -> Void) -> CanvasMouseNSView {
+            let view = CanvasMouseNSView()
+            view.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
+            view.representable = CanvasMouseView(
+                tool: tool, color: .red, strokeWidth: 4, annotations: [], draft: nil,
+                onDraft: onDraft, onCommit: onCommit, onMoveStart: {}, onMove: { _, _ in },
+                onSelect: { _ in }, onTap: { _ in }
+            )
+            return view
+        }
+
+        func event(_ type: NSEvent.EventType, at point: NSPoint) -> NSEvent {
+            NSEvent.mouseEvent(
+                with: type, location: point, modifierFlags: [], timestamp: 0,
+                windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1
+            )!
+        }
+
+        // 1. 画笔：按住拖过 10 个点
+        var drafts: [Int] = []
+        var committed: Annotation?
+        let pen = makeView(tool: .pen, onDraft: { draft in
+            if case .stroke(let stroke)? = draft { drafts.append(stroke.points.count) }
+        }, onCommit: { committed = $0 })
+        pen.mouseDown(with: event(.leftMouseDown, at: NSPoint(x: 100, y: 150)))
+        for step in 1...10 {
+            pen.mouseDragged(with: event(.leftMouseDragged, at: NSPoint(x: 100 + CGFloat(step) * 12, y: 150 + CGFloat(step) * 4)))
+        }
+        pen.mouseUp(with: event(.leftMouseUp, at: NSPoint(x: 220, y: 190)))
+        if case .stroke(let stroke)? = committed {
+            check("画笔拖动累积点", stroke.points.count >= 8, "\(stroke.points.count) 点，草稿回调 \(drafts.count) 次")
+            check("画笔首点正确", abs(stroke.points[0].x - 0.25) < 0.01, "x=\(String(format: "%.3f", stroke.points[0].x))")
+        } else {
+            check("画笔拖动累积点", false, "没有提交笔画")
+        }
+
+        // 2. 矩形：拖拽过程中只保留起终点
+        var rectDraftCounts: [Int] = []
+        var rectCommitted: Annotation?
+        let rect = makeView(tool: .rect, onDraft: { draft in
+            if case .stroke(let stroke)? = draft { rectDraftCounts.append(stroke.points.count) }
+        }, onCommit: { rectCommitted = $0 })
+        rect.mouseDown(with: event(.leftMouseDown, at: NSPoint(x: 50, y: 50)))
+        for step in 1...6 {
+            rect.mouseDragged(with: event(.leftMouseDragged, at: NSPoint(x: 50 + CGFloat(step) * 10, y: 50 + CGFloat(step) * 10)))
+        }
+        rect.mouseUp(with: event(.leftMouseUp, at: NSPoint(x: 110, y: 110)))
+        if case .stroke(let stroke)? = rectCommitted {
+            check("矩形只保留两点", stroke.points.count == 2, "\(stroke.points.count) 点，草稿点数 \(rectDraftCounts)")
+            check("矩形跟随拖动", abs(stroke.points[1].x - 0.275) < 0.02, "终点 x=\(String(format: "%.3f", stroke.points[1].x))")
+        } else {
+            check("矩形只保留两点", false, "没有提交矩形")
+        }
+
+        // 3. 单击（无拖动）不应产生标注
+        var clickCommitted = false
+        let pen2 = makeView(tool: .pen, onDraft: { _ in }, onCommit: { _ in clickCommitted = true })
+        pen2.mouseDown(with: event(.leftMouseDown, at: NSPoint(x: 30, y: 30)))
+        pen2.mouseUp(with: event(.leftMouseUp, at: NSPoint(x: 30, y: 30)))
+        check("单击不成形", !clickCommitted, clickCommitted ? "单击却提交了标注" : "已忽略")
+
+        return failures == 0 ? 0 : 1
+    }
+
+    /// 录屏往返自测：真录 N 秒 → 停止 → 校验落盘的 mp4 有视频轨且大小正常
+    static func recorderRoundTrip(seconds: Double) -> Int32 {
+        let service = RecorderService.shared
+        guard service.hasScreenPermission else {
+            print("✗ 没有屏幕录制权限，跳过")
+            return 2
+        }
+        // 自测不碰麦克风 / 摄像头，避免弹权限框
+        service.recordMic = false
+        service.pipCamera = false
+        service.highlightClicks = false
+        service.showKeystrokes = false
+        // 源列表是异步扫描的，等它出来再开始
+        var waited = 0.0
+        while service.sources.isEmpty && waited < 5 {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            waited += 0.1
+            if waited > 1.5 { service.refreshSources() }
+        }
+        guard !service.sources.isEmpty else { print("✗ 没有可用录制源（可能未授权屏幕录制）"); return 2 }
+        service.start()
+
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if let error = service.lastError { print("✗ 启动失败：\(error)"); return 1 }
+            if service.isRecording { break }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        guard service.isRecording else { print("✗ 录制没有开始"); return 1 }
+
+        let stopAt = Date().addingTimeInterval(seconds)
+        while Date() < stopAt { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+        service.stop()
+
+        let finishDeadline = Date().addingTimeInterval(20)
+        while service.lastMovieURL == nil && service.lastError == nil && Date() < finishDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        guard let url = service.lastMovieURL else {
+            print("✗ 保存失败：\(service.lastError ?? "未知错误")")
+            return 1
+        }
+        let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+        var detail = ""
+        var ok = size > 10_000
+        let asset = AVURLAsset(url: url)
+        let tracks = asset.tracks
+        let video = tracks.filter { $0.mediaType == .video }
+        let audio = tracks.filter { $0.mediaType == .audio }
+        if video.isEmpty { ok = false }
+        let duration = CMTimeGetSeconds(asset.duration)
+        detail = "大小 \(size) 字节 · 视频轨 \(video.count) · 音频轨 \(audio.count) · 时长 \(String(format: "%.1f", duration))s"
+        print(ok ? "✓ 录制保存成功：\(url.lastPathComponent) \(detail)" : "✗ 录制文件异常：\(detail)")
+        // 清理自测文件
+        try? FileManager.default.removeItem(at: url)
+        return ok ? 0 : 1
     }
 }

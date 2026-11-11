@@ -4,7 +4,7 @@
 
 **把 macOS 的日常设置，收进一个菜单栏面板**
 
-显示器与屏幕检测 · 鼠标与键盘 · 右键菜单 · 剪贴板 · 胶囊式休眠 · 声音 · AI 用量 · 外部设备
+显示器与屏幕检测 · 鼠标与键盘 · 右键菜单 · 剪贴板 · 截图与录屏 · 动态壁纸 · 胶囊式休眠 · 声音 · AI 用量 · 外部设备
 
 [![CI](https://github.com/CaryK753/Aurora/actions/workflows/ci.yml/badge.svg)](https://github.com/CaryK753/Aurora/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/CaryK753/Aurora?label=release)](https://github.com/CaryK753/Aurora/releases/latest)
@@ -22,6 +22,8 @@
 Aurora 是一个常驻菜单栏的原生 macOS 工具，用 SwiftUI 写成，界面是 macOS 26 的液态玻璃（Liquid Glass）。它把平时散落在「系统设置」、终端命令和一堆小工具里的操作合并到一个面板：点一下菜单栏图标，或者按 **⌥⌘A**。
 
 默认是个点外面就收起的浮动面板；右上角的 **固定** 按钮可以让它变成正经的 macOS 窗口——左上角换成系统红绿灯，能最小化、能按 ⌘W 关掉，点别处也不会消失。取消固定立刻变回去。固定状态下窗口可以拖边缘调整大小（有上下限），绿钮进入 macOS 原生全屏，红绿灯与界面元素精确对齐；窗口拉宽后各模块卡片自动排成两列，充分利用空间。
+
+截图与录屏说明：截图编辑器支持 13 种标注、长截图、带壳与 AirDrop 到 iPhone / iPad 标注；录屏输出永远是单个 MP4（系统声音与麦克风各一条音轨），支持框选区域、暂停恢复与画中画摄像头，目前标记为 Beta。
 
 动态壁纸说明：画面画在桌面层（Finder 壁纸之上、桌面图标之下），鼠标点击全部穿透；退出 Aurora 或关掉开关即还原系统壁纸，不动系统设置。锁屏 / 登录界面仍显示系统壁纸。
 
@@ -43,6 +45,8 @@ Aurora 是一个常驻菜单栏的原生 macOS 工具，用 SwiftUI 写成，界
 | **菜单** | 内置 FinderSync 扩展实现的**自定义右键菜单**：复制路径、在终端打开、用指定 App 打开、运行命令、新建文件，可增删改、排序、单独开关，改完即时生效；同时管理系统的快速操作 / 服务 / Finder 扩展 |
 | **桌面** | 隐藏或显示桌面图标、隐藏文件与扩展名、重启访达；**动态壁纸**：视频 / GIF 循环播放（可掐头去尾），支持固定一张、跟随浅色 / 深色外观（柔和过渡）、按一天内时间点、随机轮播四种自动规则；内置 4 个**程序生成动态场景**（极光 / 波浪 / 流光 / 暮色，不占磁盘、可自定义配色）；壁纸库直接拖入文件、按类型筛选、全屏预览、五种填充方式（填充 / 适应 / 拉伸 / 居中 / 平铺）、每个显示器独立设置；内置 Apple 壁纸库（含系统下载的航拍动态视频），外部壁纸库收录 Unsplash / Pixabay / Wallhaven / NASA / Coverr，可从直链下载 |
 | **剪贴板** | 文本 / 富文本 / 链接 / 图片 / 文件 / 颜色六类记录；搜索、筛选、固定置顶、重复合并计数、快捷键复制与粘贴、纯文本粘贴、编辑与详情；忽略规则支持机密类型、指定 App、正则与单次忽略；输入密码时自动暂停记录 |
+| **截图** | 区域截图、窗口截图（悬停高亮、单击整窗）、全屏截图、长截图；⌥⌘S 全局唤起；编辑器 13 种标注工具（选择移动 / 画笔 / 直线 / 箭头 / 矩形 / 实心矩形 / 椭圆 / 荧光笔 / 高斯模糊 / 马赛克 / 聚光灯 / 步骤序号 / 文字），快照式撤销重做，Apple 官方设备外壳（自动识别机型），AirDrop 发送到 iPhone / iPad 标注后取回 |
+| **录屏**（Beta） | 整块屏幕 / 指定窗口 / 框选区域三种录制源；系统声音与麦克风混进同一个 MP4（两条音轨，永远只出一个文件）；暂停 / 恢复按时间戳重映射（无断点、A/V 同步）；画中画摄像头气泡、鼠标点击高亮、按键实时显示；帧率、H.265/H.264、Retina 原生像素、指针显隐；⌥⌘R 全局开始停止，屏幕底部悬浮控制条可拖动、可换源 |
 | **节能** | 15 分钟到 2 小时阻止休眠，可同时保持屏幕常亮；电量低于 20% 自动结束；登录后自动开启；**记住节能状态**——退出时还开着的话，下次打开 Aurora 自动恢复（可关） |
 | **声音** | 输入 / 输出设备切换、音量与静音、**按应用单独调节音量**（0–150%） |
 | **AI 用量** | 为每个本地 harness 单独适配：Codex（rollout 日志与真实配额窗口）、Claude Code、opencode、WorkBuddy 等；桌面客户端做安装检测并说明原因；汇总近 7 天、今日与 5 小时窗口 |
@@ -110,7 +114,7 @@ cd Aurora
 ```bash
 AURORA_INSTALL=0 ./build.sh release       # 只打包，不安装到 /Applications
 AURORA_UNIVERSAL=1 ./build.sh release     # 同时编译 arm64 与 x86_64
-AURORA_VERSION=1.2.0 AURORA_BUILD=120 ./build.sh release
+AURORA_VERSION=1.3.0 AURORA_BUILD=130 ./build.sh release
 AURORA_SIGN_ID="Apple Development: ..." ./build.sh release
 ```
 
@@ -126,6 +130,7 @@ AURORA_SIGN_ID="Apple Development: ..." ./build.sh release
 | 屏幕录制 | 截图动作、窗口预览 | 仅截图相关功能 |
 | 输入监控 | 读取外接鼠标的原始按键 | 仅外接鼠标宏 |
 | 完全磁盘访问 | 读取其他应用配置与本地用量数据库 | 可选 |
+| 通知 | 新版本、录屏完成、截图保存、休息结束等即时提醒 | 可选 |
 
 权限状态在「设置 › 权限」里每 3 秒复查一次，也可以手动点「重新检测」。如果系统显示已授权但应用仍提示未授权，先移除旧的 Aurora 条目再重新添加 `/Applications/Aurora.app`。
 
@@ -138,6 +143,9 @@ AURORA_SIGN_ID="Apple Development: ..." ./build.sh release
 | **⌘ + 拖动侧栏图标** | 调整模块顺序；拖出面板松手会询问是否停用该模块 |
 | **⌘1 – ⌘9** | 剪贴板固定项一键复制（加 ⌥ 直接粘贴到上一个应用） |
 | **⌃⌥⌘K** | 退出「清洁键盘」模式 |
+| **⇧⌘V** | 唤起 mini 剪切板（紧凑历史，↑↓ 选择、⏎ 粘贴、⌘1–9 直贴、⌘⌫ 删除） |
+| **⌥⌘S** | 区域截图，直接进入标注编辑器 |
+| **⌥⌘R** | 开始 / 停止录屏 |
 | **ESC** | 关闭面板或退出屏幕检测；捕获鼠标按键时用于取消捕获 |
 | **⌘W / ⌘M** | 固定成窗口后关闭 / 最小化（和普通 macOS 窗口一致） |
 
@@ -233,4 +241,7 @@ git push origin v1.1.0
 [KeepingYouAwake](https://github.com/newmarcel/KeepingYouAwake) ·
 [switchaudio-osx](https://github.com/deweller/switchaudio-osx) ·
 [CodexBar](https://github.com/steipete/CodexBar) ·
-[usage](https://github.com/aqua5230/usage)
+[usage](https://github.com/aqua5230/usage) ·
+[QuickRecorder](https://github.com/lihaoyun6/QuickRecorder) ·
+[Recordly](https://github.com/webadderallorg/Recordly) ·
+[Snapzy](https://github.com/duongductrong/Snapzy)

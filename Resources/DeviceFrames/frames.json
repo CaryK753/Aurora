@@ -1,0 +1,8 @@
+[
+  {"file": "macbook-pro-14-space-black.png", "device": "MacBook Pro 14″ 深空黑", "category": "mac", "w": 3860, "h": 2540, "screen": [418, 288, 3024, 1964]},
+  {"file": "macbook-pro-14-silver.png", "device": "MacBook Pro 14″ 银色", "category": "mac", "w": 3860, "h": 2540, "screen": [418, 288, 3024, 1964]},
+  {"file": "macbook-pro-16-space-black.png", "device": "MacBook Pro 16″ 深空黑", "category": "mac", "w": 4260, "h": 2840, "screen": [402, 303, 3456, 2234]},
+  {"file": "macbook-pro-16-silver.png", "device": "MacBook Pro 16″ 银色", "category": "mac", "w": 4260, "h": 2840, "screen": [402, 303, 3456, 2234]},
+  {"file": "iphone-17-black-portrait.png", "device": "iPhone 17 黑色 竖屏", "category": "iphone", "w": 1350, "h": 2760, "screen": [72, 69, 1206, 2622]},
+  {"file": "iphone-17-black-landscape.png", "device": "iPhone 17 黑色 横屏", "category": "iphone", "w": 2760, "h": 1350, "screen": [69, 72, 2622, 1206]}
+]

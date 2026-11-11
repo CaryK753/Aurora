@@ -136,6 +136,16 @@ if let index = CommandLine.arguments.firstIndex(of: "--render") {
     exit(code)
 }
 
+if CommandLine.arguments.contains("--editor-snapshot") {
+    let args = CommandLine.arguments
+    let index = args.firstIndex(of: "--editor-snapshot")!
+    let path = index + 1 < args.count ? args[index + 1] : "/tmp/aurora-editor.png"
+    let appearance = index + 2 < args.count ? args[index + 2] : "dark"
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = WindowSnapshot.captureEditor(to: path, appearance: appearance) }
+    exit(code)
+}
+
 if let index = CommandLine.arguments.firstIndex(of: "--snapshot") {
     let args = CommandLine.arguments
     let module = index + 1 < args.count ? args[index + 1] : "overview"
@@ -151,6 +161,21 @@ if let index = CommandLine.arguments.firstIndex(of: "--snapshot") {
 if CommandLine.arguments.contains("--audio-mute-test") {
     var code: Int32 = 0
     MainActor.assumeIsolated { code = SelfTest.audioMuteLeak() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--record-test") {
+    let args = CommandLine.arguments
+    let index = args.firstIndex(of: "--record-test")!
+    let seconds = index + 1 < args.count ? (Double(args[index + 1]) ?? 6) : 6
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.recorderRoundTrip(seconds: seconds) }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--canvas-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.canvasInteraction() }
     exit(code)
 }
 

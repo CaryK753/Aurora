@@ -8,10 +8,9 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private var hotKeyRef: EventHotKeyRef?
     private var panelController: PanelController!
     private var welcomeController: WelcomeWindowController?
-    private let state = AppState()
+    let state = AppState()
     private lazy var contextMenu: NSMenu = {
         let menu = NSMenu()
         let overview = NSMenuItem(title: T("打开 Aurora"), action: #selector(openPanel), keyEquivalent: "")
@@ -26,6 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        // 所有原生弹窗（popover / sheet）都要高于主面板
+        PopupLevelMonitor.install()
 
         panelController = PanelController(state: state)
         // 固定的开关由面板右上角的按钮控制，这里只负责把窗口形态交给 PanelController
@@ -43,8 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let device = self.state.audio.outputs.first(where: \.isDefault) else { return }
             self.state.audio.toggleMute(device)
         }
-        registerHotKey()
+        registerHotKeys()
         registerBrightnessHotKeys()
+        MiniClipboardController.shared.clipboard = state.clipboard
         state.onShowMainPanel = { [weak self] in self?.openPanel() }
         state.onDismissMainPanel = { [weak self] in self?.panelController.hide(reason: "welcome", force: true) }
         welcomeController = WelcomeWindowController(state: state)
@@ -66,8 +68,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 之前开启过动态壁纸的话，登录后自动恢复
         state.wallpaper.activateIfNeeded()
 
+        // 开发调试：AURORA_WALLPAPER_PROC=1 直接应用第一张程序化壁纸
+        if ProcessInfo.processInfo.environment["AURORA_WALLPAPER_PROC"] == "1",
+           let item = state.wallpapers.items.first(where: { $0.kind == .procedural }) {
+            state.wallpaper.setEnabled(true)
+            state.wallpaper.useAsWallpaper(item)
+            Debug.log("debug: applied procedural wallpaper \(item.name)")
+        }
+
         // 每小时检查一次更新（已发过 release 才有意义，拉不到就静默失败）
         state.updates.start()
+
+        // 节能定时结束后给一条系统通知
+        NotificationCenter.default.addObserver(
+            forName: .auroraEnergyFinished, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in NotificationService.shared.notifyEnergyFinished() }
+        }
 
         if ProcessInfo.processInfo.environment["AURORA_OPEN_PANEL"] == "1"
             || UserDefaults.standard.bool(forKey: "debugOpenPanel") {
@@ -119,82 +136,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// ⌥⌘A：即使菜单栏被挤满也能唤起面板
-    private func registerHotKey() {
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed)
-        )
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, event, userData -> OSStatus in
-                guard let userData else { return noErr }
-                var hotKeyID = EventHotKeyID()
-                GetEventParameter(
-                    event,
-                    EventParamName(kEventParamDirectObject),
-                    EventParamType(typeEventHotKeyID),
-                    nil,
-                    MemoryLayout<EventHotKeyID>.size,
-                    nil,
-                    &hotKeyID
-                )
-                // 同一个事件目标上还挂着亮度快捷键，必须按 id 过滤
-                guard hotKeyID.id == 1 else { return noErr }
-                let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
-                DispatchQueue.main.async { delegate.togglePanel() }
-                return noErr
-            },
-            1,
-            &eventType,
-            Unmanaged.passUnretained(self).toOpaque(),
-            nil
-        )
-
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4155_5241), id: 1) // 'AURA'
-        RegisterEventHotKey(
-            UInt32(kVK_ANSI_A),
-            UInt32(cmdKey | optionKey),
-            hotKeyID,
-            GetApplicationEventTarget(),
-            0,
-            &hotKeyRef
-        )
+    /// 可配置热键（面板 / mini 剪切板），交给 HotkeyService 统一注册
+    private func registerHotKeys() {
+        state.hotkeys.onAction = { [weak self] action in
+            switch action {
+            case .panel:
+                self?.togglePanel()
+            case .miniClipboard:
+                MiniClipboardController.shared.toggle()
+            case .screenshot:
+                ScreenshotSession.shared.startRegionCapture()
+            case .recorder:
+                RecorderService.shared.toggle()
+            }
+        }
+        state.hotkeys.registerAll()
     }
 
     func togglePanel() {
         panelController.toggle(relativeTo: statusItem.button)
     }
 
+    /// 截图开始前把主面板收起来，避免把 Aurora 自己截进画面
+    func panelWillCaptureScreenshot() {
+        panelController.hide(reason: "screenshot", force: true)
+    }
+
     /// ⌃⌥↑ / ⌃⌥↓：不打开面板也能调亮度（MonitorControl 的键盘亮度思路）
+    /// 注意：只注册热键，不再单独 InstallEventHandler——全部热键事件由
+    /// HotkeyService 的唯一处理器分发（onBrightness / onAction），
+    /// 否则后装的处理器会把其它热键的事件吞掉。
     private func registerBrightnessHotKeys() {
-        var eventType = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard),
-            eventKind: UInt32(kEventHotKeyPressed)
-        )
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, event, _ -> OSStatus in
-                var hotKeyID = EventHotKeyID()
-                GetEventParameter(
-                    event,
-                    EventParamName(kEventParamDirectObject),
-                    EventParamType(typeEventHotKeyID),
-                    nil,
-                    MemoryLayout<EventHotKeyID>.size,
-                    nil,
-                    &hotKeyID
-                )
-                guard hotKeyID.id == 2 || hotKeyID.id == 3 else { return noErr }
-                let up = hotKeyID.id == 2
-                DispatchQueue.main.async { auroraDelegate?.stepBrightness(up: up) }
-                return noErr
-            },
-            1,
-            &eventType,
-            Unmanaged.passUnretained(self).toOpaque(),
-            nil
-        )
+        state.hotkeys.onBrightness = { [weak self] up in
+            self?.stepBrightness(up: up)
+        }
 
         for (index, key) in [(2, UInt32(kVK_UpArrow)), (3, UInt32(kVK_DownArrow))] {
             var ref: EventHotKeyRef?

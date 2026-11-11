@@ -97,6 +97,12 @@ if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
   cp "$ROOT/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 fi
 
+# 截图模块的 Apple 官方设备外壳（PNG + 屏幕矩形清单）
+if [ -d "$ROOT/Resources/DeviceFrames" ]; then
+  mkdir -p "$APP_DIR/Contents/Resources/DeviceFrames"
+  cp "$ROOT/Resources/DeviceFrames/"* "$APP_DIR/Contents/Resources/DeviceFrames/"
+fi
+
 printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"
 
 echo "▸ 编译 Finder 右键扩展…"

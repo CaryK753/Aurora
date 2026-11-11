@@ -4,7 +4,7 @@
 import SwiftUI
 
 enum AuroraModule: String, CaseIterable, Identifiable {
-    case overview, display, pointer, trackpad, keyboard, menu, desktop, clipboard, energy, audio, ai, settings
+    case overview, display, pointer, trackpad, keyboard, menu, desktop, clipboard, screenshot, recorder, energy, audio, ai, settings
 
     var id: String { rawValue }
 
@@ -18,6 +18,8 @@ enum AuroraModule: String, CaseIterable, Identifiable {
         case .menu: return T("菜单")
         case .desktop: return T("桌面")
         case .clipboard: return T("剪贴板")
+        case .screenshot: return T("截图")
+        case .recorder: return T("录屏")
         case .energy: return T("节能")
         case .audio: return T("声音")
         case .ai: return T("AI用量")
@@ -35,6 +37,8 @@ enum AuroraModule: String, CaseIterable, Identifiable {
         case .menu: return "contextualmenu.and.cursorarrow"
         case .desktop: return "menubar.dock.rectangle"
         case .clipboard: return "doc.on.clipboard"
+        case .screenshot: return "camera.viewfinder"
+        case .recorder: return "record.circle"
         case .energy: return "cup.and.saucer.fill"
         case .audio: return "speaker.wave.2.fill"
         case .ai: return "sparkles"
@@ -43,6 +47,9 @@ enum AuroraModule: String, CaseIterable, Identifiable {
     }
 
     var isToggleable: Bool { self != .overview && self != .settings }
+
+    /// 仍在打磨中的模块（界面标 Beta）
+    var isBeta: Bool { self == .recorder }
 
     /// 侧边栏里与设置之间插入分隔线
     var startsGroup: Bool { self == .settings }

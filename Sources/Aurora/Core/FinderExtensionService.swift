@@ -61,6 +61,8 @@ struct FinderAction: Identifiable, Codable, Equatable {
     var kind: Kind
     var argument: String
     var enabled: Bool
+    /// 自定义菜单图标（SF Symbol 名）。nil = 用类型默认图标；openWithApp 固定显示目标 App 图标
+    var symbol: String?
 
     static func make(_ kind: Kind, title: String? = nil, argument: String = "") -> FinderAction {
         FinderAction(
@@ -68,9 +70,22 @@ struct FinderAction: Identifiable, Codable, Equatable {
             title: title ?? kind.title,
             kind: kind,
             argument: argument,
-            enabled: true
+            enabled: true,
+            symbol: nil
         )
     }
+
+    /// 菜单里实际显示的 SF Symbol：用户自定义优先，否则跟类型走
+    var displaySymbol: String { symbol ?? kind.symbol }
+
+    /// 可选的自定义图标（SF Symbols 里适合当右键动作的一组）
+    static let iconChoices: [String] = [
+        "doc.on.doc", "doc.badge.plus", "terminal", "chevron.left.forwardslash.chevron.right",
+        "arrow.up.forward.app", "link", "clipboard", "archivebox",
+        "photo.on.rectangle", "music.note", "video.fill", "globe",
+        "mail", "message", "folder", "externaldrive",
+        "wand.and.stars", "tag", "square.and.arrow.up.on.square", "tray.full"
+    ]
 }
 
 @MainActor

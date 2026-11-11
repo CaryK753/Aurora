@@ -220,6 +220,22 @@ struct WallpaperDetailSheet: View {
         }
         .padding(18)
         .frame(width: 420)
+        .overlay(alignment: .topTrailing) {
+            // 详情页必须能自己退出：之前没有关闭按钮，Esc 会穿透到主面板整窗隐藏
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Color.primary.opacity(0.1)))
+            }
+            .buttonStyle(.plain)
+            .padding(8)
+            .help(T("关闭"))
+        }
+        .onExitCommand { dismiss() }
         .onAppear {
             name = item.name
             guard !loaded else { return }

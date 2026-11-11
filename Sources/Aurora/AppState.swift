@@ -11,6 +11,8 @@ final class AppState: ObservableObject {
     @Published var module: AuroraModule = .overview
     @Published var showImport = false
     @Published var showWelcome = false
+    /// 全局快捷键页（与设置页同层的单层内容页，不是覆盖层）
+    @Published var showHotkeys = false
     /// 「动态壁纸」全屏覆盖层
     @Published var showWallpaper = false
     /// 固定窗口进入 macOS 全屏时为 true（圆角与红绿灯布局要跟着变）
@@ -125,6 +127,7 @@ final class AppState: ObservableObject {
     let appAudio = PerAppAudioService()
     let ai = AIUsageService()
     let finderExt = FinderExtensionService()
+    let hotkeys = HotkeyService()
     let updates = UpdateService()
     let settings: SettingsService
     let wallpapers: WallpaperLibrary
@@ -235,7 +238,10 @@ final class AppState: ObservableObject {
     }
 
     func select(_ module: AuroraModule) {
-        withAnimation(.smooth(duration: 0.26)) { self.module = module }
+        withAnimation(.smooth(duration: 0.26)) {
+            self.module = module
+            self.showHotkeys = false
+        }
         monitor.resume()
     }
 }

@@ -15,6 +15,7 @@ struct ContextMenuView: View {
     @State private var editingID: String?
     @State private var draftTitle = ""
     @State private var draftArgument = ""
+    @State private var draftSymbol: String?
 
     init(state: AppState) {
         self.state = state
@@ -149,14 +150,7 @@ struct ContextMenuView: View {
     private func actionRow(_ action: FinderAction) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: action.kind.symbol)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(action.enabled ? AuroraTheme.accent : Color.secondary)
-                    .frame(width: 22, height: 22)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(AuroraTheme.accent.opacity(action.enabled ? 0.14 : 0.05))
-                    )
+                actionIcon(action)
 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(action.title)
@@ -208,6 +202,27 @@ struct ContextMenuView: View {
         }
     }
 
+    /// 列表行图标：openWithApp 显示目标 App 真实图标，其余显示 SF Symbol
+    @ViewBuilder
+    private func actionIcon(_ action: FinderAction) -> some View {
+        Group {
+            if action.kind == .openWithApp, !action.argument.isEmpty {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: action.argument))
+                    .resizable()
+                    .frame(width: 13, height: 13)
+            } else {
+                Image(systemName: action.displaySymbol)
+                    .font(.system(size: 10, weight: .semibold))
+            }
+        }
+        .foregroundStyle(action.enabled ? AuroraTheme.accent : Color.secondary)
+        .frame(width: 22, height: 22)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(AuroraTheme.accent.opacity(action.enabled ? 0.14 : 0.05))
+        )
+    }
+
     private func subtitle(for action: FinderAction) -> String {
         action.argument.isEmpty ? action.kind.hint : "\(action.kind.title) · \(action.argument)"
     }
@@ -216,11 +231,17 @@ struct ContextMenuView: View {
         editingID = action.id
         draftTitle = action.title
         draftArgument = action.argument
+        draftSymbol = action.symbol
     }
 
     private func editor(for action: FinderAction) -> some View {
         VStack(spacing: 6) {
             HStack(spacing: 6) {
+                // 图标选择（openWithApp 固定用 App 图标，不用选）
+                if action.kind != .openWithApp {
+                    symbolPicker(for: action)
+                }
+
                 TextField(T("名称"), text: $draftTitle)
                     .textFieldStyle(.plain)
                     .font(.system(size: 10))
@@ -244,9 +265,11 @@ struct ContextMenuView: View {
             }
 
             HStack(spacing: 6) {
-                Text(action.kind.argumentPlaceholder == nil
-                     ? T("这个动作不需要额外参数")
-                     : T("留空则使用默认值"))
+                Text(action.kind == .openWithApp
+                     ? T("菜单里会显示目标 App 的图标，与系统风格一致")
+                     : (action.kind.argumentPlaceholder == nil
+                        ? T("这个动作不需要额外参数")
+                        : T("留空则使用默认值")))
                     .font(.system(size: 8.5))
                     .foregroundStyle(.tertiary)
                 Spacer()
@@ -260,10 +283,45 @@ struct ContextMenuView: View {
         .padding(.bottom, 6)
     }
 
+    /// SF Symbol 图标选择：默认跟随类型，或从常用图标里挑一个
+    private func symbolPicker(for action: FinderAction) -> some View {
+        Menu {
+            Button {
+                draftSymbol = nil
+            } label: {
+                Label(T("跟随类型"), systemImage: action.kind.symbol)
+            }
+            Divider()
+            ForEach(FinderAction.iconChoices, id: \.self) { name in
+                Button {
+                    draftSymbol = name
+                } label: {
+                    Label(name, systemImage: name)
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: draftSymbol ?? action.kind.symbol)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(AuroraTheme.accent)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 6.5, weight: .bold))
+                    .foregroundStyle(.tertiary)
+            }
+            .frame(width: 26, height: 24)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.055)))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(T("选择菜单图标（macOS 27 起系统右键项也带图标）"))
+    }
+
     private func commitEdit(_ action: FinderAction) {
         var updated = action
         updated.title = draftTitle.trimmingCharacters(in: .whitespaces).isEmpty ? action.kind.title : draftTitle
         updated.argument = draftArgument
+        updated.symbol = draftSymbol
         finder.update(updated)
         editingID = nil
         state.showToast(T("右键项已更新"), symbol: "checkmark.circle.fill")

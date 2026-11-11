@@ -16,6 +16,8 @@ struct WelcomePermissions: View {
             switch item.id {
             case "accessibility": return selection.contains(.pointer) || selection.contains(.clipboard)
             case "screen", "input": return selection.contains(.pointer)
+            // 通知与模块无关：更新、录制完成、截图保存都会用到，默认展示
+            case "notifications": return true
             case "disk": return selection.contains(.ai)
             default: return false
             }
@@ -58,6 +60,11 @@ struct WelcomePermissions: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             .padding(.vertical, 4)
+        }
+        .onAppear {
+            // 通知授权状态来自 UNUserNotificationCenter，进页面时刷新一次
+            NotificationService.shared.refresh()
+            service.refresh()
         }
     }
 }

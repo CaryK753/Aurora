@@ -17,6 +17,16 @@ struct FinderAction: Codable {
         case openWithApp
         case runCommand
         case newFile
+
+        var fallbackSymbol: String {
+            switch self {
+            case .copyPath: return "doc.on.doc"
+            case .openTerminal: return "terminal"
+            case .openWithApp: return "arrow.up.forward.app"
+            case .runCommand: return "chevron.left.forwardslash.chevron.right"
+            case .newFile: return "doc.badge.plus"
+            }
+        }
     }
 
     var id: String
@@ -24,6 +34,29 @@ struct FinderAction: Codable {
     var kind: Kind
     var argument: String     // 打开方式：App 路径；命令：shell；新建：文件名
     var enabled: Bool
+    // macOS 27 起系统右键菜单项带图标，Aurora 跟系统风格统一。
+    // 旧配置 JSON 里没有这个键，Codable 可选字段解码为 nil，向下兼容。
+    var symbol: String? = nil
+
+    /// 菜单图标：「用 App 打开」显示目标 App 的真实图标，其余用 SF Symbol
+    func menuItemImage() -> NSImage? {
+        if kind == .openWithApp, !argument.isEmpty {
+            let icon = NSWorkspace.shared.icon(forFile: argument)
+            icon.size = NSSize(width: 16, height: 16)
+            return icon
+        }
+        let name = symbol ?? kind.fallbackSymbol
+        if let image = NSImage(systemSymbolName: name, accessibilityDescription: title) {
+            let sized = NSImage(size: NSSize(width: 16, height: 16), flipped: false) { rect in
+                let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
+                let symbol = image.withSymbolConfiguration(config) ?? image
+                symbol.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+                return true
+            }
+            return sized
+        }
+        return nil
+    }
 }
 
 private enum Channel {
@@ -134,6 +167,7 @@ final class AuroraFinderExtension: FIFinderSync {
             item.target = self
             item.tag = menuActions.count
             item.representedObject = action.id
+            item.image = action.menuItemImage()
             menuActions.append(action)
             menu.addItem(item)
         }

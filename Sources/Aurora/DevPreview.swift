@@ -21,6 +21,8 @@ enum DevPreview {
         case .menu: ContextMenuView(state: state)
         case .desktop: DesktopView(state: state)
         case .clipboard: ClipboardView(state: state)
+        case .screenshot: ScreenshotView(state: state)
+        case .recorder: RecorderView(state: state)
         case .energy: EnergyView(state: state)
         case .audio: AudioView(state: state)
         case .ai: AIView(state: state)
@@ -147,10 +149,54 @@ enum DevPreview {
 }
 
 
+
 // MARK: - 真窗口快照（不依赖屏幕录制权限）
 
 @MainActor
 enum WindowSnapshot {
+    /// 截图编辑器真窗口快照（检查工具栏在 13 个工具下是否溢出）
+    static func captureEditor(to path: String, appearance: String) -> Int32 {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        app.appearance = appearance == "light" ? NSAppearance(named: .aqua) : NSAppearance(named: .darkAqua)
+
+        // 生成一张测试底图（渐变 + 网格，方便看标注位置）
+        let size = CGSize(width: 1280, height: 800)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor(calibratedRed: 0.16, green: 0.19, blue: 0.24, alpha: 1).setFill()
+        NSRect(origin: .zero, size: size).fill()
+        NSColor(calibratedWhite: 1, alpha: 0.08).setStroke()
+        for x in stride(from: 0, to: size.width, by: 80) {
+            let line = NSBezierPath()
+            line.move(to: NSPoint(x: x, y: 0))
+            line.line(to: NSPoint(x: x, y: size.height))
+            line.stroke()
+        }
+        image.unlockFocus()
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return 1 }
+
+        let window = EditorWindow(image: cg)
+        window.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.9))
+
+        guard let view = window.contentView?.superview else { return 1 }
+        let bounds = view.bounds
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: bounds) else { return 1 }
+        view.cacheDisplay(in: bounds, to: rep)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return 1 }
+        do {
+            try png.write(to: URL(fileURLWithPath: path))
+            print("已输出：\(path)")
+            window.orderOut(nil)
+            return 0
+        } catch {
+            print("写入失败：\(error.localizedDescription)")
+            return 1
+        }
+    }
+
+
     static func capture(module: String, to path: String, appearance: String) -> Int32 {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)

@@ -212,6 +212,9 @@ final class EnergyService: ObservableObject {
     private func tick() {
         if let endsAt, Date() >= endsAt {
             stop()
+            // 定时休息结束：发个信号，让 AppDelegate 转成系统通知
+            // （这里不能直接依赖 NotificationService，单测只编译核心文件）
+            NotificationCenter.default.post(name: .auroraEnergyFinished, object: nil)
             return
         }
         updateRemaining()
@@ -230,4 +233,9 @@ final class EnergyService: ObservableObject {
             ? String(format: "%d:%02d:%02d", hours, minutes, secs)
             : String(format: "%02d:%02d", minutes, secs)
     }
+}
+
+extension Notification.Name {
+    /// 定时休息结束
+    static let auroraEnergyFinished = Notification.Name("aurora.energy.finished")
 }
