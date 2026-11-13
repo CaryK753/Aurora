@@ -25,6 +25,10 @@ struct AudioView: View {
             AnyView(outputsCard),
             AnyView(inputsCard)
         ].compactMap { $0 })
+        .onChange(of: service.switchError) { _, error in
+            guard let error else { return }
+            state.showToast(error, symbol: "exclamationmark.triangle")
+        }
     }
 
     private func isSilent(_ device: AudioDeviceInfo) -> Bool {
@@ -79,7 +83,9 @@ struct AudioView: View {
                             value: Binding(
                                 get: { device.volume },
                                 set: { service.setVolume($0, for: device) }
-                            )
+                            ),
+                            tickStep: 0.1,
+                            step: 0.01
                         )
                         Image(systemName: "speaker.wave.3.fill")
                             .font(.system(size: 9))
@@ -90,6 +96,10 @@ struct AudioView: View {
                             .foregroundStyle(.secondary)
                             .frame(width: 32, alignment: .trailing)
                     }
+                    Text(T("刻度每格 10% · 拖动按 1% 对齐 · 按住 ⌥ 更细"))
+                        .font(.system(size: 8))
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     Text(T("该设备不支持系统音量控制"))
                         .font(.system(size: 9))
@@ -160,7 +170,7 @@ struct AudioView: View {
                         .foregroundStyle(AuroraTheme.warn)
                 }
 
-                Text(T("100% 走系统原生通路；调低后在本地重新混音，不改变系统默认输出设备"))
+                Text(T("刻度每格 10%，拖动按 1% 对齐；⌥ 更细，100% 以上为增强区。100% 走系统原生通路，调低后在本地重新混音，不改变系统默认输出设备"))
                     .font(.system(size: 8))
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -185,6 +195,17 @@ struct AudioView: View {
                         .foregroundStyle(item.isControlled ? AnyShapeStyle(AuroraTheme.accent) : AnyShapeStyle(Color.secondary))
                         .monospacedDigit()
                         .frame(width: 30, alignment: .trailing)
+                        .contextMenu {
+                            ForEach(Self.volumePresets, id: \.self) { preset in
+                                Button(Fmt.percent(preset)) { perApp.setVolume(preset, for: item.id) }
+                            }
+                            Divider()
+                            Button(T("静音")) { perApp.setVolume(0, for: item.id) }
+                        }
+                        .help(T("右键快速套用常用音量"))
+
+                    fineButton(symbol: "minus", help: T("降低 1%")) { nudge(item, by: -0.01) }
+                    fineButton(symbol: "plus", help: T("提高 1%")) { nudge(item, by: 0.01) }
 
                     Button {
                         perApp.toggleMute(item.id)
@@ -192,7 +213,7 @@ struct AudioView: View {
                         Image(systemName: live <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill")
                             .font(.system(size: 9))
                             .foregroundStyle(live <= 0.001 ? AnyShapeStyle(AuroraTheme.warn) : AnyShapeStyle(Color.secondary))
-                            .frame(width: 18, height: 16)
+                            .frame(width: 16, height: 15)
                     }
                     .buttonStyle(.plain)
                 }
@@ -203,12 +224,33 @@ struct AudioView: View {
                         set: { perApp.setVolume($0, for: item.id) }
                     ),
                     range: 0...1.5,
-                    trackHeight: 3.5
+                    trackHeight: 3.5,
+                    tickStep: 0.1,
+                    tickLimit: 1.0,
+                    step: 0.01
                 )
                 .frame(height: 18)
             }
         }
         .padding(.vertical, 2)
+    }
+
+    private static let volumePresets: [Double] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
+
+    private func nudge(_ item: AppAudioItem, by delta: Double) {
+        perApp.setVolume(perApp.volume(for: item.id) + delta, for: item.id)
+    }
+
+    private func fineButton(symbol: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 7.5, weight: .bold))
+                .foregroundStyle(.secondary)
+                .frame(width: 15, height: 14)
+                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.primary.opacity(0.06)))
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     @ViewBuilder
@@ -254,6 +296,7 @@ struct AudioView: View {
                         }
                     }
                 }
+                switchErrorRow
             }
         }
     }
@@ -278,7 +321,35 @@ struct AudioView: View {
                         }
                     }
                 }
+                switchErrorRow
             }
+        }
+    }
+
+    /// 切换没落地时把真实原因留在原地，避免「点了没反应」
+    @ViewBuilder
+    private var switchErrorRow: some View {
+        if let error = service.switchError {
+            HStack(alignment: .top, spacing: 5) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(AuroraTheme.warn)
+                Text(error)
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(AuroraTheme.warn)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                Button {
+                    service.clearSwitchError()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 7.5, weight: .bold))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 4)
+            .padding(.top, 5)
         }
     }
 

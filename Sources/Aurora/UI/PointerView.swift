@@ -2,11 +2,13 @@
 //  Aurora — 鼠标 / 触控板调校
 
 import SwiftUI
+import LogitechPlugin
 
 struct PointerView: View {
     @ObservedObject var service: PointerService
     @ObservedObject var permissions: PermissionService
     @ObservedObject var devices: HIDDeviceService
+    @ObservedObject var logitech: LogitechDeviceService
     @ObservedObject var state: AppState
     @StateObject private var probe = PointerProbe()
 
@@ -15,6 +17,7 @@ struct PointerView: View {
         self.service = state.pointer
         self.permissions = state.permissions
         self.devices = state.hid
+        self.logitech = state.logitech
     }
 
     var body: some View {
@@ -24,7 +27,9 @@ struct PointerView: View {
             }
 
             deviceCard
-            LogitechSettingsCard(service: state.logitech)
+            if logitech.showsCard {
+                LogitechSettingsCard(service: logitech, onOpenSetup: { state.openLogitechSetup() })
+            }
             pointerCard
             scrollCard
             macroCard

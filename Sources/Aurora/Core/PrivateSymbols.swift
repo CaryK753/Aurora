@@ -65,6 +65,72 @@ enum IOAVShim {
     static let cgsService = PrivateSymbols.load(PrivateSymbols.coreGraphics, "CGSServiceForDisplayNumber", as: CGSServiceForDisplayNumberFn.self)
 
     static var isAvailable: Bool { createWithService != nil && readI2C != nil && writeI2C != nil }
+
+    /// 从 IORegistry 里取外接屏的 DCPAVServiceProxy。
+    /// macOS 26 上 CGSServiceForDisplayNumber 对外接屏返回 0，只能自己枚举节点。
+    static func externalServices() -> [CFTypeRef] {
+        guard let create = createWithService else { return [] }
+        guard let matching = IOServiceMatching("DCPAVServiceProxy") else { return [] }
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, matching, &iterator) == KERN_SUCCESS else { return [] }
+        defer { IOObjectRelease(iterator) }
+
+        var found: [(unit: Int, service: CFTypeRef)] = []
+        while true {
+            let entry = IOIteratorNext(iterator)
+            if entry == 0 { break }
+            defer { IOObjectRelease(entry) }
+            guard (property("Location", of: entry) as? String) == "External" else { continue }
+            let unit = (property("Unit", of: entry) as? NSNumber)?.intValue ?? 0
+            guard let unmanaged = create(kCFAllocatorDefault, entry) else { continue }
+            found.append((unit, unmanaged.takeRetainedValue()))
+        }
+        return found.sorted { $0.unit < $1.unit }.map(\.service)
+    }
+
+    private static func property(_ key: String, of entry: io_registry_entry_t) -> Any? {
+        IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
+    }
+}
+
+/// 外接屏 → DDC 通道的统一发现入口
+enum DDCChannels {
+    static func externalDisplayIDs() -> [CGDirectDisplayID] {
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return [] }
+        return ids.filter { CGDisplayIsBuiltin($0) == 0 }
+    }
+
+    static func discover() -> [CGDirectDisplayID: DDCChannel] {
+        let displays = externalDisplayIDs()
+        guard !displays.isEmpty, IOAVShim.isAvailable else { return [:] }
+        var result: [CGDirectDisplayID: DDCChannel] = [:]
+
+        // 1) CGS 直连：老系统上一步到位，macOS 26 上通常返回 0
+        if let cgs = IOAVShim.cgsService, let create = IOAVShim.createWithService {
+            for id in displays {
+                var service: io_service_t = 0
+                cgs(id, &service)
+                guard service != 0 else { continue }
+                defer { IOObjectRelease(service) }
+                guard let unmanaged = create(kCFAllocatorDefault, service) else { continue }
+                if let channel = DDCChannel(service: unmanaged.takeRetainedValue()), channel.isResponsive {
+                    result[id] = channel
+                }
+            }
+        }
+        if result.count == displays.count { return result }
+
+        // 2) IORegistry 兜底：按 Unit 顺序把 External 代理配给还没拿到通道的外接屏
+        var remaining = displays.filter { result[$0] == nil }
+        for service in IOAVShim.externalServices() where !remaining.isEmpty {
+            guard let channel = DDCChannel(service: service), channel.isResponsive else { continue }
+            result[remaining.removeFirst()] = channel
+        }
+        return result
+    }
 }
 
 /// 基于 Apple Silicon 的 DDC/CI 通道（参考 MonitorControl 的 Arm64DDC 实现）
@@ -73,23 +139,20 @@ final class DDCChannel {
     private let dataAddress: UInt32 = 0x51
     private let service: CFTypeRef
 
-    static func make(for displayID: CGDirectDisplayID) -> DDCChannel? {
-        guard IOAVShim.isAvailable, let create = IOAVShim.createWithService, let cgs = IOAVShim.cgsService else { return nil }
-        var ioService: io_service_t = 0
-        cgs(displayID, &ioService)
-        guard ioService != 0 else { return nil }
-        defer { IOObjectRelease(ioService) }
-        guard let unmanaged = create(kCFAllocatorDefault, ioService) else { return nil }
-        return DDCChannel(service: unmanaged.takeRetainedValue())
-    }
+    /// 通道是否真的能通信：拿亮度（0x10）探一次，读不到就当没有 DDC
+    var isResponsive: Bool { read(0x10) != nil }
 
-    private init(service: CFTypeRef) {
+    init?(service: CFTypeRef?) {
+        guard let service else { return nil }
         self.service = service
     }
 
-    private func checksum(_ seed: UInt8, _ bytes: [UInt8], upTo end: Int) -> UInt8 {
+    /// DDC 校验和：闭区间 [0, end]，与 MonitorControl 的 `start...end` 一致。
+    /// 之前写成 0..<end，少算最后一个字节，读回的校验永远对不上 → 整条通道被判成不可用。
+    func checksum(_ seed: UInt8, _ bytes: [UInt8], upTo end: Int) -> UInt8 {
+        guard end >= 0, end < bytes.count else { return seed }
         var value = seed
-        for index in 0..<end { value ^= bytes[index] }
+        for index in 0...end { value ^= bytes[index] }
         return value
     }
 

@@ -9,6 +9,11 @@ extension AppState {
         logitech.reset()
         display.setRestoreOnLaunch(false)
         display.smoothTransition = true
+        display.combinedDimming = false
+        display.followMouse = true
+        display.syncBrightness = false
+        display.showOSD = true
+        for item in display.displays { display.resetTuning(for: item.id) }
         clipboard.resetSettings()
         keyboard.stopCleaning(reason: "reset")
         energy.stop()

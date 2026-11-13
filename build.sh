@@ -89,6 +89,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <string>Aurora 需要捕获应用音频，以在本机调节各应用的输出音量。</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Aurora 使用音频设备信息来按应用调节输出音量。</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Aurora 在录屏时显示画中画摄像头预览，画面只写进本机的 MP4，不会上传。</string>
 </dict>
 </plist>
 PLIST

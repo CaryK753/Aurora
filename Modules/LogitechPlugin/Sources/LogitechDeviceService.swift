@@ -5,14 +5,25 @@ import Foundation
 public final class LogitechDeviceService: ObservableObject {
     @Published public private(set) var isAvailable = false
     @Published public private(set) var devices: [LogitechDevice] = []
+    /// 曾经检测到过的罗技设备；鼠标离线后依然保留，插件不会被隐藏或关闭
+    @Published public private(set) var knownDevices: [LogitechKnownDevice] = []
     @Published public private(set) var profiles: [LogitechProfile] = []
     @Published public private(set) var bindings: [String: [String: String]] = [:]
+    /// 每个设备选定的默认方案（设备 id → 方案 id），重连后自动套用
+    @Published public private(set) var defaultProfiles: [String: UUID] = [:]
     @Published public private(set) var isBusy = false
     @Published public private(set) var isEnabled: Bool = false
-    @Published public var selectedID: String?
+    @Published public var selectedID: String? {
+        didSet {
+            guard selectedID != oldValue else { return }
+            defaults.set(selectedID, forKey: "logitech.selectedID")
+        }
+    }
     @Published public private(set) var message: String?
     @Published public private(set) var activeProfile: UUID?
     @Published public private(set) var lastButton: String?
+    /// 需要引导用户配置的设备；界面监听它来弹设置向导
+    @Published public private(set) var pendingSetup: LogitechKnownDevice?
     public var onAction: ((String) -> Void)?
     private let worker: LogitechWorker
     private let defaults: UserDefaults
@@ -22,6 +33,9 @@ public final class LogitechDeviceService: ObservableObject {
     private var moduleEnabled = true
     private var preferredEnabled: Bool
     private var owned = Set<String>()
+    /// 本次连接里已经套用过默认方案的设备，避免每次刷新都重放一遍
+    private var autoApplied = Set<String>()
+    private var setupDone = Set<String>()
 
     public init(defaults: UserDefaults = .standard, autoConnect: Bool = true, availabilityProvider: (() -> Bool)? = nil) {
         self.defaults = defaults
@@ -29,8 +43,15 @@ public final class LogitechDeviceService: ObservableObject {
         worker = LogitechWorker(defaults: defaults)
         preferredEnabled = defaults.object(forKey: "logitech.enabled") as? Bool ?? true
         isAvailable = self.availabilityProvider()
-        isEnabled = preferredEnabled && isAvailable
+        // 启用状态只取决于用户的选择：鼠标离线也保持启用，下次连上自动接管
+        isEnabled = preferredEnabled
         if let data = defaults.data(forKey: "logitech.profiles"), let saved = try? JSONDecoder().decode([LogitechProfile].self, from: data) { profiles = saved }
+        if let data = defaults.data(forKey: "logitech.knownDevices"), let saved = try? JSONDecoder().decode([LogitechKnownDevice].self, from: data) { knownDevices = saved }
+        setupDone = Set(defaults.stringArray(forKey: "logitech.setupDone") ?? [])
+        if let saved = defaults.dictionary(forKey: "logitech.defaultProfiles") as? [String: String] {
+            defaultProfiles = saved.compactMapValues(UUID.init(uuidString:))
+        }
+        selectedID = defaults.string(forKey: "logitech.selectedID")
         bindings = defaults.object(forKey: "logitech.bindings") as? [String: [String: String]] ?? [:]
         worker.buttonHandler = { [weak self] id, cid in
             Task { @MainActor in
@@ -43,19 +64,103 @@ public final class LogitechDeviceService: ObservableObject {
                 }
             }
         }
+        // 启动时先登记一次已经插着的设备，向导窗口才会在首次发现时弹出来
+        refreshKnownDevices()
         if autoConnect {
-            timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            timer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     guard let self else { return }
                     self.updateAvailability()
                     guard self.isEnabled, self.moduleEnabled, !self.isBusy else { return }
-                    if self.devices.isEmpty { self.connect() } else { self.refresh() }
+                    if self.isAvailable {
+                        if self.devices.isEmpty { self.connect() } else { self.refresh() }
+                    }
                 }
             }
-            if isEnabled { connect() }
+            if isEnabled && isAvailable { connect() }
         }
     }
     deinit { timer?.invalidate(); let worker = worker; worker.queue.async { worker.disconnect() } }
+
+    // MARK: - 设备记忆
+
+    /// 插件是否值得出现在鼠标页：连着、见过、或存过方案都算
+    public var showsCard: Bool { isAvailable || !knownDevices.isEmpty || !profiles.isEmpty }
+    /// 鼠标此刻是否在线
+    public var isOnline: Bool { !devices.isEmpty }
+    public var hasKnownDevices: Bool { !knownDevices.isEmpty }
+    /// 离线时用来展示方案的设备（上次选中的那只）
+    public var rememberedDeviceID: String? { selectedDevice?.id ?? selectedID ?? knownDevices.first?.id }
+    public func knownDevice(for id: String?) -> LogitechKnownDevice? {
+        guard let id else { return nil }
+        return knownDevices.first { $0.id == id } ?? knownDevices.first
+    }
+
+    /// 检测到设备后弹一次设置向导；同一只鼠标只提示一次
+    public func requestSetup(_ device: LogitechKnownDevice? = nil) {
+        let target = device ?? pendingSetup ?? knownDevices.first
+        guard let target else { return }
+        pendingSetup = target
+    }
+    public func markSetupDone(_ identity: String? = nil) {
+        let key = identity ?? pendingSetup?.identity
+        if let key { setupDone.insert(key); defaults.set(Array(setupDone), forKey: "logitech.setupDone") }
+        pendingSetup = nil
+    }
+    public func dismissSetup() { markSetupDone() }
+
+    private func refreshKnownDevices() {
+        let candidates = LogitechDiscovery.candidates()
+        guard !candidates.isEmpty else { return }
+        var updated = knownDevices
+        var changed = false
+        for candidate in candidates {
+            if let index = updated.firstIndex(where: { $0.identity == candidate.identity }) {
+                if updated[index].id != candidate.id { updated[index].id = candidate.id; changed = true }
+                if updated[index].name != candidate.name { updated[index].name = candidate.name; changed = true }
+                if updated[index].transport != candidate.transport { updated[index].transport = candidate.transport; changed = true }
+            } else {
+                let entry = LogitechKnownDevice(
+                    id: candidate.id,
+                    name: candidate.name,
+                    transport: candidate.transport,
+                    identity: candidate.identity
+                )
+                updated.append(entry)
+                changed = true
+                if !setupDone.contains(entry.identity) { pendingSetup = entry }
+            }
+        }
+        if changed {
+            knownDevices = updated
+            if let data = try? JSONEncoder().encode(updated) { defaults.set(data, forKey: "logitech.knownDevices") }
+        }
+    }
+
+    // MARK: - 默认方案
+
+    public func defaultProfileID(for deviceID: String) -> UUID? { defaultProfiles[deviceID] }
+    public var selectedDefaultProfileID: UUID? { selectedDevice.flatMap { defaultProfiles[$0.id] } }
+    public func isDefaultProfile(_ id: UUID, deviceID: String? = nil) -> Bool {
+        guard let deviceID = deviceID ?? selectedDevice?.id else { return false }
+        return defaultProfiles[deviceID] == id
+    }
+    public func setDefaultProfile(_ id: UUID?, for deviceID: String? = nil) {
+        guard let deviceID = deviceID ?? selectedDevice?.id else { return }
+        if let id, profiles.contains(where: { $0.id == id && $0.deviceID == deviceID }) {
+            defaultProfiles[deviceID] = id
+            message = "已设为默认方案，连接这台鼠标时会自动套用"
+        } else {
+            defaultProfiles.removeValue(forKey: deviceID)
+            message = "已取消默认方案"
+        }
+        autoApplied.remove(deviceID)
+        persistDefaults()
+    }
+
+    private func persistDefaults() {
+        defaults.set(defaultProfiles.mapValues(\.uuidString), forKey: "logitech.defaultProfiles")
+    }
 
     private func handleAction(_ action: String) {
         guard let device = selectedDevice else { return }
@@ -81,10 +186,12 @@ public final class LogitechDeviceService: ObservableObject {
 
     private func updateAvailability() {
         let available = availabilityProvider()
-        guard available != isAvailable else { return }
         isAvailable = available
-        isEnabled = available && preferredEnabled
-        if !available { disconnect() }
+        if available {
+            refreshKnownDevices()
+        } else if !devices.isEmpty {
+            disconnect()
+        }
     }
 
     /// 原生事件在 session tap 处理，优先于普通全局映射，吞掉配对的按下和抬起。
@@ -116,8 +223,8 @@ public final class LogitechDeviceService: ObservableObject {
     public var selectedDevice: LogitechDevice? { devices.first(where: { $0.id == selectedID }) ?? devices.first }
     public func setEnabled(_ enabled: Bool) {
         preferredEnabled = enabled
-        isEnabled = enabled && isAvailable; defaults.set(enabled, forKey: "logitech.enabled")
-        if isEnabled && moduleEnabled { connect() } else { disconnect() }
+        isEnabled = enabled; defaults.set(enabled, forKey: "logitech.enabled")
+        if isEnabled && moduleEnabled && isAvailable { connect() } else { disconnect() }
     }
     public func setModuleEnabled(_ enabled: Bool) {
         guard enabled != moduleEnabled else { return }
@@ -127,7 +234,7 @@ public final class LogitechDeviceService: ObservableObject {
     public func connect() {
         guard isEnabled, moduleEnabled, !isBusy else { return }
         generation += 1; let token = generation
-        isBusy = true; message = nil; owned.removeAll()
+        isBusy = true; message = nil; owned.removeAll(); autoApplied.removeAll()
         let worker = worker
         worker.queue.async { [weak self] in
             let (devices, errors) = worker.connect()
@@ -143,20 +250,25 @@ public final class LogitechDeviceService: ObservableObject {
                 }
                 if self.selectedID == nil || !devices.contains(where: { $0.id == self.selectedID }) { self.selectedID = devices.first?.id }
                 self.message = errors.isEmpty ? (devices.isEmpty ? "未发现可连接的罗技 HID++ 鼠标，请唤醒设备并检查输入监控权限" : nil) : errors.joined(separator: "\n")
+                self.autoApplyDefaultProfiles()
             }
         }
     }
     private func disconnect() {
-        generation += 1; devices = []; owned.removeAll(); isBusy = false; activeProfile = nil
+        generation += 1; devices = []; owned.removeAll(); isBusy = false; activeProfile = nil; autoApplied.removeAll()
         let worker = worker; worker.queue.async { worker.disconnect() }
     }
     public func reset() {
         disconnect()
         profiles = []; bindings = [:]; selectedID = nil
+        defaultProfiles = [:]
+        // 设备记忆保留：重置只清配置，不把「见过这只鼠标」也一并抹掉
         defaults.removeObject(forKey: "logitech.profiles")
         defaults.removeObject(forKey: "logitech.bindings")
-        preferredEnabled = true; isEnabled = isAvailable; defaults.set(true, forKey: "logitech.enabled")
-        if moduleEnabled { connect() }
+        defaults.removeObject(forKey: "logitech.defaultProfiles")
+        preferredEnabled = true; isEnabled = true; defaults.set(true, forKey: "logitech.enabled")
+        isAvailable = availabilityProvider()
+        if moduleEnabled && isAvailable { refreshKnownDevices(); connect() }
     }
 
     public func shutdown() {
@@ -211,15 +323,23 @@ public final class LogitechDeviceService: ObservableObject {
         let profile = LogitechProfile(name: name, device: device, bindings: bindings[device.id] ?? [:])
         profiles.append(profile); persistProfiles(); message = "已保存当前设备设置"; activeProfile = profile.id
     }
-    public func deleteProfile(_ id: UUID) { profiles.removeAll { $0.id == id }; persistProfiles(); if activeProfile == id { activeProfile = nil } }
-    public func applyProfile(_ id: UUID) {
-        guard let profile = profiles.first(where: { $0.id == id }), profile.deviceID == selectedDevice?.id else { message = "此方案不属于当前鼠标"; return }
-        applyValues(profile, id: id)
+    public func deleteProfile(_ id: UUID) {
+        profiles.removeAll { $0.id == id }
+        let stale = defaultProfiles.filter { $0.value == id }.map(\.key)
+        if !stale.isEmpty { for key in stale { defaultProfiles.removeValue(forKey: key) }; persistDefaults() }
+        persistProfiles(); if activeProfile == id { activeProfile = nil }
     }
-    private func applyValues(_ profile: LogitechProfile, id: UUID?) {
+    public func applyProfile(_ id: UUID) { applyProfile(id, completion: nil) }
+    private func applyProfile(_ id: UUID, completion: ((Bool) -> Void)?) {
+        guard let profile = profiles.first(where: { $0.id == id }), profile.deviceID == selectedDevice?.id else {
+            message = "此方案不属于当前鼠标"; completion?(false); return
+        }
+        applyValues(profile, id: id, completion: completion)
+    }
+    private func applyValues(_ profile: LogitechProfile, id: UUID?, completion: ((Bool) -> Void)? = nil) {
         let previous = bindings[profile.deviceID] ?? [:]
-        perform({ try $0.apply(profile, previousBindings: previous) }) { [weak self] in
-            guard let self else { return }
+        perform({ try $0.apply(profile, previousBindings: previous) }, success: { [weak self] in
+            guard let self else { completion?(true); return }
             self.bindings[profile.deviceID] = profile.bindings
             for button in self.devices.first(where: { $0.id == profile.deviceID })?.buttons ?? [] {
                 let key = "\(profile.deviceID):\(button.id)"
@@ -227,11 +347,39 @@ public final class LogitechDeviceService: ObservableObject {
             }
             self.defaults.set(self.bindings, forKey: "logitech.bindings")
             self.activeProfile = id; self.message = "方案已应用并读回验证"
-        }
+            completion?(true)
+        }, failure: { _ in completion?(false) })
     }
     private func persistProfiles() { if let data = try? JSONEncoder().encode(profiles) { defaults.set(data, forKey: "logitech.profiles") } }
-    private func perform(_ operation: @escaping (LogitechWorker) throws -> Void, success: @escaping () -> Void = {}) {
-        guard isEnabled, moduleEnabled, !isBusy else { return }
+
+    /// 连接后把设备选定的默认方案自动套上去（每只鼠标每次连接只做一次）
+    private func autoApplyDefaultProfiles() {
+        let targets: [(id: String, profile: UUID)] = devices.compactMap { device in
+            guard let profileID = defaultProfiles[device.id],
+                  profiles.contains(where: { $0.id == profileID && $0.deviceID == device.id }),
+                  !autoApplied.contains(device.id) else { return nil }
+            return (device.id, profileID)
+        }
+        guard !targets.isEmpty else { return }
+        applyDefaultProfiles(targets, at: 0)
+    }
+    private func applyDefaultProfiles(_ targets: [(id: String, profile: UUID)], at index: Int) {
+        guard index < targets.count, isEnabled, moduleEnabled else { return }
+        let target = targets[index]
+        if selectedID != target.id { selectedID = target.id; activeProfile = nil }
+        applyProfile(target.profile) { [weak self] applied in
+            guard let self else { return }
+            if applied { self.autoApplied.insert(target.id) }
+            self.applyDefaultProfiles(targets, at: index + 1)
+        }
+    }
+
+    private func perform(
+        _ operation: @escaping (LogitechWorker) throws -> Void,
+        success: @escaping () -> Void = {},
+        failure: ((String) -> Void)? = nil
+    ) {
+        guard isEnabled, moduleEnabled, !isBusy else { failure?(message ?? ""); return }
         isBusy = true; message = nil
         let worker = worker; let token = generation
         worker.queue.async { [weak self] in
@@ -241,7 +389,7 @@ public final class LogitechDeviceService: ObservableObject {
             Task { @MainActor in
                 guard let self, token == self.generation else { return }
                 self.devices = snapshot; self.isBusy = false
-                if let error { self.message = error; self.activeProfile = nil } else { success() }
+                if let error { self.message = error; self.activeProfile = nil; failure?(error) } else { success() }
             }
         }
     }

@@ -4,7 +4,7 @@
 import SwiftUI
 
 enum AuroraModule: String, CaseIterable, Identifiable {
-    case overview, display, pointer, trackpad, keyboard, menu, desktop, clipboard, screenshot, recorder, energy, audio, ai, settings
+    case overview, display, pointer, trackpad, keyboard, menu, desktop, clipboard, screenshot, recorder, energy, audio, storage, ai, settings
 
     var id: String { rawValue }
 
@@ -22,6 +22,7 @@ enum AuroraModule: String, CaseIterable, Identifiable {
         case .recorder: return T("录屏")
         case .energy: return T("节能")
         case .audio: return T("声音")
+        case .storage: return T("存储")
         case .ai: return T("AI用量")
         case .settings: return T("设置")
         }
@@ -41,6 +42,7 @@ enum AuroraModule: String, CaseIterable, Identifiable {
         case .recorder: return "record.circle"
         case .energy: return "cup.and.saucer.fill"
         case .audio: return "speaker.wave.2.fill"
+        case .storage: return "internaldrive"
         case .ai: return "sparkles"
         case .settings: return "gearshape"
         }

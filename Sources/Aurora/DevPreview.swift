@@ -8,6 +8,23 @@
 import AppKit
 import SwiftUI
 
+/// 存储页要等扫描（du 统计目录体积）跑完再截图，否则只有骨架
+@MainActor
+func waitForStorageScan(_ state: AppState) {
+    let deadline = Date().addingTimeInterval(40)
+    while (state.storage.isScanning || state.storage.isFindingBigFiles) && Date() < deadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    }
+}
+
+@MainActor
+private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() && Date() < deadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+    }
+}
+
 @MainActor
 enum DevPreview {
     @ViewBuilder
@@ -25,12 +42,24 @@ enum DevPreview {
         case .recorder: RecorderView(state: state)
         case .energy: EnergyView(state: state)
         case .audio: AudioView(state: state)
+        case .storage: StorageView(state: state)
         case .ai: AIView(state: state)
         case .settings: SettingsView(state: state)
         }
     }
 
     /// 屏幕检测图案的离屏预览（只用于核对图案本身，不影响真实显示器）
+    @ViewBuilder
+    static func previewBody(_ state: AppState, module: String) -> some View {
+        if module == "storage-apps" {
+            StorageView(state: state, initialTab: .apps)
+        } else if module == "storage-dev" {
+            StorageView(state: state, initialTab: .dev)
+        } else {
+            moduleView(state)
+        }
+    }
+
     static func renderScreenPattern(_ raw: String, to path: String) -> Int32 {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -96,10 +125,51 @@ enum DevPreview {
         if let target = AuroraModule(rawValue: module) {
             state.module = target
         }
+        // 离屏渲染不会跑视图的 .task，扫描得手动起一次
+        if module == "storage" || module == "storage-apps" || module == "storage-dev" {
+            state.module = .storage
+            state.storage.scan()
+            waitForStorageScan(state)
+            if module == "storage" {
+                Task { await state.universal.scan() }
+                waitUntil(timeout: 60) { state.universal.lastScan != nil && !state.universal.isScanning }
+            }
+            if module == "storage-apps" {
+                Task { await state.appInventory.scan() }
+                waitUntil(timeout: 90) { state.appInventory.lastScan != nil && !state.appInventory.isScanning }
+            } else if module == "storage-dev" {
+                Task { await state.devCleanup.scan() }
+                waitUntil(timeout: 90) { state.devCleanup.lastScan != nil && !state.devCleanup.isFindingProjects }
+            }
+        }
         if appearance == "light" {
             NSApp.appearance = NSAppearance(named: .aqua)
         } else if appearance == "dark" {
             NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+
+        // 罗技设置向导单独预览：--render logitech-setup2 渲染第 2 步
+        if module.hasPrefix("logitech-setup") {
+            let step = Int(module.dropFirst("logitech-setup".count)) ?? 0
+            let setup = LogitechSetupView(state: state, initialStep: step)
+                .environment(\.colorScheme, appearance == "light" ? .light : .dark)
+            let renderer = ImageRenderer(content: setup)
+            renderer.scale = 2
+            guard let image = renderer.nsImage,
+                  let tiff = image.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let png = rep.representation(using: .png, properties: [:]) else {
+                print("渲染失败")
+                return 1
+            }
+            do {
+                try png.write(to: URL(fileURLWithPath: path))
+                print("已输出：\(path) (660×600 @2x)")
+                return 0
+            } catch {
+                print("写入失败：\(error.localizedDescription)")
+                return 1
+            }
         }
 
         let base = PanelController.panelSize
@@ -115,7 +185,7 @@ enum DevPreview {
             .padding(.top, 14)
             .padding(.bottom, 10)
 
-            moduleView(state)
+            previewBody(state, module: module)
                 .padding(.horizontal, 14)
                 .padding(.bottom, 16)
             Spacer(minLength: 0)
@@ -153,8 +223,7 @@ enum DevPreview {
 // MARK: - 真窗口快照（不依赖屏幕录制权限）
 
 @MainActor
-enum WindowSnapshot {
-    /// 截图编辑器真窗口快照（检查工具栏在 13 个工具下是否溢出）
+enum WindowSnapshot {    /// 截图编辑器真窗口快照（检查工具栏在 13 个工具下是否溢出）
     static func captureEditor(to path: String, appearance: String) -> Int32 {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -197,8 +266,49 @@ enum WindowSnapshot {
     }
 
 
-    static func capture(module: String, to path: String, appearance: String) -> Int32 {
+    /// 罗技设置向导真窗口快照：GroupBox / Toggle 这类 AppKit 控件离屏渲染不出来，只能开真窗口
+    static func captureSetup(step: Int, to path: String, appearance: String) -> Int32 {
         let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        app.appearance = appearance == "light" ? NSAppearance(named: .aqua) : NSAppearance(named: .darkAqua)
+
+        let state = AppState(preview: true)
+        RunLoop.main.run(until: Date().addingTimeInterval(1.0))
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 660, height: 600),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = .windowBackgroundColor
+        let hosting = NSHostingView(rootView: LogitechSetupView(state: state, initialStep: step)
+            .environment(\.colorScheme, appearance == "light" ? .light : .dark))
+        window.contentView = hosting
+        window.center()
+        window.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(1.0))
+        // 窗口是自适应高度的，快照也要按内容的理想高度取景
+        let fit = hosting.fittingSize
+        if fit.height > 200 {
+            window.setContentSize(NSSize(width: 660, height: fit.height))
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+
+        guard let view = window.contentView?.superview else { return 1 }
+        let bounds = view.bounds
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: bounds) else { return 1 }
+        view.cacheDisplay(in: bounds, to: rep)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return 1 }
+        do {
+            try png.write(to: URL(fileURLWithPath: path))
+            print("已输出：\(path)")
+            window.orderOut(nil)
+            return 0
+        } catch {
+            print("写入失败：\(error.localizedDescription)")
+            return 1
+        }
+    }
+
+    static func capture(module: String, to path: String, appearance: String) -> Int32 {        let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         app.appearance = appearance == "light" ? NSAppearance(named: .aqua) : NSAppearance(named: .darkAqua)
 
@@ -214,6 +324,7 @@ enum WindowSnapshot {
         }
         if ProcessInfo.processInfo.arguments.contains("--preview-import") { state.showImport = true }
         RunLoop.main.run(until: Date().addingTimeInterval(1.5))
+        if module == "storage" { waitForStorageScan(state) }
 
         let size = PanelController.panelSize
         let window = AuroraPanel(

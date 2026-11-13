@@ -3,7 +3,7 @@ import CoreAudio
 
 // 独立验证服务，避免启动菜单栏应用或注册 Finder 扩展。
 func T(_ text: String) -> String { text }
-func TF(_ text: String, _ argument: String) -> String { String(format: text, argument) }
+func TF(_ text: String, _ arguments: CVarArg...) -> String { String(format: text, arguments: arguments) }
 enum Fmt {
     static func percent(_ value: Double) -> String { "\(Int(value * 100))%" }
 }
@@ -44,4 +44,23 @@ MainActor.assumeIsolated {
         precondition(!display.apply(mode: invalid, for: item.id))
     }
     print("✓ 无效显示模式返回失败，未提交配置")
+
+    // DDC 换算：量程覆盖 + 曲线 + 反向，必须和 MonitorControl 的算法对得上
+    if let item = display.displays.first(where: { !$0.isBuiltIn }) ?? display.displays.first {
+        display.tunings.update(item.id) { tuning in
+            tuning.maxValue["brightness"] = 255
+            tuning.minValue["brightness"] = 0
+            tuning.invert["brightness"] = false
+            tuning.curve["brightness"] = 1
+        }
+        precondition(display.encodedDDCValue(0.5, for: item.id, channel: .brightness) == 128, "线性 50% 应映射到 128")
+        precondition(display.encodedDDCValue(0, for: item.id, channel: .brightness) == 0)
+        precondition(display.encodedDDCValue(1, for: item.id, channel: .brightness) == 255)
+        display.tunings.update(item.id) { $0.invert["brightness"] = true }
+        precondition(display.encodedDDCValue(0.25, for: item.id, channel: .brightness) == 191, "反向 25% 应映射到 191")
+        display.tunings.update(item.id) { $0.invert["brightness"] = false; $0.curve["brightness"] = 2 }
+        precondition(display.encodedDDCValue(0.5, for: item.id, channel: .brightness) == 64, "曲线 2.0 时 50% 应映射到 64")
+        display.resetTuning(for: item.id)
+        print("✓ DDC 换算：量程覆盖、曲线与反向都符合预期")
+    }
 }

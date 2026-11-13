@@ -5,12 +5,16 @@ import SwiftUI
 
 struct DisplayView: View {
     @ObservedObject var service: DisplayService
+    @ObservedObject var tunings: DisplayTuningStore
+    @ObservedObject var permissions: PermissionService
     @ObservedObject var state: AppState
     @State private var pattern: ScreenPattern = .white
 
     init(state: AppState) {
         self.state = state
         self.service = state.display
+        self.tunings = state.display.tunings
+        self.permissions = state.permissions
     }
 
     var body: some View {
@@ -26,6 +30,7 @@ struct DisplayView: View {
                     displayCard(display)
                 }
             }
+            DisplayBehaviorCard(service: service, permissions: permissions)
             screenTestCard
             if let primary = service.displays.first(where: { $0.isMain }) ?? service.displays.first {
                 infoCard(primary)
@@ -76,16 +81,29 @@ struct DisplayView: View {
                 }
 
                 if display.hasVolume {
-                    SliderRow(
-                        symbol: display.volume < 0.01 ? "speaker.slash.fill" : "speaker.wave.2.fill",
-                        title: T("音量"),
-                        value: Binding(
-                            get: { display.volume },
-                            set: { service.setVolume($0, for: display.id) }
-                        ),
-                        displayText: Fmt.percent(display.volume),
-                        tint: LinearGradient(colors: [AuroraTheme.ok, AuroraTheme.accent], startPoint: .leading, endPoint: .trailing)
-                    )
+                    HStack(spacing: 6) {
+                        SliderRow(
+                            symbol: display.volume < 0.01 ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                            title: T("音量"),
+                            value: Binding(
+                                get: { display.volume },
+                                set: { service.setVolume($0, for: display.id) }
+                            ),
+                            displayText: Fmt.percent(display.volume),
+                            tint: LinearGradient(colors: [AuroraTheme.ok, AuroraTheme.accent], startPoint: .leading, endPoint: .trailing)
+                        )
+                        Button {
+                            service.toggleMute(for: display.id)
+                        } label: {
+                            Image(systemName: display.volume < 0.01 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundStyle(display.volume < 0.01 ? AnyShapeStyle(AuroraTheme.warn) : AnyShapeStyle(Color.secondary))
+                                .frame(width: 18, height: 18)
+                                .background(Circle().fill(Color.primary.opacity(0.06)))
+                        }
+                        .buttonStyle(.plain)
+                        .help(T("显示器静音"))
+                    }
                 }
 
                 if display.hasContrast {
@@ -105,8 +123,12 @@ struct DisplayView: View {
                     resolutionRow(display)
                 }
 
+                if display.hasBrightness || !display.isBuiltIn {
+                    DisplayAdvancedSettings(service: service, tunings: tunings, display: display)
+                }
+
                 if !display.hasBrightness && !display.hasVolume {
-                    Text(T("该显示器未提供 DDC 通道，暂不支持亮度调节"))
+                    Text(T("该显示器未提供 DDC 通道；可在「高级」里开启强制软件调光"))
                         .font(.system(size: 9.5))
                         .foregroundStyle(.tertiary)
                 }
@@ -314,7 +336,10 @@ struct DisplayView: View {
                 infoRow(T("原生像素"), display.pixelLabel)
                 infoRow(T("当前缩放"), display.resolutionLabel)
                 infoRow(T("刷新率"), TF("%d Hz", Int(display.refresh.rounded())))
-                infoRow(T("亮度通道"), display.isBuiltIn ? T("系统 · DisplayServices") : (display.hasBrightness ? T("外接 · DDC/CI") : T("不可用")))
+                infoRow(T("亮度通道"), display.isBuiltIn ? T("系统 · DisplayServices") : (display.softwareOnly ? T("软件 · Gamma") : (display.hasBrightness ? T("外接 · DDC/CI") : T("不可用"))))
+                if display.softwareBrightness < 0.999 {
+                    infoRow(T("软件调光"), Fmt.percent(display.softwareBrightness))
+                }
                 infoRow(T("角色"), display.isMain ? T("主显示器") : T("扩展显示器"))
             }
         }

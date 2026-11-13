@@ -19,7 +19,13 @@ final class MiniClipboardController {
     /// AppDelegate 启动时注入
     var clipboard: ClipboardService?
 
+    /// 上一次弹出用的锚点与探测结果（调试 / 自检用）
+    private(set) var lastAnchor: MiniClipboardPlacement.Anchor = .mouse
+    private(set) var lastProbe = CaretProbe()
+
     var isVisible: Bool { panel?.isVisible ?? false }
+    /// 调试 / 自检用
+    var panelFrame: NSRect? { panel?.frame }
 
     func toggle() {
         if isVisible { hide() } else { show() }
@@ -29,7 +35,19 @@ final class MiniClipboardController {
         guard let clipboard else { return }
         if panel == nil { panel = makePanel(clipboard: clipboard) }
         guard let panel else { return }
-        panel.setFrame(Self.frameForPanel(panel), display: true)
+
+        // 先把锚点读出来再 orderFront：面板一旦成为 key window，
+        // 系统级的聚焦元素就变成我们自己了。
+        let probe = clipboard.anchorAtCaret ? CaretLocator.probe() : CaretProbe()
+        let placement = MiniClipboardPlacement.resolve(
+            size: Self.contentSize,
+            probe: probe,
+            mouse: NSEvent.mouseLocation
+        )
+        lastProbe = probe
+        lastAnchor = placement.anchor
+        Debug.log("mini clipboard anchor=\(placement.anchor.rawValue) role=\(probe.role) caret=\(String(describing: probe.caret)) field=\(String(describing: probe.field)) note=\(probe.note)")
+        panel.setFrame(placement.frame, display: true)
         panel.alphaValue = 0
         panel.orderFrontRegardless()
         panel.makeKey()
@@ -51,7 +69,7 @@ final class MiniClipboardController {
 
     private func makePanel(clipboard: ClipboardService) -> AuroraMiniPanel {
         let panel = AuroraMiniPanel(
-            contentRect: Self.frameForPanel(nil),
+            contentRect: NSRect(origin: .zero, size: Self.contentSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -84,18 +102,7 @@ final class MiniClipboardController {
         return panel
     }
 
-    static let contentSize = CGSize(width: 424, height: 496)
-
-    /// 跟 Spotlight 一样：鼠标所在屏幕、水平居中、偏上
-    private static func frameForPanel(_ panel: NSPanel?) -> NSRect {
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
-        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let size = panel?.frame.size ?? contentSize
-        let x = visible.midX - size.width / 2
-        let y = visible.maxY - size.height - visible.height * 0.12
-        return NSRect(origin: CGPoint(x: x, y: y), size: size)
-    }
+    static let contentSize = CGSize(width: 320, height: 356)
 }
 
 /// 需要「能变 key 的 borderless 面板」来接住键盘输入
@@ -111,94 +118,25 @@ struct MiniClipboardView: View {
 
     @State private var selection = 0
     @State private var visible: [ClipItem] = []
+    @State private var hovered: UUID?
     @FocusState private var searchFocused: Bool
+
+    private let corner: CGFloat = 24
 
     var body: some View {
         VStack(spacing: 0) {
-            // 列表
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(spacing: 1) {
-                        if visible.isEmpty {
-                            emptyView
-                                .padding(.top, 56)
-                        } else {
-                            ForEach(Array(visible.enumerated()), id: \.element.id) { index, item in
-                                MiniClipRow(item: item, selected: index == selection)
-                                    .id(item.id)
-                                    .onTapGesture { commit(item) }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.top, 6)
-                }
-                .scrollIndicators(.never)
-                .onChange(of: selection) { _, newValue in
-                    if let item = visible[safe: newValue] {
-                        proxy.scrollTo(item.id, anchor: .center)
-                    }
-                }
-            }
-
-            Spacer(minLength: 0)
-
-            // 搜索框在底部（Maccy 的习惯）
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-                TextField(T("搜索剪贴板"), text: $clipboard.query)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .focused($searchFocused)
-                    .onSubmit { commitSelected() }
-                    .onExitCommand { onClose() }
-                    .onKeyPress(keys: [.upArrow, .downArrow]) { press in
-                        guard !visible.isEmpty else { return .ignored }
-                        let delta = press.key == .upArrow ? -1 : 1
-                        selection = (selection + delta + visible.count) % visible.count
-                        return .handled
-                    }
-                    .onKeyPress(phases: .down) { press in
-                        // ⌘1-9 直贴前九条
-                        guard press.modifiers.contains(.command),
-                              let digit = press.characters.first?.wholeNumberValue,
-                              (1...9).contains(digit),
-                              let item = visible[safe: digit - 1] else { return .ignored }
-                        commit(item)
-                        return .handled
-                    }
-
-                if !clipboard.query.isEmpty {
-                    Button {
-                        clipboard.query = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                Text(visible.isEmpty ? "" : TF("%d 项", visible.count))
-                    .font(.system(size: 8.5, design: .rounded))
-                    .foregroundStyle(.tertiary)
-                    .monospacedDigit()
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(.quinary.opacity(0.5))
+            list
+            searchBar
         }
-        .background {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(.ultraThickMaterial)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.7)
-                }
+        .frame(width: MiniClipboardController.contentSize.width,
+               height: MiniClipboardController.contentSize.height)
+        // 液态玻璃：整块面板是一枚玻璃，内容浮在上面
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: corner, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: corner, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.8)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         .onAppear {
             selection = 0
             searchFocused = true
@@ -213,17 +151,115 @@ struct MiniClipboardView: View {
         }
     }
 
+    // MARK: 列表
+
+    private var list: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    if visible.isEmpty {
+                        emptyView
+                            .padding(.top, 48)
+                    } else {
+                        ForEach(Array(visible.enumerated()), id: \.element.id) { index, item in
+                            MiniClipRow(
+                                item: item,
+                                thumbnail: item.kind == .image ? clipboard.thumbnail(for: item) : nil,
+                                selected: index == selection,
+                                hovered: hovered == item.id
+                            )
+                            .id(item.id)
+                            .onTapGesture { commit(item) }
+                            .onHover { inside in
+                                if inside { hovered = item.id } else if hovered == item.id { hovered = nil }
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+            }
+            .scrollIndicators(.never)
+            .onChange(of: selection) { _, newValue in
+                if let item = visible[safe: newValue] {
+                    proxy.scrollTo(item.id, anchor: .center)
+                }
+            }
+        }
+    }
+
     private var emptyView: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 7) {
             Image(systemName: "doc.on.clipboard")
-                .font(.system(size: 26, weight: .light))
+                .font(.system(size: 22, weight: .light))
                 .foregroundStyle(.quaternary)
             Text(clipboard.isEnabled ? T("还没有剪贴板记录") : T("剪贴板记录功能未开启"))
-                .font(.system(size: 10.5))
+                .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity)
     }
+
+    // MARK: 搜索框
+
+    private var searchBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            TextField(T("搜索剪贴板"), text: $clipboard.query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5))
+                .focused($searchFocused)
+                .onSubmit { commitSelected() }
+                .onExitCommand { onClose() }
+                .onKeyPress(keys: [.upArrow, .downArrow]) { press in
+                    guard !visible.isEmpty else { return .ignored }
+                    let delta = press.key == .upArrow ? -1 : 1
+                    selection = (selection + delta + visible.count) % visible.count
+                    return .handled
+                }
+                .onKeyPress(phases: .down) { press in
+                    // ⌘1-9 直贴前九条
+                    guard press.modifiers.contains(.command),
+                          let digit = press.characters.first?.wholeNumberValue,
+                          (1...9).contains(digit),
+                          let item = visible[safe: digit - 1] else { return .ignored }
+                    commit(item)
+                    return .handled
+                }
+
+            if !clipboard.query.isEmpty {
+                Button {
+                    clipboard.query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text(visible.isEmpty ? "" : TF("%d 项", visible.count))
+                .font(.system(size: 8, design: .rounded))
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 38)
+        .background {
+            // 搜索栏压一条更亮的分隔带，玻璃上仍能看出「这是输入区」
+            Rectangle()
+                .fill(Color.white.opacity(0.05))
+                .overlay(alignment: .top) {
+                    Rectangle().fill(Color.white.opacity(0.10)).frame(height: 0.6)
+                }
+        }
+    }
+
+    // MARK: 逻辑
 
     private func rebuild() {
         let query = clipboard.query.trimmingCharacters(in: .whitespaces)
@@ -249,27 +285,43 @@ struct MiniClipboardView: View {
 
 struct MiniClipRow: View {
     let item: ClipItem
+    let thumbnail: NSImage?
     let selected: Bool
+    let hovered: Bool
 
     var body: some View {
         HStack(spacing: 8) {
             leading
-                .frame(width: 22, height: 22)
+                .frame(width: 26, height: 26)
                 .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.primary.opacity(0.05))
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.white.opacity(selected ? 0.16 : 0.07))
                 )
 
             middle
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+            if item.pinned {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 7))
+                    .foregroundStyle(.tertiary)
+            }
             sourceIcon
         }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 5)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
         .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(selected ? AuroraTheme.accent.opacity(0.16) : Color.clear)
+            if selected {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(AuroraTheme.accent.opacity(0.42))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.28), lineWidth: 0.8)
+                    }
+            } else if hovered {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.white.opacity(0.09))
+            }
         }
         .contentShape(Rectangle())
     }
@@ -277,6 +329,19 @@ struct MiniClipRow: View {
     @ViewBuilder
     private var leading: some View {
         switch item.kind {
+        case .image:
+            if let thumbnail {
+                Image(nsImage: thumbnail)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 22, height: 22)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .padding(2)
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
         case .text:
             Image(systemName: "text.alignleft")
                 .font(.system(size: 10, weight: .medium))
@@ -289,19 +354,6 @@ struct MiniClipRow: View {
             Image(systemName: "link")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(AuroraTheme.accent)
-        case .image:
-            if let url = URL(string: item.imageFile ?? ""), let image = NSImage(contentsOf: url) {
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 18, height: 18)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .padding(2)
-            } else {
-                Image(systemName: "photo")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
         case .file:
             Image(systemName: "doc.on.doc")
                 .font(.system(size: 10, weight: .medium))
@@ -309,8 +361,8 @@ struct MiniClipRow: View {
         case .color:
             RoundedRectangle(cornerRadius: 4, style: .continuous)
                 .fill(Color(NSColor(hexString: item.colorHex ?? "#888888") ?? .gray))
-                .frame(width: 14, height: 14)
-                .padding(4)
+                .frame(width: 16, height: 16)
+                .padding(5)
         }
     }
 
@@ -351,11 +403,11 @@ struct MiniClipRow: View {
             Image(nsImage: NSWorkspace.shared.icon(forFile:
                 NSWorkspace.shared.urlForApplication(withBundleIdentifier: item.sourceBundle)?.path ?? "/System/Library/CoreServices/Finder.app"))
                 .resizable()
-                .frame(width: 13, height: 13)
-                .opacity(0.85)
+                .frame(width: 12, height: 12)
+                .opacity(0.75)
         } else if !item.source.isEmpty {
             Text(item.source)
-                .font(.system(size: 8))
+                .font(.system(size: 7.5))
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
         }

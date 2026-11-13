@@ -407,6 +407,13 @@ struct ClipboardView: View {
                 )
 
                 compactToggle(
+                    symbol: "text.cursor",
+                    title: T("贴在输入光标处"),
+                    subtitle: T("mini 面板出现在正在输入的文本框旁；读不到光标时回到屏幕中上"),
+                    isOn: $service.anchorAtCaret
+                )
+
+                compactToggle(
                     symbol: "arrow.down.forward.and.arrow.up.backward",
                     title: T("仅忽略下一次复制"),
                     subtitle: T("复制敏感内容前打开，复制后自动关闭"),

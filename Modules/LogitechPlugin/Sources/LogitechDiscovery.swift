@@ -7,6 +7,15 @@ struct LogitechCandidate {
     let name: String
     let transport: String
     let isReceiver: Bool
+    let productID: Int
+    let serial: String
+
+    /// 换 USB 口 / 重新配对后 locationID 会变，用型号 + 序列号判断「还是同一只鼠标」
+    var identity: String {
+        let serial = serial.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !serial.isEmpty { return "\(productID)-\(serial)" }
+        return "\(productID)-\(name)"
+    }
 }
 
 enum LogitechDiscovery {
@@ -32,7 +41,8 @@ enum LogitechDiscovery {
             guard seen.insert(id).inserted else { return nil }
             return LogitechCandidate(device: device, id: id, name: product,
                 transport: property(kIOHIDTransportKey) as? String ?? "HID",
-                isReceiver: product.localizedCaseInsensitiveContains("receiver") || product.localizedCaseInsensitiveContains("bolt"))
+                isReceiver: product.localizedCaseInsensitiveContains("receiver") || product.localizedCaseInsensitiveContains("bolt"),
+                productID: productID, serial: serial)
         }.sorted { $0.name < $1.name }
     }
 }

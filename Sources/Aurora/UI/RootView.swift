@@ -466,6 +466,8 @@ struct AuroraRootView: View {
                         EnergyView(state: state)
                     case .audio:
                         AudioView(state: state)
+                    case .storage:
+                        StorageView(state: state)
                     case .ai:
                         AIView(state: state)
                     case .settings:

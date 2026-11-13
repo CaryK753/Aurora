@@ -152,6 +152,12 @@ if let index = CommandLine.arguments.firstIndex(of: "--snapshot") {
     let path = index + 2 < args.count ? args[index + 2] : "/tmp/aurora-snapshot.png"
     let appearance = index + 3 < args.count ? args[index + 3] : "dark"
     var code: Int32 = 0
+    // --snapshot logitech-setup2：罗技向导第 3 步的真窗口快照
+    if module.hasPrefix("logitech-setup") {
+        let step = Int(module.dropFirst("logitech-setup".count)) ?? 0
+        MainActor.assumeIsolated { code = WindowSnapshot.captureSetup(step: step, to: path, appearance: appearance) }
+        exit(code)
+    }
     MainActor.assumeIsolated {
         code = WindowSnapshot.capture(module: module, to: path, appearance: appearance)
     }
@@ -179,9 +185,128 @@ if CommandLine.arguments.contains("--canvas-test") {
     exit(code)
 }
 
+if CommandLine.arguments.contains("--display-link-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.displayBrightnessLink() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--app-uninstall-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.appUninstall() }
+    exit(code)
+}
+
+// 插入点定位（AX）必须在 App 启动完成后才可用，先 finishLaunching 再查
+if CommandLine.arguments.contains("--caret-e2e-test") || CommandLine.arguments.contains("--caret-probe") {
+    let wantsE2E = CommandLine.arguments.contains("--caret-e2e-test")
+    var code: Int32 = 0
+    MainActor.assumeIsolated {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        app.finishLaunching()
+        if wantsE2E {
+            code = SelfTest.caretEndToEnd()
+        } else {
+            CaretLocator.diagnose().forEach { print($0) }
+        }
+    }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--keystroke-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.keystrokeDisplay() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--mini-clipboard-position-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.miniClipboardPlacement() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--camera-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.cameraCheck() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--video-bezel-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.videoBezel() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--universal-thin-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.universalThin() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--storage-trash-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.storageTrash() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--storage-scan-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.storageScan() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--logitech-wizard-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.logitechWizard() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--import-scan") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.importScan() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--display-ddc-write-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.displayDDCWrite() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--display-ddc-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.displayDDCReport() }
+    exit(code)
+}
+
 if CommandLine.arguments.contains("--audio-service-test") {
     var code: Int32 = 0
     MainActor.assumeIsolated { code = SelfTest.audioServiceRoundTrip() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--audio-default-app-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.audioDefaultInApp() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--audio-default-listener-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.audioDefaultListener() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--audio-default-chain-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.audioDefaultSwitchWithChain() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--audio-default-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.audioDefaultSwitch() }
     exit(code)
 }
 

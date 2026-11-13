@@ -1,8 +1,210 @@
 [
-  {"file": "macbook-pro-14-space-black.png", "device": "MacBook Pro 14″ 深空黑", "category": "mac", "w": 3860, "h": 2540, "screen": [418, 288, 3024, 1964]},
-  {"file": "macbook-pro-14-silver.png", "device": "MacBook Pro 14″ 银色", "category": "mac", "w": 3860, "h": 2540, "screen": [418, 288, 3024, 1964]},
-  {"file": "macbook-pro-16-space-black.png", "device": "MacBook Pro 16″ 深空黑", "category": "mac", "w": 4260, "h": 2840, "screen": [402, 303, 3456, 2234]},
-  {"file": "macbook-pro-16-silver.png", "device": "MacBook Pro 16″ 银色", "category": "mac", "w": 4260, "h": 2840, "screen": [402, 303, 3456, 2234]},
-  {"file": "iphone-17-black-portrait.png", "device": "iPhone 17 黑色 竖屏", "category": "iphone", "w": 1350, "h": 2760, "screen": [72, 69, 1206, 2622]},
-  {"file": "iphone-17-black-landscape.png", "device": "iPhone 17 黑色 横屏", "category": "iphone", "w": 2760, "h": 1350, "screen": [69, 72, 2622, 1206]}
+  {
+    "category" : "mac",
+    "device" : "MacBook Pro 14″ 深空黑",
+    "file" : "macbook-pro-14-space-black.png",
+    "h" : 2540,
+    "screen" : [
+      418,
+      288,
+      3024,
+      1964
+    ],
+    "w" : 3860
+  },
+  {
+    "category" : "mac",
+    "device" : "MacBook Pro 14″ 银色",
+    "file" : "macbook-pro-14-silver.png",
+    "h" : 2540,
+    "screen" : [
+      418,
+      288,
+      3024,
+      1964
+    ],
+    "w" : 3860
+  },
+  {
+    "category" : "mac",
+    "device" : "MacBook Pro 16″ 深空黑",
+    "file" : "macbook-pro-16-space-black.png",
+    "h" : 2840,
+    "screen" : [
+      402,
+      303,
+      3456,
+      2234
+    ],
+    "w" : 4260
+  },
+  {
+    "category" : "mac",
+    "device" : "MacBook Pro 16″ 银色",
+    "file" : "macbook-pro-16-silver.png",
+    "h" : 2840,
+    "screen" : [
+      402,
+      303,
+      3456,
+      2234
+    ],
+    "w" : 4260
+  },
+  {
+    "category" : "iphone",
+    "device" : "iPhone 17 黑色 竖屏",
+    "file" : "iphone-17-black-portrait.png",
+    "h" : 2760,
+    "screen" : [
+      72,
+      69,
+      1206,
+      2622
+    ],
+    "w" : 1350
+  },
+  {
+    "category" : "iphone",
+    "device" : "iPhone 17 黑色 横屏",
+    "file" : "iphone-17-black-landscape.png",
+    "h" : 1350,
+    "screen" : [
+      69,
+      72,
+      2622,
+      1206
+    ],
+    "w" : 2760
+  },
+  {
+    "category" : "mac",
+    "device" : "MacBook Air 13″ 银色",
+    "file" : "macbook-air-13-silver.png",
+    "h" : 2043,
+    "screen" : [
+      259,
+      169,
+      2560,
+      1664
+    ],
+    "w" : 3077
+  },
+  {
+    "category" : "mac",
+    "device" : "MacBook Air 13″ 午夜色",
+    "file" : "macbook-air-13-midnight.png",
+    "h" : 2043,
+    "screen" : [
+      259,
+      169,
+      2560,
+      1664
+    ],
+    "w" : 3077
+  },
+  {
+    "category" : "mac",
+    "device" : "MacBook Air 15″ 银色",
+    "file" : "macbook-air-15-silver.png",
+    "h" : 2290,
+    "screen" : [
+      291,
+      190,
+      2880,
+      1864
+    ],
+    "w" : 3462
+  },
+  {
+    "category" : "mac",
+    "device" : "MacBook Air 15″ 午夜色",
+    "file" : "macbook-air-15-midnight.png",
+    "h" : 2290,
+    "screen" : [
+      291,
+      190,
+      2880,
+      1864
+    ],
+    "w" : 3462
+  },
+  {
+    "category" : "mac",
+    "device" : "MacBook Pro 13″ 深空灰",
+    "file" : "macbook-pro-13-space-gray.png",
+    "h" : 1979,
+    "screen" : [
+      259,
+      169,
+      2560,
+      1600
+    ],
+    "w" : 3077
+  },
+  {
+    "category" : "mac",
+    "device" : "MacBook Pro 15″ 银色",
+    "file" : "macbook-pro-15-silver.png",
+    "h" : 2226,
+    "screen" : [
+      291,
+      190,
+      2880,
+      1800
+    ],
+    "w" : 3462
+  },
+  {
+    "category" : "mac",
+    "device" : "MacBook 12″ 金色",
+    "file" : "macbook-12-gold.png",
+    "h" : 1781,
+    "screen" : [
+      233,
+      152,
+      2304,
+      1440
+    ],
+    "w" : 2769
+  },
+  {
+    "category" : "mac",
+    "device" : "Studio Display 27″",
+    "file" : "studio-display-silver.png",
+    "h" : 2230,
+    "screen" : [
+      189,
+      144,
+      3000,
+      1688
+    ],
+    "w" : 3378
+  },
+  {
+    "category" : "mac",
+    "device" : "Pro Display XDR 32″",
+    "file" : "pro-display-xdr.png",
+    "h" : 2453,
+    "screen" : [
+      208,
+      158,
+      3300,
+      1856
+    ],
+    "w" : 3716
+  },
+  {
+    "category" : "mac",
+    "device" : "iMac 24″ 蓝色",
+    "file" : "imac-24-blue.png",
+    "h" : 2513,
+    "screen" : [
+      197,
+      150,
+      3120,
+      1755
+    ],
+    "w" : 3513
+  }
 ]

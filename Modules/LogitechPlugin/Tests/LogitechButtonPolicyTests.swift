@@ -7,17 +7,36 @@ final class LogitechButtonPolicyTests: XCTestCase {
         XCTAssertEqual(LogitechButtonPolicy.nativeButton(cid: 0x53, transport: "Bluetooth"), 3)
         XCTAssertEqual(LogitechButtonPolicy.nativeButton(cid: 0x56, transport: "Bluetooth"), 4)
     }
+    /// 插件开关不再跟「当前有没有设备」绑定：鼠标离线时开关保持开启，
+    /// 只是不建立连接、不接管按键，重新连上会自动接管。
     @MainActor
-    func testNoLogitechMouseDisablesPluginDespiteSavedPreference() {
+    func testNoLogitechMouseKeepsSavedPreferenceEnabled() {
         let suite = "aurora.logitech.availability." + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set(true, forKey: "logitech.enabled")
         let service = LogitechDeviceService(defaults: defaults, autoConnect: false, availabilityProvider: { false })
         XCTAssertFalse(service.isAvailable)
-        XCTAssertFalse(service.isEnabled)
+        XCTAssertTrue(service.isEnabled)
+        // 离线时点开关仍然是「开」，但不会去连不存在的设备
         service.setEnabled(true)
+        XCTAssertTrue(service.isEnabled)
+        XCTAssertFalse(service.handleNativeButton(3))
+        // 用户主动关掉才会真的关
+        service.setEnabled(false)
         XCTAssertFalse(service.isEnabled)
+    }
+
+    /// 从没开过的机器上默认开启（模块开关才是总闸），但没有设备就不连接
+    @MainActor
+    func testNoLogitechMouseStaysIdleWhileEnabled() {
+        let suite = "aurora.logitech.default." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let service = LogitechDeviceService(defaults: defaults, autoConnect: false, availabilityProvider: { false })
+        XCTAssertFalse(service.isAvailable)
+        XCTAssertTrue(service.isEnabled)
+        XCTAssertTrue(service.devices.isEmpty)
         XCTAssertFalse(service.handleNativeButton(3))
     }
     func testSpecialAndReceiverButtonsUseHIDPP() {

@@ -36,6 +36,8 @@ enum ModuleTranslations {
         "密码管理器、瞬时标记的内容不写入历史": "Password managers and transient items are skipped",
         "单击直接粘贴": "Click to paste",
         "点击记录就粘贴到上一个 App，不用再按 ⌘V": "Clicking an item pastes it into the previous app, no ⌘V needed",
+        "贴在输入光标处": "Open at the text cursor",
+        "mini 面板出现在正在输入的文本框旁；读不到光标时回到屏幕中上": "The mini panel opens next to the field you're typing in; otherwise it falls back to the upper screen center",
         "仅忽略下一次复制": "Ignore the next copy",
         "复制敏感内容前打开，复制后自动关闭": "Turn on before copying something sensitive; it switches itself off",
         "已忽略的应用": "Ignored apps",

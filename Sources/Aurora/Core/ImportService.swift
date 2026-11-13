@@ -18,11 +18,30 @@ enum ImportTarget: Hashable {
     case clipboardEnabled
     case energyOnLaunch
     case energyDisplay
+    // 显示器（MonitorControl）
+    case contrast(CGDirectDisplayID)
+    case displayVolume(CGDirectDisplayID)
+    case displayName(CGDirectDisplayID)
+    case ddcMax(CGDirectDisplayID)
+    case ddcMin(CGDirectDisplayID)
+    case ddcCurve(CGDirectDisplayID)
+    case ddcInvert(CGDirectDisplayID)
+    case displaySoftwareOnly(CGDirectDisplayID)
+    case displayKeyboardEnabled(CGDirectDisplayID)
+    case displayMuteAtZero(CGDirectDisplayID)
+    case displayHideOSD(CGDirectDisplayID)
+    case smoothBrightness
+    case combinedDimming
+    case syncDisplays
+    case followMouseDisplay
+    case restoreBrightness
 }
 
 enum ImportValue {
     case number(Double)
     case flag(Bool)
+    case integer(Int)
+    case text(String)
     case action(FinderAction)
 }
 

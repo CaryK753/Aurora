@@ -89,6 +89,15 @@ final class NotificationService: ObservableObject {
     func notifyEnergyFinished() {
         post(title: TN("休息时间结束"), body: TN("Aurora 已恢复正常休眠策略。"))
     }
+
+    /// 首次发现罗技鼠标：提示可以打开设置向导
+    func notifyLogitechDetected(name: String) {
+        post(
+            title: TN("发现罗技鼠标"),
+            body: TF("%@ 已连接，跟着向导完成鼠标设置。", name),
+            identifier: "aurora.logitech.setup"
+        )
+    }
 }
 
 /// 通知文案走 T()，但标题需要短，单独包一层方便以后统一替换

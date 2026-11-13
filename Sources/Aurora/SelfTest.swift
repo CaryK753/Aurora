@@ -8,6 +8,8 @@ import os
 import CoreAudio
 import AudioToolbox
 import ServiceManagement
+import ScreenCaptureKit
+import Carbon.HIToolbox
 
 @MainActor
 enum SelfTest {
@@ -433,6 +435,959 @@ enum SelfTest {
             return -1
         }
         return value
+    }
+
+    /// 打开真实的向导窗口：确认自适应高度生效、内容不会被裁
+    static func logitechWizard() -> Int32 {
+        _ = NSApplication.shared
+        let state = AppState(preview: true)
+        let controller = LogitechSetupWindowController(state: state)
+        state.showLogitechSetup = true
+        RunLoop.main.run(until: Date().addingTimeInterval(1.6))
+        let window = controller.window
+        let content = window.contentLayoutRect
+        print(String(format: "可见=%@ 内容=%.0f×%.0f 窗口=%.0f×%.0f",
+                     window.isVisible ? "是" : "否", content.width, content.height,
+                     window.frame.width, window.frame.height))
+        if let view = window.contentView?.superview,
+           let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+            view.cacheDisplay(in: view.bounds, to: rep)
+            if let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: "/tmp/wizard-real.png"))
+                print("截图：/tmp/wizard-real.png")
+            }
+        }
+        state.dismissLogitechSetup()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        print(window.isVisible ? "✗ 关闭后窗口还在" : "✓ 关闭后窗口已收起")
+        return 0
+    }
+
+    /// 存储清理机制：只动目录里的子项、进废纸篓，并且目录本身保留
+    static func storageTrash() -> Int32 {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("aurora-storage-test-\(UUID().uuidString)")
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        for index in 0..<3 {
+            try? Data(repeating: 0x41, count: 4096).write(to: dir.appendingPathComponent("file-\(index).bin"))
+        }
+        let outcome = StorageService.trashChildren(of: dir.path)
+        let remaining = (try? fm.contentsOfDirectory(atPath: dir.path))?.count ?? -1
+        let keptDirectory = fm.fileExists(atPath: dir.path)
+        print("moved=\(outcome.moved) failed=\(outcome.failed) remaining=\(remaining) dirKept=\(keptDirectory)")
+
+        // 顺手把测试文件从废纸篓里清掉，别在用户的废纸篓里留垃圾
+        let trash = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".Trash")
+        for index in 0..<3 {
+            try? fm.removeItem(at: trash.appendingPathComponent("file-\(index).bin"))
+        }
+        try? fm.removeItem(at: dir)
+
+        // 废纸篓那一类走的是真删除，单独验一次
+        let purge = fm.temporaryDirectory.appendingPathComponent("aurora-storage-purge-\(UUID().uuidString)")
+        try? fm.createDirectory(at: purge, withIntermediateDirectories: true)
+        for index in 0..<2 {
+            try? Data(repeating: 0x42, count: 2048).write(to: purge.appendingPathComponent("junk-\(index).bin"))
+        }
+        let purgeOutcome = StorageService.removeChildren(of: purge.path)
+        let purgeLeft = (try? fm.contentsOfDirectory(atPath: purge.path))?.count ?? -1
+        try? fm.removeItem(at: purge)
+        print("purge moved=\(purgeOutcome.moved) failed=\(purgeOutcome.failed) remaining=\(purgeLeft)")
+
+        let ok = outcome.moved == 3 && remaining == 0 && keptDirectory
+            && purgeOutcome.moved == 2 && purgeLeft == 0
+        print(ok ? "✓ 清理只搬子项、目录保留；清空走真删除、失败 0" : "✗ 清理行为不符合预期")
+        return ok ? 0 : 1
+    }
+
+    /// 扫描一遍存储页，确认每一项都能给出体积或明确原因
+    static func storageScan() -> Int32 {
+        _ = NSApplication.shared
+        let state = AppState(preview: true)
+        state.storage.scan()
+        let deadline = Date().addingTimeInterval(60)
+        while (state.storage.isScanning || state.storage.isFindingBigFiles) && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        }
+        if let volume = state.storage.volume {
+            print("磁盘：\(volume.name) 共 \(Fmt.bytes(UInt64(volume.total))) 可用 \(Fmt.bytes(UInt64(volume.free)))")
+        }
+        for item in state.storage.items {
+            let note = item.note.map { " · \($0)" } ?? ""
+            print(String(format: "  %-22@ %@%@", item.id as NSString,
+                         (item.measured ? Fmt.bytes(UInt64(item.bytes)) : "—") as NSString, note as NSString))
+        }
+        print("大文件：\(state.storage.bigFiles.count) 个，工具：\(state.storage.tools.filter { $0.value }.keys.sorted())")
+        return 0
+    }
+
+    /// DDC 写回验证：改一点亮度再读回来，确认不是「只读得到、写不进去」
+    static func displayDDCWrite() -> Int32 {
+        let manager = DDCManager()
+        guard let id = DDCChannels.externalDisplayIDs().first,
+              let channel = manager.channel(for: id),
+              let original = channel.read(0x10) else {
+            print("✗ 没有可用的 DDC 通道")
+            return 1
+        }
+        let max = Int(original.max)
+        let current = Int(original.current)
+        let target = current >= max - 2 ? current - 2 : current + 2
+        print("原始亮度 \(current)/\(max)，写入 \(target)")
+
+        guard channel.write(0x10, value: UInt16(target)) else {
+            print("✗ 写命令发送失败")
+            return 1
+        }
+        Thread.sleep(forTimeInterval: 0.4)
+        let afterWrite = channel.read(0x10)?.current ?? 0
+        print("写入后读回 \(afterWrite)")
+
+        _ = channel.write(0x10, value: original.current)
+        Thread.sleep(forTimeInterval: 0.4)
+        let restored = channel.read(0x10)?.current ?? 0
+        print("还原后读回 \(restored)")
+
+        let ok = Int(afterWrite) == target && Int(restored) == current
+        print(ok ? "✓ DDC 写入与还原都生效" : "✗ DDC 写入没有生效")
+        return ok ? 0 : 1
+    }
+
+    /// 卸载链路：造一个假 App + 假残留，确认两者都进废纸篓、残留识别没误伤
+    static func appUninstall() -> Int32 {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        let bundleID = "com.cary.aurora.uninstalltest"
+        let bundle = home.appendingPathComponent("Applications/AuroraUninstallTest.app", isDirectory: true)
+        let leftover = home.appendingPathComponent("Library/Caches/\(bundleID)", isDirectory: true)
+        try? fm.createDirectory(at: bundle.appendingPathComponent("Contents/MacOS", isDirectory: true), withIntermediateDirectories: true)
+        try? fm.createDirectory(at: leftover, withIntermediateDirectories: true)
+        (["CFBundleExecutable": "AuroraUninstallTest", "CFBundleIdentifier": bundleID,
+          "CFBundleName": "AuroraUninstallTest"] as NSDictionary)
+            .write(to: bundle.appendingPathComponent("Contents/Info.plist"), atomically: true)
+        try? Data(repeating: 0x41, count: 4096).write(to: leftover.appendingPathComponent("junk.bin"))
+        defer {
+            try? fm.removeItem(at: bundle)
+            try? fm.removeItem(at: leftover)
+        }
+
+        let service = AppInventoryService()
+        let size = StorageService.measurePath(bundle.path)
+        let app = InstalledApp(id: bundle.path, name: "AuroraUninstallTest", bundleID: bundleID,
+                               version: "1.0", path: bundle.path, bytes: size, measured: true)
+
+        var found: [AppLeftover] = []
+        var failure: String?
+        let done = DispatchSemaphore(value: 0)
+        Task { @MainActor in
+            found = await service.leftovers(for: app)
+            failure = await service.uninstall(app: app, leftovers: found)
+            done.signal()
+        }
+        while done.wait(timeout: .now()) != .success {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+
+        print("识别残留 \(found.count) 项：\(found.map(\.path).map { ($0 as NSString).lastPathComponent })")
+        let appGone = !fm.fileExists(atPath: bundle.path)
+        let leftoverGone = !fm.fileExists(atPath: leftover.path)
+        print("应用已移除=\(appGone) 残留已移除=\(leftoverGone) 失败=\(failure ?? "无")")
+
+        // 从废纸篓里收走测试产物
+        let trash = home.appendingPathComponent(".Trash")
+        try? fm.removeItem(at: trash.appendingPathComponent("AuroraUninstallTest.app"))
+        try? fm.removeItem(at: trash.appendingPathComponent(bundleID))
+
+        let ok = failure == nil && appGone && leftoverGone && found.contains { $0.path == leftover.path }
+        print(ok ? "✓ 卸载链路正常：本体与残留都进废纸篓" : "✗ 卸载链路不符合预期")
+        return ok ? 0 : 1
+    }
+
+    /// 多屏亮度联动：分别验证「按比例」「保持差值」，最后把亮度还原
+    static func displayBrightnessLink() -> Int32 {
+        let service = DisplayService()
+        RunLoop.main.run(until: Date().addingTimeInterval(2.2))
+        guard service.displays.count >= 2 else {
+            print("· 只有一块屏幕，跳过")
+            return 0
+        }
+        let source = service.displays.first(where: { $0.isMain }) ?? service.displays[0]
+        guard let target = service.displays.first(where: { $0.id != source.id && $0.hasBrightness }) else {
+            print("· 没有第二块可调亮度的屏，跳过")
+            return 0
+        }
+        let s0 = source.brightness
+        let t0 = target.brightness
+        print(String(format: "起始：%@ %.2f → %@ %.2f", source.name, s0, target.name, t0))
+
+        var failures = 0
+        service.linkMode = .ratio
+        let s1 = max(0.06, s0 * 0.5)
+        service.setBrightness(s1, for: source.id)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        let t1 = service.displays.first { $0.id == target.id }?.brightness ?? -1
+        let expected1 = t0 * 0.5
+        print(String(format: "按比例：源 %.2f 目标 %.2f（期望 %.2f）", s1, t1, expected1))
+        if abs(t1 - expected1) > 0.03 { failures += 1 }
+
+        service.setBrightness(s0, for: source.id)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        let restored = service.displays.first { $0.id == target.id }?.brightness ?? -1
+        print(String(format: "  比例还原后：源 %.2f 目标 %.2f（起始 %.2f）",
+                     service.displays.first { $0.id == source.id }?.brightness ?? -1, restored, t0))
+
+        service.linkMode = .offset
+        let s2 = max(0.04, s0 - 0.08)
+        service.setBrightness(s2, for: source.id)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        let t2 = service.displays.first { $0.id == target.id }?.brightness ?? -1
+        let expected2 = t0 - 0.08
+        print(String(format: "保持差值：源 %.2f 目标 %.2f（期望 %.2f）", s2, t2, expected2))
+        if abs(t2 - expected2) > 0.03 { failures += 1 }
+
+        // 还原
+        service.linkMode = .off
+        service.setBrightness(s0, for: source.id)
+        service.setBrightness(t0, for: target.id)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        print(failures == 0 ? "✓ 亮度联动（比例 / 差值）都按预期" : "✗ 亮度联动结果偏差过大")
+        return failures == 0 ? 0 : 1
+    }
+
+    /// 摄像头：读权限状态，已授权时跑一次采集会话（不主动弹授权框）
+    static func cameraCheck() -> Int32 {
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        let names = [0: "未决定", 1: "受限", 2: "已拒绝", 3: "已授权"]
+        print("摄像头权限：\(names[status.rawValue] ?? "未知")（\(status.rawValue)）")
+        if status == .notDetermined {
+            print("· 第一次打开「画中画摄像头」时系统会弹一次权限框")
+            return 0
+        }
+        guard status == .authorized else {
+            print("✗ 权限被拒绝，画中画不会出现（系统设置 › 隐私与安全性 › 摄像头）")
+            return 1
+        }
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .unspecified)
+            ?? AVCaptureDevice.default(for: .video) else {
+            print("✗ 没有可用摄像头")
+            return 1
+        }
+        let session = AVCaptureSession()
+        session.sessionPreset = .high
+        do {
+            let input = try AVCaptureDeviceInput(device: device)
+            guard session.canAddInput(input) else { print("✗ 无法添加摄像头输入"); return 1 }
+            session.addInput(input)
+        } catch {
+            print("✗ 摄像头输入创建失败：\(error.localizedDescription)")
+            return 1
+        }
+        session.startRunning()
+        RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+        let running = session.isRunning
+        let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        session.stopRunning()
+        print("设备：\(device.localizedName) 分辨率 \(dims.width)×\(dims.height) 会话运行=\(running ? "是" : "否")")
+        print(running ? "✓ 摄像头可用，画中画能出画" : "✗ 采集会话没能启动")
+        return running ? 0 : 1
+    }
+
+    /// 抓一张主屏全屏图（自检 / 调试用：确认覆盖层落在哪儿）
+    static func captureMainDisplayImage() -> CGImage? {
+        var result: CGImage?
+        var done = false
+        Task { @MainActor in
+            if let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+               let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first {
+                let filter = SCContentFilter(display: display, excludingWindows: [])
+                let config = SCStreamConfiguration()
+                config.width = display.width
+                config.height = display.height
+                config.showsCursor = false
+                result = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            }
+            done = true
+        }
+        let deadline = Date().addingTimeInterval(3)
+        while !done && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        return result
+    }
+
+    /// 按键显示：组合键是否完整（⇧⌘V / ⇧⌘4 / F1 / ⌘← …），胶囊宽度是否够
+    static func keystrokeDisplay() -> Int32 {
+        var failures = 0
+        func check(_ name: String, _ actual: String?, _ expected: String) {
+            let ok = actual == expected
+            print(ok ? "✓ \(name)：\(actual ?? "nil")" : "✗ \(name)：\(actual ?? "nil")（期望 \(expected)）")
+            if !ok { failures += 1 }
+        }
+        func event(_ keyCode: Int, _ flags: NSEvent.ModifierFlags = [],
+                   chars: String = "", ignoring: String? = nil) -> NSEvent? {
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                windowNumber: 0, context: nil, characters: chars,
+                charactersIgnoringModifiers: ignoring ?? chars, isARepeat: false, keyCode: UInt16(keyCode)
+            )
+        }
+        func text(_ keyCode: Int, _ flags: NSEvent.ModifierFlags = [],
+                  chars: String = "", ignoring: String? = nil) -> String? {
+            guard let event = event(keyCode, flags, chars: chars, ignoring: ignoring) else { return nil }
+            return KeystrokeOverlayService.displayText(for: event)
+        }
+
+        let cmdShift: NSEvent.ModifierFlags = [.command, .shift]
+        check("⇧⌘V", text(kVK_ANSI_V, cmdShift, chars: "V"), "⇧⌘V")
+        check("⇧⌘4", text(kVK_ANSI_4, cmdShift, chars: "4"), "⇧⌘4")
+        check("⌥⌘V 不变成 √", text(kVK_ANSI_V, [.command, .option], chars: "√", ignoring: "v"), "⌥⌘V")
+        check("⌃⌥⇧⌘A", text(kVK_ANSI_A, [.control, .option, .shift, .command], chars: "A"), "⌃⌥⇧⌘A")
+        check("F1", text(kVK_F1), "F1")
+        check("⌘←", text(kVK_LeftArrow, [.command]), "⌘←")
+        check("⇧⌘␣", text(kVK_Space, cmdShift, chars: " "), "⇧⌘␣")
+        check("⌘⌫", text(kVK_Delete, [.command]), "⌘⌫")
+
+        // 胶囊要能放下最长的组合键，不能被截断
+        let long = "⌃⌥⇧⌘A"
+        let size = KeystrokeOverlayService.panelSize(for: long)
+        let textWidth = (long as NSString).size(withAttributes: [
+            .font: NSFont.systemFont(ofSize: 21, weight: .semibold)
+        ]).width
+        check("胶囊宽度足够", size.width > textWidth + 40 ? "\(Int(size.width))pt" : "太窄 \(Int(size.width))pt", size.width > textWidth + 40 ? "\(Int(size.width))pt" : "太窄 \(Int(size.width))pt")
+
+        print(failures == 0 ? "✓ 按键显示组合完整" : "✗ 按键显示有 \(failures) 项不符")
+        return failures == 0 ? 0 : 1
+    }
+
+    /// 端到端：自己开一个输入框、把光标放到末尾，再用 CaretLocator 读回来比对
+    /// （AX 查询必须在真 App 里跑，命令行沙箱会返回 cannotComplete）
+    static func caretEndToEnd() -> Int32 {
+        var lines: [String] = []
+        var failures = 0
+        func log(_ text: String) { lines.append(text); print(text) }
+        func check(_ name: String, _ condition: Bool, _ detail: String) {
+            log(condition ? "✓ \(name)：\(detail)" : "✗ \(name)：\(detail)")
+            if !condition { failures += 1 }
+        }
+        func finish() -> Int32 {
+            let text = lines.joined(separator: "\n") + "\n"
+            try? text.write(toFile: "/tmp/aurora-caret-e2e.txt", atomically: true, encoding: .utf8)
+            return failures == 0 ? 0 : 1
+        }
+
+        guard AXIsProcessTrusted() else {
+            log("· 辅助功能未授权，跳过（系统设置 › 隐私与安全性 › 辅助功能 勾选 Aurora）")
+            return finish()
+        }
+
+        let app = NSApplication.shared
+        // main.swift 里已经 finishLaunching：AX 端口要等 App 启动完成才可用
+        app.setActivationPolicy(.accessory)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 84),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        window.title = "Aurora caret probe"
+        let field = NSTextField(frame: NSRect(x: 24, y: 28, width: 320, height: 24))
+        field.stringValue = "Aurora caret probe"
+        field.font = .systemFont(ofSize: 13)
+        window.contentView?.addSubview(field)
+        window.setFrameOrigin(NSPoint(x: 320, y: 420))
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(field)
+        if let editor = window.fieldEditor(true, for: field) as? NSTextView {
+            editor.setSelectedRange(NSRange(location: field.stringValue.count, length: 0))
+        }
+        app.activate(ignoringOtherApps: true)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+
+        let expected = window.convertToScreen(field.convert(field.bounds, to: nil))
+        log("输入框屏幕矩形：\(expected)")
+        log("AX 状态：\(CaretLocator.availability())  isActive=\(app.isActive) 前台=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? "-")")
+
+        var probe = CaretLocator.probe()
+        for attempt in 1...4 where probe.caret == nil {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+            probe = CaretLocator.probe()
+            log("重试 \(attempt)：caret=\(String(describing: probe.caret)) note=\(probe.note)")
+        }
+        log("probe：caret=\(String(describing: probe.caret)) field=\(String(describing: probe.field)) secure=\(probe.isSecure) note=\(probe.note.isEmpty ? "-" : probe.note)")
+
+        check("读到输入框", probe.field != nil && abs((probe.field?.minX ?? -999) - expected.minX) < 6,
+              "AX \(String(describing: probe.field)) vs 实际 \(expected)")
+        guard let caret = probe.caret else {
+            log("✗ 没读到插入点（\(probe.note)）")
+            window.orderOut(nil)
+            return finish()
+        }
+        // 插入点会被撑成一行；不同 App 的 AX 行盒上下会有一行以内的偏差，给足余量
+        let caretZone = NSRect(
+            x: expected.minX - 6,
+            y: expected.minY - 26,
+            width: expected.width + 12,
+            height: expected.height + 40
+        )
+        check("插入点在输入框内", caretZone.contains(caret), "光标 \(caret) / 期望区 \(caretZone)")
+        check("插入点在文字末尾", caret.minX > expected.minX + 60 && caret.minX < expected.maxX, "光标 x=\(Int(caret.minX)) / 框 \(Int(expected.minX))…\(Int(expected.maxX))")
+
+        let placement = MiniClipboardPlacement.resolve(size: MiniClipboardController.contentSize, probe: probe, mouse: .zero)
+        check("锚点=光标", placement.anchor == .caret, placement.anchor.rawValue)
+        check(
+            "面板贴着光标（上方或下方）",
+            abs(placement.frame.minY - (caret.maxY + MiniClipboardPlacement.gap)) < 1
+                || abs(placement.frame.maxY - (caret.minY - MiniClipboardPlacement.gap)) < 1,
+            "面板 \(placement.frame)"
+        )
+        check("面板不压住光标", !placement.frame.insetBy(dx: 2, dy: 2).contains(NSPoint(x: caret.midX, y: caret.midY)), "光标 \(caret)")
+
+        if failures > 0 {
+            log("— AX 明细 —")
+            CaretLocator.diagnose().forEach { log($0) }
+        }
+        window.orderOut(nil)
+        log(failures == 0 ? "✓ 插入点定位端到端通过" : "✗ 插入点定位有 \(failures) 项不符")
+        return finish()
+    }
+
+    /// mini 剪切板定位：贴在光标上方 / 顶部翻到下方 / 边缘夹住 / 多屏 / 兜底
+    static func miniClipboardPlacement() -> Int32 {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool, _ detail: String) {
+            print(condition ? "✓ \(name)：\(detail)" : "✗ \(name)：\(detail)")
+            if !condition { failures += 1 }
+        }
+
+        guard let screen = NSScreen.main else {
+            print("✗ 没有主屏")
+            return 1
+        }
+        let visible = screen.visibleFrame
+        let size = MiniClipboardController.contentSize
+        let gap = MiniClipboardPlacement.gap
+        print("主屏可见区：\(Int(visible.minX)),\(Int(visible.minY)) \(Int(visible.width))×\(Int(visible.height))  面板 \(Int(size.width))×\(Int(size.height))")
+
+        // 1) 屏幕中下部输入 → 面板贴光标上方，左边缘对齐光标
+        let caret = NSRect(x: visible.minX + 260, y: visible.minY + 220, width: 4, height: 16)
+        var result = MiniClipboardPlacement.resolve(size: size, probe: CaretProbe(caret: caret), mouse: .zero)
+        check("锚点=光标", result.anchor == .caret, result.anchor.rawValue)
+        check(
+            "贴在光标上方",
+            abs(result.frame.minY - (caret.maxY + gap)) < 0.5,
+            "面板底部 \(Int(result.frame.minY)) / 光标顶部 \(Int(caret.maxY))"
+        )
+        check(
+            "左边缘对齐光标",
+            abs(result.frame.minX - caret.minX) < 0.5,
+            "\(Int(result.frame.minX)) vs \(Int(caret.minX))"
+        )
+        check("整块留在屏内", visible.contains(result.frame), "\(result.frame)")
+
+        // 2) 光标贴近屏幕顶部 → 翻到光标下方
+        let topCaret = NSRect(x: visible.minX + 200, y: visible.maxY - 40, width: 4, height: 16)
+        result = MiniClipboardPlacement.resolve(size: size, probe: CaretProbe(caret: topCaret), mouse: .zero)
+        check(
+            "顶部翻到光标下方",
+            abs(result.frame.maxY - (topCaret.minY - gap)) < 0.5,
+            "面板顶部 \(Int(result.frame.maxY)) / 光标底部 \(Int(topCaret.minY))"
+        )
+        check("仍在屏内", visible.contains(result.frame), "\(result.frame)")
+
+        // 3) 光标贴着右边缘 → 水平夹回可见区
+        let rightCaret = NSRect(x: visible.maxX - 6, y: visible.minY + 300, width: 4, height: 16)
+        result = MiniClipboardPlacement.resolve(size: size, probe: CaretProbe(caret: rightCaret), mouse: .zero)
+        check(
+            "右边缘不外溢",
+            result.frame.maxX <= visible.maxX - MiniClipboardPlacement.margin + 0.5,
+            "面板右 \(Int(result.frame.maxX)) / 屏右 \(Int(visible.maxX))"
+        )
+
+        // 4) 只有控件矩形（读不到插入点）→ 落在控件下方
+        let field = NSRect(x: visible.minX + 120, y: visible.maxY - 150, width: 320, height: 26)
+        result = MiniClipboardPlacement.resolve(size: size, probe: CaretProbe(field: field), mouse: .zero)
+        check("锚点=控件", result.anchor == .field, result.anchor.rawValue)
+        check(
+            "落在控件下方",
+            abs(result.frame.maxY - (field.minY - gap)) < 0.5,
+            "面板顶部 \(Int(result.frame.maxY)) / 控件底部 \(Int(field.minY))"
+        )
+
+        // 5) 什么都没有 → 老行为：鼠标所在屏、水平居中、偏上 12%
+        let mouse = NSPoint(x: visible.midX, y: visible.midY)
+        result = MiniClipboardPlacement.resolve(size: size, probe: CaretProbe(), mouse: mouse)
+        check("兜底=鼠标", result.anchor == .mouse, result.anchor.rawValue)
+        check("兜底水平居中", abs(result.frame.midX - visible.midX) < 0.5, "\(Int(result.frame.midX)) vs \(Int(visible.midX))")
+
+        // 6) 多屏：锚点在副屏上时，面板跟着去副屏
+        if NSScreen.screens.count > 1, let other = NSScreen.screens.first(where: { $0 !== screen }) {
+            let rect = NSRect(x: other.frame.midX - 2, y: other.frame.midY, width: 4, height: 16)
+            result = MiniClipboardPlacement.resolve(size: size, probe: CaretProbe(caret: rect), mouse: mouse)
+            let landed = NSScreen.screens.first { $0.frame.contains(NSPoint(x: result.frame.midX, y: result.frame.midY)) }
+            check("跟着锚点跨屏", landed === other, "落在 \(landed?.localizedName ?? "未知屏")（期望 \(other.localizedName)）")
+        } else {
+            print("· 只有一块屏幕，跳过跨屏检查")
+        }
+
+        // 7) 真实探针（从终端跑多半没有辅助功能权限，note 会说明原因）
+        let live = CaretLocator.probe()
+        print("实机探针：caret=\(String(describing: live.caret)) field=\(String(describing: live.field)) secure=\(live.isSecure) note=\(live.note.isEmpty ? "-" : live.note)")
+        print("辅助功能权限：\(AXIsProcessTrusted() ? "已授权" : "未授权（会退回屏幕中上）")")
+        if live.caret == nil && !live.note.isEmpty {
+            print("· 想验证真实定位：在 Aurora.app 里按 ⇧⌘V（Aurora 已获辅助功能权限）")
+        }
+
+        print(failures == 0 ? "✓ mini 剪切板定位符合预期" : "✗ mini 剪切板定位有 \(failures) 项不符")
+        return failures == 0 ? 0 : 1
+    }
+
+    /// 带壳录制：造一段测试视频 → 套壳导出 → 校验尺寸/时长并抽一帧出来看
+    static func videoBezel() -> Int32 {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("aurora-bezel-\(UUID().uuidString)")
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let source = dir.appendingPathComponent("source.mp4")
+        guard writeTestVideo(to: source, width: 1280, height: 800, seconds: 2) else {
+            print("✗ 生成测试视频失败")
+            return 1
+        }
+        guard let frame = ScreenshotService.shared.defaultFrame else {
+            print("✗ 没有可用的默认外壳")
+            return 1
+        }
+        print("外壳：\(frame.device) \(frame.pixelWidth)×\(frame.pixelHeight)")
+
+        // 先抽一帧源视频，确认测试素材本身有画面（否则问题出在合成而不是素材）
+        let sourceGenerator = AVAssetImageGenerator(asset: AVURLAsset(url: source))
+        sourceGenerator.requestedTimeToleranceBefore = .zero
+        sourceGenerator.requestedTimeToleranceAfter = .zero
+        if let shot = try? sourceGenerator.copyCGImage(at: CMTime(seconds: 1, preferredTimescale: 600), actualTime: nil),
+           let png = NSBitmapImageRep(cgImage: shot).representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: "/tmp/bezel-source.png"))
+            print("源视频抽帧：\(shot.width)×\(shot.height)")
+        }
+
+        let output = dir.appendingPathComponent("wrapped.mp4")
+        var failure: String?
+        var progressSeen = false
+        let done = DispatchSemaphore(value: 0)
+        Task { @MainActor in
+            do {
+                try await VideoBezel.wrap(source: source, frame: frame, to: output) { value in
+                    if value > 0.05 { progressSeen = true }
+                }
+            } catch {
+                failure = error.localizedDescription
+            }
+            done.signal()
+        }
+        while done.wait(timeout: .now()) != .success {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        if let failure {
+            print("✗ 套壳失败：\(failure)")
+            return 1
+        }
+
+        let asset = AVURLAsset(url: output)
+        var size = CGSize.zero
+        var duration = 0.0
+        var audioTracks = 0
+        let probe = DispatchSemaphore(value: 0)
+        Task {
+            if let track = try? await asset.loadTracks(withMediaType: .video).first {
+                size = (try? await track.load(.naturalSize)) ?? .zero
+            }
+            duration = (try? await asset.load(.duration).seconds) ?? 0
+            audioTracks = (try? await asset.loadTracks(withMediaType: .audio).count) ?? 0
+            probe.signal()
+        }
+        while probe.wait(timeout: .now()) != .success {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+
+        // 抽一帧存成 PNG，肉眼确认外壳与画面位置；顺便采样，
+        // 免得「只剩外壳、屏幕全黑」这种回归又被当成成功
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        var colourSpread = 0.0
+        if let shot = try? generator.copyCGImage(at: CMTime(seconds: 1, preferredTimescale: 600), actualTime: nil) {
+            let rep = NSBitmapImageRep(cgImage: shot)
+            if let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: "/tmp/bezel-frame.png"))
+            }
+            let points = [(0.25, 0.45), (0.45, 0.55), (0.62, 0.45), (0.78, 0.55)]
+            let samples = points.compactMap { rep.colorAt(x: Int(Double(shot.width) * $0.0),
+                                                          y: Int(Double(shot.height) * $0.1)) }
+            // 取「同一像素内通道差」的最大值：黑屏时它接近 0，彩条时很大
+            colourSpread = samples.map { color -> Double in
+                let values = [color.redComponent, color.greenComponent, color.blueComponent].map(Double.init)
+                return (values.max() ?? 0) - (values.min() ?? 0)
+            }.max() ?? 0
+        }
+
+        let expectedWidth: CGFloat = min(VideoBezel.maxOutputWidth, CGFloat(frame.pixelWidth))
+        let ok = abs(size.width - expectedWidth) < 2
+            && size.height > 200
+            && duration > 1.2
+            && progressSeen
+            && colourSpread > 0.2
+        print(String(format: "输出 %.0f×%.0f，时长 %.2fs，音轨 %d，收到进度 %@，屏幕内色差 %.2f",
+                     size.width, size.height, duration, audioTracks, progressSeen ? "是" : "否", colourSpread))
+        print("抽帧：/tmp/bezel-frame.png")
+        print(ok ? "✓ 带壳录制链路可用" : "✗ 带壳输出不符合预期")
+        return ok ? 0 : 1
+    }
+
+    /// 造一段彩条测试视频（不依赖屏幕录制权限）
+    private static func writeTestVideo(to url: URL, width: Int, height: Int, seconds: Double) -> Bool {
+        let writer = try? AVAssetWriter(outputURL: url, fileType: .mp4)
+        guard let writer else { return false }
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height
+        ]
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height
+            ]
+        )
+        guard writer.canAdd(input) else { return false }
+        writer.add(input)
+        guard writer.startWriting() else { return false }
+        writer.startSession(atSourceTime: .zero)
+
+        let frames = Int(seconds * 30)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        for index in 0..<frames {
+            while !input.isReadyForMoreMediaData {
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+            guard let pool = adaptor.pixelBufferPool else { break }
+            var buffer: CVPixelBuffer?
+            guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &buffer) == kCVReturnSuccess,
+                  let buffer else { break }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            if let context = CGContext(
+                data: CVPixelBufferGetBaseAddress(buffer),
+                width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
+            ) {
+                // 横向彩条，方便一眼看出画面是否被拉伸/裁切
+                let colors: [CGColor] = [
+                    CGColor(red: 0.95, green: 0.3, blue: 0.3, alpha: 1),
+                    CGColor(red: 0.3, green: 0.8, blue: 0.4, alpha: 1),
+                    CGColor(red: 0.25, green: 0.5, blue: 0.95, alpha: 1),
+                    CGColor(red: 0.95, green: 0.85, blue: 0.3, alpha: 1)
+                ]
+                for (bar, color) in colors.enumerated() {
+                    context.setFillColor(color)
+                    let barWidth = CGFloat(width) / CGFloat(colors.count)
+                    context.fill(CGRect(x: CGFloat(bar) * barWidth, y: 0, width: barWidth, height: CGFloat(height)))
+                }
+                context.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+                let progress = CGFloat(index) / CGFloat(max(frames - 1, 1))
+                context.fill(CGRect(x: 0, y: 0, width: CGFloat(width) * progress, height: 24))
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(index), timescale: 30))
+        }
+        input.markAsFinished()
+        let semaphore = DispatchSemaphore(value: 0)
+        writer.finishWriting { semaphore.signal() }
+        semaphore.wait()
+        return writer.status == .completed
+    }
+
+    /// 通用二进制：造一个假的「通用 App」，走一遍扫描 → lipo → 重签 → 校验
+    static func universalThin() -> Int32 {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        let appsDir = home.appendingPathComponent("Applications", isDirectory: true)
+        try? fm.createDirectory(at: appsDir, withIntermediateDirectories: true)
+        let bundle = appsDir.appendingPathComponent("AuroraThinTest.app", isDirectory: true)
+        try? fm.removeItem(at: bundle)
+        let macOS = bundle.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        try? fm.createDirectory(at: macOS, withIntermediateDirectories: true)
+
+        // 借一个真实的双架构可执行文件当素材
+        let source = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        guard fm.fileExists(atPath: source),
+              (try? fm.copyItem(atPath: source, toPath: macOS.appendingPathComponent("AuroraThinTest").path)) != nil else {
+            print("· 缺少素材（Chrome），跳过")
+            return 0
+        }
+        let plist: [String: Any] = [
+            "CFBundleExecutable": "AuroraThinTest",
+            "CFBundleIdentifier": "com.cary.aurora.thintest",
+            "CFBundleName": "AuroraThinTest",
+            "CFBundlePackageType": "APPL"
+        ]
+        (plist as NSDictionary).write(to: bundle.appendingPathComponent("Contents/Info.plist"), atomically: true)
+        defer { try? fm.removeItem(at: bundle) }
+
+        let binary = macOS.appendingPathComponent("AuroraThinTest").path
+        guard let before = MachOBinary.slices(at: binary)?.map(\.architecture).sorted() else {
+            print("✗ 读不到测试应用的架构")
+            return 1
+        }
+        print("瘦身前架构：\(before)")
+
+        let service = UniversalService()
+        var scanned: UniversalApp?
+        let semaphore = DispatchSemaphore(value: 0)
+        Task { @MainActor in
+            await service.scan()
+            scanned = service.apps.first { $0.id == bundle.path }
+            semaphore.signal()
+        }
+        while semaphore.wait(timeout: .now()) != .success {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        guard let app = scanned else {
+            print("✗ 扫描没有发现测试应用")
+            return 1
+        }
+        print("识别为：\(app.name) 可回收 \(Fmt.bytes(UInt64(app.wasted))) 限制=\(app.blockReason ?? "无")")
+
+        var failure: String?
+        let done = DispatchSemaphore(value: 0)
+        Task { @MainActor in
+            failure = await service.thin(app)
+            done.signal()
+        }
+        while done.wait(timeout: .now()) != .success {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        if let failure {
+            print("✗ 瘦身失败：\(failure)")
+            return 1
+        }
+
+        let after = MachOBinary.slices(at: binary)?.map(\.architecture).sorted() ?? []
+        let verify = CommandRunner.runSync("/usr/bin/codesign", ["--verify", bundle.path], timeout: 30)
+        print("瘦身后架构：\(after) 签名校验=\(verify.ok ? "通过" : "失败")")
+        let single = after == ["arm64"] && verify.ok
+
+        // 再来一遍，走「勾选 + 批量」的路径。
+        // 只勾测试应用本身：批量接口会照着 selection 直接动手，绝不能把真实 App 选进来
+        try? fm.copyItem(atPath: source, toPath: macOS.appendingPathComponent("AuroraThinTest").path)
+        var batchThinned = -1
+        var batchSelected = -1
+        var batchOnlyTestApp = false
+        let batchDone = DispatchSemaphore(value: 0)
+        Task { @MainActor in
+            await service.scan()
+            service.selection = [bundle.path]
+            batchSelected = service.selection.count
+            batchOnlyTestApp = service.selectedApps.allSatisfy { $0.id == bundle.path }
+            let summary = await service.thinSelection()
+            batchThinned = summary.thinned
+            batchDone.signal()
+        }
+        while batchDone.wait(timeout: .now()) != .success {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        let batchArch = MachOBinary.slices(at: binary)?.map(\.architecture).sorted() ?? []
+        print("批量：勾选 \(batchSelected) 项（只有测试应用：\(batchOnlyTestApp ? "是" : "否")），瘦身 \(batchThinned) 项，剩余架构 \(batchArch)")
+
+        let ok = single && batchOnlyTestApp && batchThinned == 1 && batchArch == ["arm64"]
+        print(ok ? "✓ 通用二进制瘦身链路可用（单个 + 全选批量）" : "✗ 瘦身结果不符合预期")
+        return ok ? 0 : 1
+    }
+
+    /// 打印迁移页从 MonitorControl 扫到的字段（核对解析是否对得上）
+    static func importScan() -> Int32 {
+        let state = AppState(preview: true)
+        RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+        state.imports.scan(displays: state.display.displays)
+        for source in state.imports.sources where source.id == "monitorcontrol" {
+            print("▸ \(source.name)：detected=\(source.detected)，字段 \(source.fields.count) 个")
+            for field in source.fields {
+                print("  · \(field.title) = \(field.valueText)  [\(field.detail)] → \(field.targetText) 选中=\(field.selected)")
+            }
+            if let note = source.note { print("  说明：\(note)") }
+        }
+        return 0
+    }
+
+    /// 打印每台显示器的 DDC 量程与当前值：确认写入量程和显示器报告的一致
+    static func displayDDCReport() -> Int32 {
+        let service = DisplayService()
+        RunLoop.main.run(until: Date().addingTimeInterval(1.6))
+        for item in service.displays {
+            let channel = item.isBuiltIn ? "DisplayServices" : (DDCManager().channel(for: item.id) == nil ? "无" : "DDC")
+            print("· \(item.name)：内置=\(item.isBuiltIn) 通道=\(channel) 可调亮度=\(item.hasBrightness) 报告最大值=\(item.ddcMax.map(String.init) ?? "—") 当前=\(String(format: "%.2f", item.brightness))")
+            if !item.isBuiltIn, let ddc = DDCManager().channel(for: item.id) {
+                for (label, vcp) in [("亮度", UInt8(0x10)), ("对比", UInt8(0x12)), ("音量", UInt8(0x62))] {
+                    if let reply = ddc.read(vcp) {
+                        print("    \(label) 0x\(String(vcp, radix: 16))：当前 \(reply.current) / 最大 \(reply.max)")
+                    }
+                }
+            }
+        }
+        service.shutdown()
+        return 0
+    }
+
+    /// 默认设备切换：走 AudioService 的真实代码路径，切完再读回系统值
+    static func audioDefaultSwitch() -> Int32 {
+        let service = AudioService()
+        var failures = 0
+        func check(_ name: String, _ ok: Bool, _ detail: String) {
+            print(ok ? "✓ \(name)：\(detail)" : "✗ \(name)：\(detail)")
+            if !ok { failures += 1 }
+        }
+        for output in [true, false] {
+            let list = output ? service.outputs : service.inputs
+            guard list.count > 1 else {
+                print("· 跳过\(output ? "输出" : "输入")：可用设备不足")
+                continue
+            }
+            let original = list.first(where: \.isDefault)
+            guard let target = list.first(where: { !$0.isDefault }) else { continue }
+            print("候选：\(target.name) (\(target.id))，当前默认：\(original?.name ?? "—")")
+            let ok = service.setDefault(target)
+            Thread.sleep(forTimeInterval: 0.4)
+            service.refresh()
+            let current = AudioService.defaultDevice(output: output)
+            let badge = (output ? service.outputs : service.inputs).first(where: \.isDefault)
+            check("切换到\(output ? "输出" : "输入") \(target.name)",
+                  ok && current == target.id,
+                  "返回 \(ok)，HAL=\(AudioService.name(of: current))，界面=\(badge?.name ?? "—")")
+            if let original {
+                _ = service.setDefault(original)
+                Thread.sleep(forTimeInterval: 0.3)
+            }
+        }
+        return failures == 0 ? 0 : 1
+    }
+
+    /// 在真实 AppState 环境里切默认设备：按应用音量轮询、权限监听等后台服务都在跑
+    static func audioDefaultInApp() -> Int32 {
+        _ = NSApplication.shared
+        let state = AppState(preview: true)
+        RunLoop.main.run(until: Date().addingTimeInterval(2.0))
+
+        var failures = 0
+        for output in [true, false] {
+            let list = output ? state.audio.outputs : state.audio.inputs
+            guard list.count > 1, let original = list.first(where: \.isDefault),
+                  let target = list.first(where: { !$0.isDefault }) else {
+                print("· 跳过\(output ? "输出" : "输入")：设备不足")
+                continue
+            }
+            print("\(output ? "输出" : "输入")：\(original.name) → \(target.name)")
+            let ok = state.audio.setDefault(target)
+            print("  setDefault 返回 \(ok)")
+            for wait in [0.3, 1.2, 3.0] {
+                RunLoop.main.run(until: Date().addingTimeInterval(wait))
+                let hal = AudioService.name(of: AudioService.defaultDevice(output: output))
+                let ui = (output ? state.audio.outputs : state.audio.inputs).first(where: \.isDefault)?.name ?? "—"
+                print(String(format: "  +%.1fs HAL=%@ 界面=%@ %@", wait, hal, ui, (hal == target.name && ui == target.name) ? "✓" : "✗"))
+            }
+            let hal = AudioService.defaultDevice(output: output)
+            let ui = (output ? state.audio.outputs : state.audio.inputs).first(where: \.isDefault)?.id
+            if hal != target.id || ui != target.id { failures += 1 }
+            _ = state.audio.setDefault(original)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+        }
+        print(failures == 0 ? "✓ AppState 环境下切换正常" : "✗ AppState 环境下切换有问题（\(failures) 项）")
+        return failures == 0 ? 0 : 1
+    }
+
+    /// 只验证「监听器能不能把界面状态带过去」：绕过 AudioService，直接写 HAL 再等刷新
+    static func audioDefaultListener() -> Int32 {
+        let service = AudioService()
+        let list = service.outputs
+        guard list.count > 1, let original = list.first(where: \.isDefault),
+              let target = list.first(where: { !$0.isDefault }) else {
+            print("· 可用输出设备不足，跳过")
+            return 0
+        }
+        print("初始界面默认：\(original.name)")
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var id = target.id
+        let status = AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size), &id
+        )
+        print("直接写 HAL：\(target.name) status=\(status)")
+        // 监听回调走主队列，主线程 sleep 会把它堵住，必须转 runloop
+        RunLoop.main.run(until: Date().addingTimeInterval(1.5))
+        let viaListener = service.outputs.first(where: \.isDefault)?.name ?? "—"
+        let hal = AudioService.name(of: AudioService.defaultDevice(output: true))
+        print("1.5s 后（不手动 refresh）界面默认=\(viaListener)，HAL=\(hal)")
+
+        // 还原
+        var back = original.id
+        AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil,
+                                   UInt32(MemoryLayout<AudioDeviceID>.size), &back)
+        let ok = viaListener == target.name
+        print(ok ? "✓ 监听器把界面带到了新设备" : "✗ 界面没有跟随系统默认设备变化")
+        return ok ? 0 : 1
+    }
+
+    /// 复现「按应用音量接管期间切换默认输出」：链路存在时默认设备会不会被改回去
+    static func audioDefaultSwitchWithChain() -> Int32 {
+        let player = Process()
+        player.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+        player.arguments = [waveFile(amplitude: 1)]
+        try? player.run()
+        defer { if player.isRunning { player.terminate() } }
+
+        let perApp = PerAppAudioService()
+        var itemID: String?
+        for _ in 0..<15 where itemID == nil {
+            usleep(300_000)
+            perApp.refresh()
+            itemID = perApp.items.first { $0.pid == player.processIdentifier }?.id
+        }
+        guard let itemID else {
+            print("✗ 播放器没有出现在按应用列表里")
+            perApp.shutdown()
+            return 1
+        }
+        perApp.setVolume(0.5, for: itemID)
+        Thread.sleep(forTimeInterval: 1.2)
+        print("接管中：\(perApp.isControlled(itemID))")
+
+        let service = AudioService()
+        let list = service.outputs
+        guard list.count > 1 else {
+            print("· 只有一个输出设备，跳过")
+            perApp.shutdown()
+            return 0
+        }
+        let original = list.first(where: \.isDefault)
+        guard let target = list.first(where: { !$0.isDefault }) else { perApp.shutdown(); return 0 }
+        print("切换前默认：\(original?.name ?? "—")，目标：\(target.name)")
+        let ok = service.setDefault(target)
+        for delay in [0.2, 1.0, 2.0, 3.0] {
+            Thread.sleep(forTimeInterval: delay)
+            let now = AudioService.defaultDevice(output: true)
+            print(String(format: "  +%.1fs 默认=%@（%@）", delay, AudioService.name(of: now), now == target.id ? "保持" : "被改回"))
+        }
+        let survived = AudioService.defaultDevice(output: true) == target.id
+        perApp.shutdown()
+        if let original { _ = service.setDefault(original) }
+        print(survived && ok ? "✓ 接管期间切换默认输出保持生效" : "✗ 接管期间切换默认输出被打断")
+        return survived && ok ? 0 : 1
     }
 
     /// 服务层端到端：静音音源 → 列表出现 → 调到 40% → 复位 → 链路拆除，

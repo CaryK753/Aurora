@@ -7,7 +7,9 @@ import AppKit
 struct ScreenshotView: View {
     @ObservedObject var state: AppState
     @ObservedObject private var permissions: PermissionService
-    @State private var frames: [DeviceFrame] = []
+    @ObservedObject private var frames = ScreenshotService.shared
+    /// 其余外壳默认收起
+    @State private var showsAllFrames = false
 
     init(state: AppState) {
         self.state = state
@@ -20,7 +22,7 @@ struct ScreenshotView: View {
             framesCard
             tipCard
         }
-        .onAppear { frames = ScreenshotService.shared.frames }
+        .onAppear { frames.reloadIfNeeded() }
     }
 
     // MARK: 捕获
@@ -133,22 +135,140 @@ struct ScreenshotView: View {
                         .lineLimit(1)
                 }
 
-                if frames.isEmpty {
+                if frames.frames.isEmpty {
                     Text(T("没有内置外壳，请检查应用完整性"))
                         .font(.system(size: 9.5))
                         .foregroundStyle(.tertiary)
                 } else {
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 128, maximum: 200), spacing: 8)],
-                        alignment: .leading,
-                        spacing: 8
-                    ) {
-                        ForEach(frames) { frame in
-                            frameCard(frame)
+                    // 默认那一款直接铺开，其余收在折叠里：面板就这么高，
+                    // 六张卡片一次性摊开会把下面全挤掉
+                    if let `default` = frames.defaultFrame {
+                        defaultFrameCard(`default`)
+                    }
+
+                    let others = frames.others
+                    if !others.isEmpty {
+                        DisclosureGroup(isExpanded: $showsAllFrames) {
+                            LazyVGrid(
+                                columns: [GridItem(.adaptive(minimum: 118, maximum: 200), spacing: 8)],
+                                alignment: .leading,
+                                spacing: 8
+                            ) {
+                                ForEach(others) { frame in
+                                    frameCard(frame)
+                                }
+                            }
+                            .padding(.top, 8)
+                        } label: {
+                            HStack(spacing: 5) {
+                                Text(TF("其他外壳（%d）", others.count))
+                                    .font(.system(size: 9.5, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                if !frames.isDefaultAuto {
+                                    Text(T("已指定默认"))
+                                        .font(.system(size: 8))
+                                        .foregroundStyle(AuroraTheme.accent)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(Capsule().fill(AuroraTheme.accent.opacity(0.13)))
+                                }
+                            }
                         }
+                        .disclosureGroupStyle(.automatic)
                     }
                 }
             }
+        }
+    }
+
+    /// 默认外壳：大图 + 名称 + 自动识别标记 + 恢复自动
+    private func defaultFrameCard(_ frame: DeviceFrame) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.primary.opacity(0.07))
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.8)
+                if let url = ScreenshotService.resourceURL(frame.id + ".png"),
+                   let thumb = NSImage(contentsOf: url) {
+                    Image(nsImage: thumb)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .padding(6)
+                }
+            }
+            .frame(width: 118, height: 74)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 5) {
+                    // 配色已由下面的胶囊表示，标题里就不再重复，免得被截断
+                    Text(frames.defaultFrameVariants.count > 1
+                         ? String(frame.device.dropLast(frame.variantLabel.count)).trimmingCharacters(in: .whitespaces)
+                         : frame.device)
+                        .font(.system(size: 11, weight: .semibold))
+                        .lineLimit(1)
+                    Text(T("默认"))
+                        .font(.system(size: 7.5, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(AuroraTheme.accent))
+                }
+                Text("\(Int(frame.screen.width)) × \(Int(frame.screen.height)) · " + T(frame.category == "mac" ? "按屏幕尺寸匹配" : "按比例推荐"))
+                    .font(.system(size: 8.5, design: .rounded))
+                    .foregroundStyle(.tertiary)
+
+                // 系统读不到机身配色（ioreg 与 system_profiler 都没有这项），
+                // 同尺寸的深空黑 / 银色只能让用户点一下，别假装能识别
+                let variants = frames.defaultFrameVariants
+                if variants.count > 1 {
+                    HStack(spacing: 4) {
+                        ForEach(variants) { variant in
+                            Button {
+                                frames.preferredFrameID = variant.id
+                            } label: {
+                                Text(variant.variantLabel)
+                                    .font(.system(size: 8, weight: variant.id == frame.id ? .semibold : .regular))
+                                    .foregroundStyle(variant.id == frame.id ? AnyShapeStyle(Color.white) : AnyShapeStyle(Color.secondary))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(variant.id == frame.id
+                                                               ? AnyShapeStyle(AuroraTheme.accent)
+                                                               : AnyShapeStyle(Color.primary.opacity(0.07))))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    Text(T("系统读不到机身配色，点一下选中你机器的款式"))
+                        .font(.system(size: 8))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(frames.isDefaultAuto
+                         ? T("按本机型号与屏幕分辨率自动识别")
+                         : T("已手动指定，截图时会优先用这一款"))
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !frames.isDefaultAuto {
+                    Button {
+                        frames.preferredFrameID = nil
+                    } label: {
+                        Text(T("恢复自动识别"))
+                            .font(.system(size: 8.5, weight: .medium))
+                            .foregroundStyle(AuroraTheme.accent)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(9)
+        .background {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(AuroraTheme.accent.opacity(0.08))
         }
     }
 
@@ -159,11 +279,11 @@ struct ScreenshotView: View {
                 Image(nsImage: thumb)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(height: 64)
+                    .frame(height: 56)
             } else {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(Color.primary.opacity(0.06))
-                    .frame(height: 64)
+                    .frame(height: 56)
             }
 
             VStack(spacing: 1) {
@@ -175,6 +295,18 @@ struct ScreenshotView: View {
                     .font(.system(size: 7.5, design: .rounded))
                     .foregroundStyle(.tertiary)
             }
+
+            Button {
+                frames.preferredFrameID = frame.id
+            } label: {
+                Text(T("设为默认"))
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundStyle(AuroraTheme.accent)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(AuroraTheme.accent.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
         }
         .padding(8)
         .frame(maxWidth: .infinity)

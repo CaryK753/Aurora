@@ -47,6 +47,7 @@ Three rules shaped the implementation:
 | **Recording** (Beta) | Record a whole display, a specific window, or a dragged region; system audio and microphone are muxed into one MP4 as two audio tracks — never more than one output file. Pause/resume remaps timestamps so the result has no gaps and audio stays in sync. Picture-in-picture camera bubble, mouse-click highlights and live keystrokes. Frame rate, H.265/H.264, native Retina pixels, pointer visibility; ⌥⌘R toggles recording and a draggable floating bar lets you switch sources |
 | **Energy** | Keep the Mac awake from 15 minutes to 2 hours, optionally keep the display on; stop automatically under 20% battery; start at login; **remember the state** — if keep-awake was still on when you quit, the next launch restores it (optional) |
 | **Audio** | Input/output device switching, volume and mute, **per-app volume** (0–150%) |
+| **Storage** | Three tabs: **Clean** (disk usage, caches / logs / Xcode / simulator / Homebrew / Trash with per-item checks, **universal binary thinning** (real icons, per-item and select-all), large files, CLI tool entry points), **Apps** (installed apps by size; uninstalling also collects caches, preferences, containers and login items — all into the Trash), **Dev** (13 package-manager caches plus node_modules / target / .build artifacts). Everything goes to the Trash; `brew` / `docker` / `mole` / `ncdu` are only detected and offered as "Run in Terminal" — no third-party binaries are bundled |
 | **AI usage** | Per-harness adapters: Codex (rollout logs plus real quota windows), Claude Code, opencode, WorkBuddy and more; desktop clients are detected and reported honestly. Aggregates the last 7 days, today and the 5-hour window |
 | **Settings** | Language (system / Chinese / English), appearance, launch at login, module toggles, live permission checks, automatic updates, GitHub entry and reset |
 
@@ -112,7 +113,7 @@ Useful flags:
 ```bash
 AURORA_INSTALL=0 ./build.sh release       # package only
 AURORA_UNIVERSAL=1 ./build.sh release     # arm64 + x86_64
-AURORA_VERSION=1.3.0 AURORA_BUILD=130 ./build.sh release
+AURORA_VERSION=1.4.0 AURORA_BUILD=10 ./build.sh release
 AURORA_SIGN_ID="Apple Development: ..." ./build.sh release
 ```
 

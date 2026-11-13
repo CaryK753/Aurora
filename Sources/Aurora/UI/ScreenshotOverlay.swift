@@ -19,6 +19,9 @@ final class ScreenshotSession {
     /// 长截图：固定捕获区域 + 已捕获的分段
     private var stitchRect: CGRect?
     private var segments: [CGImage] = []
+    /// 覆盖层显示期间的 Esc 监听：边框窗口不一定会成为 key window，
+    /// 只靠 NSWindow.keyDown 收不到 Esc（这是之前「按 Esc 没反应」的主因）
+    private var keyMonitor: Any?
 
     var isCapturing: Bool { !overlays.isEmpty }
 
@@ -40,6 +43,7 @@ final class ScreenshotSession {
             // 先取一次可选窗口列表（点窗口直接截整个 App 窗口）
             let windows = await ScreenshotService.selectableWindows()
             guard isCapturing == false else { return }
+            installEscapeMonitor()
             overlays = NSScreen.screens.map { screen in
                 RegionOverlayWindow(screen: screen, windows: windows, windowOnly: windowOnly) { [weak self] rect in
                     self?.commitSelection(rect, longMode: longMode)
@@ -47,7 +51,10 @@ final class ScreenshotSession {
                     self?.cancel()
                 }
             }
+            // 先把自己激活成前台 App，否则按键事件仍在别人那里
+            NSApp.activate(ignoringOtherApps: true)
             overlays.forEach { $0.makeKeyAndOrderFront(nil) }
+            overlays.first?.makeFirstResponder(overlays.first?.contentView)
         }
     }
 
@@ -76,6 +83,7 @@ final class ScreenshotSession {
     }
 
     private func commitSelection(_ rect: CGRect, longMode: Bool) {
+        removeEscapeMonitor()
         overlays.forEach { $0.orderOut(nil) }
         overlays = []
         // 等覆盖层真正离开屏幕再采
@@ -96,6 +104,7 @@ final class ScreenshotSession {
     }
 
     func cancel() {
+        removeEscapeMonitor()
         overlays.forEach { $0.orderOut(nil) }
         overlays = []
         stitchBar?.orderOut(nil)
@@ -104,9 +113,30 @@ final class ScreenshotSession {
         segments = []
     }
 
+    // MARK: Esc 取消
+
+    private func installEscapeMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard let self else { return event }
+            // 53 = Esc：吞掉事件，避免继续传到别的 App
+            if event.keyCode == 53 {
+                self.cancel()
+                return nil
+            }
+            return event
+        }
+    }
+
+    private func removeEscapeMonitor() {
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
+    }
+
     // MARK: 长截图
 
     private func showStitchBar() {
+        installEscapeMonitor()
         if stitchBar == nil {
             stitchBar = StitchBarWindow(
                 onCapture: { [weak self] in self?.captureNextSegment() },
@@ -131,6 +161,7 @@ final class ScreenshotSession {
     }
 
     private func finishStitch() {
+        removeEscapeMonitor()
         stitchBar?.orderOut(nil)
         stitchBar = nil
         let captured = segments
@@ -204,6 +235,11 @@ final class RegionOverlayWindow: NSWindow {
             return
         }
         super.keyDown(with: event)
+    }
+
+    /// 右键取消，和系统截图行为一致
+    override func rightMouseDown(with event: NSEvent) {
+        onEscape?()
     }
 }
 

@@ -170,6 +170,8 @@ final class ClipboardService: ObservableObject {
     @Published var ignoreConfidential: Bool { didSet { persistSettings() } }
     /// 单击记录直接粘贴到上一个 App（Maccy 的 pasteByDefault）
     @Published var tapToPaste: Bool { didSet { persistSettings() } }
+    /// mini 剪切板贴在输入光标处弹出（取不到光标时退回屏幕中上）
+    @Published var anchorAtCaret: Bool { didSet { persistSettings() } }
 
     @Published private(set) var ignoredApps: [String] = []
     @Published private(set) var ignoredPatterns: [String] = []
@@ -245,6 +247,7 @@ final class ClipboardService: ObservableObject {
         captureFiles = defaults.object(forKey: "clipboard.captureFiles") as? Bool ?? true
         ignoreConfidential = defaults.object(forKey: "clipboard.ignoreConfidential") as? Bool ?? true
         tapToPaste = defaults.object(forKey: "clipboard.tapToPaste") as? Bool ?? false
+        anchorAtCaret = defaults.object(forKey: "clipboard.anchorAtCaret") as? Bool ?? true
         ignoredApps = defaults.stringArray(forKey: "clipboard.ignoredApps") ?? []
         ignoredPatterns = defaults.stringArray(forKey: "clipboard.ignoredPatterns") ?? []
 
@@ -715,6 +718,7 @@ final class ClipboardService: ObservableObject {
         defaults.set(captureFiles, forKey: "clipboard.captureFiles")
         defaults.set(ignoreConfidential, forKey: "clipboard.ignoreConfidential")
         defaults.set(tapToPaste, forKey: "clipboard.tapToPaste")
+        defaults.set(anchorAtCaret, forKey: "clipboard.anchorAtCaret")
         trim()
         save()
     }

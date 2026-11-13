@@ -130,6 +130,21 @@ final class RecorderService: ObservableObject {
     @Published var showKeystrokes: Bool { didSet { ud.set(showKeystrokes, forKey: "recorder.keystrokes") } }
     /// 画中画：录制时悬浮摄像头气泡（Snapzy 同款，会被整屏采集录进画面）
     @Published var pipCamera: Bool { didSet { ud.set(pipCamera, forKey: "recorder.pip") } }
+    /// 带壳录制：停止后把成片套进设备外壳（原片保留）
+    @Published var bezelRecording: Bool { didSet { ud.set(bezelRecording, forKey: "recorder.bezel") } }
+    /// 带壳用的外壳；nil 表示跟着本机自动识别
+    @Published var bezelFrameID: String? {
+        didSet {
+            if let bezelFrameID {
+                ud.set(bezelFrameID, forKey: "recorder.bezelFrame")
+            } else {
+                ud.removeObject(forKey: "recorder.bezelFrame")
+            }
+        }
+    }
+    /// 正在合成带壳视频
+    @Published private(set) var isWrappingBezel = false
+    @Published private(set) var bezelProgress: Double = 0
 
     private let ud = UserDefaults.standard
 
@@ -193,6 +208,8 @@ final class RecorderService: ObservableObject {
         highlightClicks = ud.object(forKey: "recorder.clickHighlight") as? Bool ?? false
         showKeystrokes = ud.object(forKey: "recorder.keystrokes") as? Bool ?? false
         pipCamera = ud.object(forKey: "recorder.pip") as? Bool ?? false
+        bezelRecording = ud.object(forKey: "recorder.bezel") as? Bool ?? false
+        bezelFrameID = ud.string(forKey: "recorder.bezelFrame")
         mediaQueue = DispatchQueue(label: "aurora.recorder.media")
         micQueue = DispatchQueue(label: "aurora.recorder.mic")
         refreshSources()
@@ -261,6 +278,76 @@ final class RecorderService: ObservableObject {
             )
         }
         return sources.first { $0.id == selectedSourceID }
+    }
+
+    // MARK: - 多屏
+
+    /// 录制内容所在的屏幕（覆盖层、控制条、外壳匹配都跟着它走）
+    var targetScreen: NSScreen? {
+        guard let source = selectedSource else { return NSScreen.main }
+        switch source.kind {
+        case .display:
+            guard let id = source.display?.displayID else { return NSScreen.main }
+            return NSScreen.screens.first {
+                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == id
+            } ?? NSScreen.main
+        case .area:
+            guard let rect = source.rect else { return NSScreen.main }
+            return Self.screen(covering: rect)
+        case .window:
+            guard let frame = source.window?.frame else { return NSScreen.main }
+            // SCWindow.frame 是左上原点，先换算再找屏
+            let top = NSScreen.screens.first?.frame.maxY ?? 0
+            let center = CGPoint(x: frame.midX, y: top - frame.midY)
+            return NSScreen.screens.first { $0.frame.contains(center) } ?? NSScreen.main
+        }
+    }
+
+    /// 录制内容的尺寸（外壳按宽高比匹配：内建屏配笔记本、外接屏配显示器）
+    var recordedContentSize: CGSize? {
+        guard let source = selectedSource else { return nil }
+        switch source.kind {
+        case .display:
+            guard let display = source.display else { return nil }
+            return CGSize(width: display.width, height: display.height)
+        case .window:
+            return source.window?.frame.size
+        case .area:
+            return source.rect?.size
+        }
+    }
+
+    /// 区域录制是否横跨多块屏幕（这种加壳会张冠李戴，不自动加）
+    var areaSpansDisplays: Bool {
+        guard let source = selectedSource, source.kind == .area, let rect = source.rect else { return false }
+        let hits = NSScreen.screens.filter { $0.frame.intersection(rect).width > 40 }
+        return hits.count > 1
+    }
+
+    private static func screen(covering rect: CGRect) -> NSScreen? {
+        NSScreen.screens
+            .map { ($0, $0.frame.intersection(rect)) }
+            .filter { !$0.1.isNull }
+            .max { $0.1.width * $0.1.height < $1.1.width * $1.1.height }?
+            .0 ?? NSScreen.main
+    }
+
+    private var targetScreenIsBuiltIn: Bool {
+        guard let id = targetScreen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+            return true
+        }
+        return CGDisplayIsBuiltin(id) != 0
+    }
+
+    /// 按宽高比挑外壳：内建屏从笔记本里挑，外接屏从显示器 / iMac 里挑
+    func suggestedBezelFrame(for content: CGSize) -> DeviceFrame? {
+        let frames = ScreenshotService.shared.frames.filter { $0.category == "mac" }
+        guard !frames.isEmpty, content.width > 1, content.height > 1 else { return nil }
+        let aspect = content.width / content.height
+        let wantsLaptop = targetScreenIsBuiltIn
+        let pool = frames.filter { $0.device.contains("MacBook") == wantsLaptop }
+        let candidates = pool.isEmpty ? frames : pool
+        return candidates.min { abs($0.screenAspect - aspect) < abs($1.screenAspect - aspect) }
     }
 
     // MARK: - 区域选择（拖一个矩形只录这块屏幕）
@@ -392,6 +479,11 @@ final class RecorderService: ObservableObject {
             conf.height = Int(contentRect.height) * scale
         }
 
+        // 编码器要求宽高为偶数：区域框选很容易拖出奇数尺寸，
+        // 奇数会走到 startWriting 之后才失败，最后留下一个 0 字节的 mp4
+        conf.width = max(2, conf.width - (conf.width % 2))
+        conf.height = max(2, conf.height - (conf.height % 2))
+
         conf.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         conf.queueDepth = 8
         conf.showsCursor = showCursor
@@ -478,7 +570,10 @@ final class RecorderService: ObservableObject {
         // 会话起点要等首个视频帧的时间戳（见 appendVideo），这里不能直接定 .zero
         sessionStarted = false
         guard writer.status == .writing else {
-            lastError = T("录制引擎启动失败，请重试")
+            let detail = writer.error?.localizedDescription
+            lastError = detail.map { TF("录制引擎启动失败：%@", $0) } ?? T("录制引擎启动失败，请重试")
+            // 失败时 AVAssetWriter 已经建了一个 0 字节的空壳，别留在录像目录里
+            try? FileManager.default.removeItem(at: url)
             cleanup()
             return
         }
@@ -498,6 +593,9 @@ final class RecorderService: ObservableObject {
                 self.startTicker()
                 self.preventSleep(true)
                 self.statusNote = nil
+                // 覆盖层与控制条都放到录制所在的那块屏上
+                RecorderBar.targetScreen = self.targetScreen
+                KeystrokeOverlayService.shared.targetScreen = self.targetScreen
                 RecorderBar.shared.show()
                 if micEnabled { self.startMicCapture() }
                 if self.pipCamera { CameraBubble.shared.show() }
@@ -577,16 +675,111 @@ final class RecorderService: ObservableObject {
                             self.statusNote = T("已丢弃这段录制")
                         } else {
                             self.lastMovieURL = url
-                            self.statusNote = TF("已保存 %@", url?.lastPathComponent ?? "")
-                            NotificationService.shared.notifyRecordingSaved(name: url?.lastPathComponent ?? "Aurora.mp4")
+                            if self.bezelRecording {
+                                // 等带壳版本出来再提示，别一次性弹两条通知
+                                self.statusNote = TF("已保存 %@，正在准备带壳版本…", url?.lastPathComponent ?? "")
+                            } else {
+                                self.statusNote = TF("已保存 %@", url?.lastPathComponent ?? "")
+                                NotificationService.shared.notifyRecordingSaved(name: url?.lastPathComponent ?? "Aurora.mp4")
+                            }
+                            if let url, !discard { self.wrapIfNeeded(url) }
                         }
                     } else {
-                        let reason = self.lastError ?? T("录制文件写入失败")
+                        // 写盘失败：0 字节残片没有意义，直接清掉
+                        if let url,
+                           ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0) == 0 {
+                            try? FileManager.default.removeItem(at: url)
+                        }
+                        let reason = self.lastError ?? writer.error?.localizedDescription ?? T("录制文件写入失败")
                         self.lastError = reason
                         self.statusNote = nil
                         NotificationService.shared.notifyRecordingFailed(reason: reason)
                     }
                 }
+            }
+        }
+    }
+
+    // MARK: - 带壳
+
+    /// 当前会用的外壳：用户选定优先，否则按录制内容的宽高比 + 屏幕类型自动匹配
+    var resolvedBezelFrame: DeviceFrame? {
+        let service = ScreenshotService.shared
+        if let bezelFrameID, let frame = service.frames.first(where: { $0.id == bezelFrameID }) {
+            return frame
+        }
+        if let content = recordedContentSize, let matched = suggestedBezelFrame(for: content) {
+            return matched
+        }
+        return service.defaultFrame
+    }
+
+    /// 给一段已有录像加壳（录制结束后自动调用，也可以在「最近录像」里手动点）。
+    /// 返回错误文案，nil 表示成功；失败时原片一律保留。
+    @discardableResult
+    func wrapRecording(_ url: URL) async -> String? {
+        guard !isWrappingBezel else { return T("正在处理另一段录像") }
+        guard FileManager.default.fileExists(atPath: url.path) else { return T("找不到这段录像") }
+
+        // 手动给旧录像加壳时没有「当前录制源」的上下文，直接按视频自己的比例挑
+        let frame: DeviceFrame?
+        if let bezelFrameID, let chosen = ScreenshotService.shared.frames.first(where: { $0.id == bezelFrameID }) {
+            frame = chosen
+        } else if let size = await Self.videoPixelSize(url), let matched = suggestedBezelFrame(for: size) {
+            frame = matched
+        } else {
+            frame = ScreenshotService.shared.defaultFrame
+        }
+        guard let frame else { return T("没有可用的设备外壳") }
+
+        let base = url.deletingPathExtension()
+        let output = base.deletingLastPathComponent()
+            .appendingPathComponent(base.lastPathComponent + " 带壳.mp4")
+
+        isWrappingBezel = true
+        bezelProgress = 0
+        statusNote = T("正在套用设备外壳…")
+        do {
+            try await VideoBezel.wrap(source: url, frame: frame, to: output) { [weak self] value in
+                self?.bezelProgress = value
+            }
+            isWrappingBezel = false
+            lastMovieURL = output
+            statusNote = TF("已保存 %@（原片保留）", output.lastPathComponent)
+            NotificationService.shared.notifyRecordingSaved(name: output.lastPathComponent)
+            return nil
+        } catch {
+            isWrappingBezel = false
+            let reason = error.localizedDescription
+            lastError = reason
+            statusNote = TF("加壳失败，原片已保留：%@", url.lastPathComponent)
+            return reason
+        }
+    }
+
+    /// 视频旋转之后的像素尺寸（用来按比例匹配外壳）
+    private static func videoPixelSize(_ url: URL) async -> CGSize? {
+        let asset = AVURLAsset(url: url)
+        guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+              let size = try? await track.load(.naturalSize),
+              let transform = try? await track.load(.preferredTransform) else { return nil }
+        let rect = CGRect(origin: .zero, size: size).applying(transform)
+        return CGSize(width: abs(rect.width), height: abs(rect.height))
+    }
+
+    /// 录完之后按需套壳
+    private func wrapIfNeeded(_ url: URL) {
+        guard bezelRecording else { return }
+        // 跨屏区域录制套进一台设备的壳里会张冠李戴，交给用户手动决定
+        if bezelFrameID == nil, areaSpansDisplays {
+            statusNote = T("跨屏区域录制没有加外壳")
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            if let reason = await self.wrapRecording(url) {
+                NotificationService.shared.notifyRecordingFailed(reason: reason)
+                self.lastError = reason
             }
         }
     }

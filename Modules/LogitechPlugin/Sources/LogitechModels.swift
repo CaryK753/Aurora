@@ -50,6 +50,23 @@ public struct LogitechDevice: Identifiable, Equatable, Sendable {
     public init(id: String, name: String, transport: String) { self.id = id; self.name = name; self.transport = transport }
 }
 
+/// 曾经检测到过的罗技设备。鼠标离线后仍然保留，插件不会因为「暂时找不到设备」被关掉。
+public struct LogitechKnownDevice: Identifiable, Codable, Equatable, Sendable {
+    public var id: String
+    public var name: String
+    public var transport: String
+    /// 跨端口稳定的身份：优先用序列号，没有序列号时退回型号名
+    public var identity: String
+    public var firstSeen: Date
+    public init(id: String, name: String, transport: String, identity: String, firstSeen: Date = Date()) {
+        self.id = id
+        self.name = name
+        self.transport = transport
+        self.identity = identity
+        self.firstSeen = firstSeen
+    }
+}
+
 public struct LogitechProfile: Identifiable, Codable, Equatable, Sendable {
     public let id: UUID
     public var name: String

@@ -20,6 +20,9 @@ final class RecorderBar {
     static let idleSize = CGSize(width: 392, height: 52)
     static let recordingSize = CGSize(width: 268, height: 52)
 
+    /// 控制条跟着录制所在的那块屏（多屏时不固定主屏）
+    static var targetScreen: NSScreen?
+
     func show() {
         if panel == nil { panel = makePanel() }
         guard let panel else { return }
@@ -97,9 +100,9 @@ final class RecorderBar {
         return panel
     }
 
-    /// 主屏底部居中，离 Dock 上方一点
+    /// 录制所在屏幕底部居中，离 Dock 上方一点
     private static func frame(for recording: Bool) -> NSRect {
-        let screen = NSScreen.main ?? NSScreen.screens.first
+        let screen = targetScreen ?? NSScreen.main ?? NSScreen.screens.first
         let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let size = recording ? recordingSize : idleSize
         return NSRect(

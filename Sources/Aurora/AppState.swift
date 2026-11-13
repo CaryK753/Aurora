@@ -13,6 +13,8 @@ final class AppState: ObservableObject {
     @Published var showWelcome = false
     /// 全局快捷键页（与设置页同层的单层内容页，不是覆盖层）
     @Published var showHotkeys = false
+    /// 罗技鼠标设置向导（检测到设备后自动弹出）
+    @Published var showLogitechSetup = false
     /// 「动态壁纸」全屏覆盖层
     @Published var showWallpaper = false
     /// 固定窗口进入 macOS 全屏时为 true（圆角与红绿灯布局要跟着变）
@@ -90,6 +92,31 @@ final class AppState: ObservableObject {
         onDismissMainPanel?()
     }
 
+    // MARK: - 罗技鼠标向导
+
+    /// 设置向导当前对应的设备
+    var logitechSetupDevice: LogitechKnownDevice? {
+        logitech.pendingSetup ?? logitech.knownDevice(for: logitech.selectedID)
+    }
+
+    private func handleLogitechDetection(_ device: LogitechKnownDevice) {
+        guard !showWelcome, !showLogitechSetup,
+              UserDefaults.standard.bool(forKey: "onboarding.completed") else { return }
+        NotificationService.shared.notifyLogitechDetected(name: device.name)
+        showLogitechSetup = true
+    }
+
+    /// 用户从鼠标页手动打开向导（已提示过的设备也能重新配置）
+    func openLogitechSetup() {
+        showLogitechSetup = true
+        if logitech.pendingSetup == nil { logitech.requestSetup() }
+    }
+
+    func dismissLogitechSetup() {
+        showLogitechSetup = false
+        logitech.dismissSetup()
+    }
+
     // MARK: - 动态壁纸
 
     /// 全屏预览一张壁纸（Esc / 点击退出）
@@ -124,6 +151,10 @@ final class AppState: ObservableObject {
     let clipboard = ClipboardService()
     let energy = EnergyService()
     let audio = AudioService()
+    let storage = StorageService()
+    let appInventory = AppInventoryService()
+    let devCleanup = DevCleanupService()
+    let universal = UniversalService()
     let appAudio = PerAppAudioService()
     let ai = AIUsageService()
     let finderExt = FinderExtensionService()
@@ -141,6 +172,8 @@ final class AppState: ObservableObject {
     private var hardwareSink: AnyCancellable?
     private var moduleSink: AnyCancellable?
     private var settingsSink: AnyCancellable?
+    private var logitechSink: AnyCancellable?
+    private var welcomeSink: AnyCancellable?
 
     /// preview=true：离屏渲染/快照用，外观等偏好只存在内存里，不污染真实设置
     init(preview: Bool = false) {
@@ -181,11 +214,29 @@ final class AppState: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] granted in
                 self?.pointer.setPermissionGranted(granted)
+                self?.display.refreshNativeKeys(accessibility: granted)
             }
 
         pointer.onNativeButton = { [weak self] button in
             MainActor.assumeIsolated { self?.logitech.handleNativeButton(button) ?? false }
         }
+        // 检测到（疑似）罗技鼠标：发一条通知，并弹出设置向导。同一只鼠标只提示一次。
+        logitechSink = logitech.$pendingSetup
+            .compactMap { $0 }
+            .sink { [weak self] device in
+                Task { @MainActor in self?.handleLogitechDetection(device) }
+            }
+        // 欢迎页还在的时候先不打扰，等它收起来再补上向导
+        welcomeSink = $showWelcome
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] visible in
+                guard let self, !visible else { return }
+                Task { @MainActor in
+                    guard let pending = self.logitech.pendingSetup else { return }
+                    self.handleLogitechDetection(pending)
+                }
+            }
         logitech.onAction = { action in
             if action.hasPrefix("app:") {
                 MacroRunner.perform(.openApplication, applicationPath: String(action.dropFirst(4)))

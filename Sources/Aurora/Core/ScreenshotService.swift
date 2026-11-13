@@ -24,6 +24,11 @@ struct DeviceFrame: Identifiable, Equatable {
 
     var aspect: CGFloat { CGFloat(pixelWidth) / CGFloat(pixelHeight) }
     var screenAspect: CGFloat { screen.width / screen.height }
+
+    /// 同一尺寸下的配色 / 方向标签（"MacBook Pro 14″ 深空黑" → "深空黑"）
+    var variantLabel: String {
+        device.split(separator: " ").last.map(String.init) ?? device
+    }
 }
 
 // MARK: - 服务
@@ -35,9 +40,82 @@ final class ScreenshotService: ObservableObject {
     // MARK: 外壳库
 
     @Published private(set) var frames: [DeviceFrame] = []
+    /// 用户指定的默认外壳；nil 表示跟着本机自动识别
+    @Published var preferredFrameID: String? {
+        didSet {
+            if let preferredFrameID {
+                UserDefaults.standard.set(preferredFrameID, forKey: "screenshot.preferredFrame")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "screenshot.preferredFrame")
+            }
+        }
+    }
 
     private init() {
         loadFrames()
+        preferredFrameID = UserDefaults.standard.string(forKey: "screenshot.preferredFrame")
+            .flatMap { id in frames.contains { $0.id == id } ? id : nil }
+    }
+
+    /// 按主屏物理像素挑机型（14 / 16 英寸）
+    ///
+    /// 注意：系统不暴露机身配色（ioreg / system_profiler 里都没有），
+    /// 所以同一尺寸的「深空黑 / 银色」只能由用户自己指定，这里不猜。
+    var autoFrame: DeviceFrame? {
+        guard !frames.isEmpty else { return nil }
+        let macs = frames.filter { $0.category == "mac" }
+        guard !macs.isEmpty else { return frames.first }
+        // 认的是「内建屏」：外接显示器当主屏时，默认外壳仍该是这台 MacBook
+        let screen = Self.builtInScreen() ?? NSScreen.main ?? NSScreen.screens.first
+        let pixelWidth = screen.map { CGFloat($0.frame.width * $0.backingScaleFactor) }
+            ?? CGFloat(Self.mainDisplayPixelWidth())
+        let aspect = screen.map { $0.frame.width / $0.frame.height } ?? 16.0 / 10.0
+        // 宽度按机型分辨率匹配，比例用来区分内建屏（16:10）与外接屏（16:9）
+        func score(_ frame: DeviceFrame) -> CGFloat {
+            abs(frame.screen.width - pixelWidth) / 1200 + abs(frame.screenAspect - aspect) * 12
+        }
+        return macs.min { score($0) < score($1) }
+    }
+
+    /// 带内建屏（笔记本 / iMac）的那块 NSScreen
+    nonisolated static func builtInScreen() -> NSScreen? {
+        NSScreen.screens.first { screen in
+            guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
+                return false
+            }
+            return CGDisplayIsBuiltin(id) != 0
+        }
+    }
+
+    /// 界面与编辑器都认这一款：用户指定优先，否则自动识别
+    var defaultFrame: DeviceFrame? {
+        if let preferredFrameID, let frame = frames.first(where: { $0.id == preferredFrameID }) {
+            return frame
+        }
+        return autoFrame
+    }
+
+    var isDefaultAuto: Bool { preferredFrameID == nil }
+
+    /// 和默认款同尺寸的其它款式（同机型不同配色 / 方向）——给「换配色」用
+    var defaultFrameVariants: [DeviceFrame] {
+        guard let base = defaultFrame else { return [] }
+        return frames.filter {
+            $0.category == base.category
+                && $0.pixelWidth == base.pixelWidth
+                && $0.screen.size == base.screen.size
+        }
+    }
+
+    /// 除默认款以外的外壳（界面里折叠展示）
+    var others: [DeviceFrame] {
+        guard let id = defaultFrame?.id else { return frames }
+        return frames.filter { $0.id != id }
+    }
+
+    /// 资源没加载出来时补一次（预览/调试会先建视图再读资源）
+    func reloadIfNeeded() {
+        if frames.isEmpty { loadFrames() }
     }
 
     private func loadFrames() {
@@ -63,6 +141,7 @@ final class ScreenshotService: ObservableObject {
                 screen: CGRect(x: rect[0], y: rect[1], width: rect[2], height: rect[3])
             )
         }
+        Debug.log("device frames: \(frames.count) 款（清单 \(list.count) 项）")
     }
 
     /// 主 bundle 里的资源（开发期也兼容仓库 Resources 目录）
@@ -128,10 +207,14 @@ final class ScreenshotService: ObservableObject {
            let frame = frames.first(where: { $0.category == "iphone" && $0.screen.width > $0.screen.height }) {
             return frame
         }
-        // Mac 全屏：按主屏物理宽度挑 14 / 16 英寸
+        // Mac 全屏：优先用户指定的默认款，其次按比例 + 分辨率挑（外接屏别套进笔记本壳）
+        if let preferred = defaultFrame, preferred.category == "mac" { return preferred }
         let pixelWidth = CGFloat(Self.mainDisplayPixelWidth())
         let candidates = frames.filter { $0.category == "mac" }
-        if let exact = candidates.min(by: { abs($0.screen.width - pixelWidth) < abs($1.screen.width - pixelWidth) }) {
+        func score(_ frame: DeviceFrame) -> CGFloat {
+            abs(frame.screenAspect - aspect) * 10 + abs(frame.screen.width - pixelWidth) / 1500
+        }
+        if let exact = candidates.min(by: { score($0) < score($1) }) {
             return exact
         }
         return frames.first

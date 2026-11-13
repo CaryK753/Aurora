@@ -13,6 +13,8 @@ struct RecorderView: View {
     @ObservedObject private var recorder = RecorderService.shared
     @ObservedObject private var permissions: PermissionService
     @State private var recentFiles: [URL] = []
+    @State private var overlayAccess = OverlayAccess.hasAccessibility
+    @State private var bezelError: String?
 
     init(state: AppState) {
         self.state = state
@@ -29,6 +31,22 @@ struct RecorderView: View {
         .onAppear {
             recorder.refreshSources()
             reloadRecent()
+            overlayAccess = OverlayAccess.hasAccessibility
+        }
+        // 用户去系统设置勾完权限回来，这里跟着刷新
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            overlayAccess = OverlayAccess.hasAccessibility
+        }
+        .onChange(of: recorder.showKeystrokes) { _, on in
+            if on, !overlayAccess { OverlayAccess.requestAccessibility() }
+        }
+        .onChange(of: recorder.highlightClicks) { _, on in
+            if on, !overlayAccess { OverlayAccess.requestAccessibility() }
+        }
+        // 录制过程中切画中画：立刻出现 / 收起，不用等下一次录制
+        .onChange(of: recorder.pipCamera) { _, on in
+            guard recorder.isRecording else { return }
+            if on { CameraBubble.shared.show() } else { CameraBubble.shared.hide() }
         }
         .onReceive(recorder.$lastMovieURL) { _ in reloadRecent() }
     }
@@ -108,6 +126,17 @@ struct RecorderView: View {
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                 }
+                if recorder.isWrappingBezel {
+                    HStack(spacing: 7) {
+                        ProgressView(value: recorder.bezelProgress)
+                            .progressViewStyle(.linear)
+                            .controlSize(.mini)
+                        Text(TF("%d%%", Int(recorder.bezelProgress * 100)))
+                            .font(.system(size: 8.5, design: .rounded))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                }
 
                 Button {
                     if recorder.isRecording {
@@ -141,6 +170,7 @@ struct RecorderView: View {
                     .foregroundStyle(.tertiary)
 
                 Button {
+                    RecorderBar.targetScreen = recorder.targetScreen
                     RecorderBar.shared.show()
                 } label: {
                     HStack(spacing: 5) {
@@ -293,8 +323,29 @@ struct RecorderView: View {
                     AuroraToggle(isOn: $recorder.pipCamera)
                 }
                 Divider().opacity(0.4)
+                optionRow(symbol: "macbook", label: T("录完自动加壳"), detail: T("停止后把成片套进设备外壳，原片保留；也可以稍后在「最近录像」里手动加壳")) {
+                    AuroraToggle(isOn: $recorder.bezelRecording)
+                }
+                if recorder.bezelRecording {
+                    bezelFrameRow
+                }
+                Divider().opacity(0.4)
                 optionRow(symbol: "keyboard", label: T("显示按键"), detail: T("按下的组合键实时显示在屏幕底部（需要辅助功能权限）")) {
                     AuroraToggle(isOn: $recorder.showKeystrokes)
+                }
+
+                if (recorder.showKeystrokes || recorder.highlightClicks) && !overlayAccess {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(AuroraTheme.warn)
+                        Text(T("这两个效果要「辅助功能」权限才能录到你自己的操作"))
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 4)
+                        Button(T("去授权")) { OverlayAccess.requestAccessibility() }
+                            .controlSize(.mini)
+                    }
                 }
 
                 Divider().opacity(0.4)
@@ -329,8 +380,41 @@ struct RecorderView: View {
         }
     }
 
-    private func optionRow(symbol: String, label: String, detail: String, @ViewBuilder toggle: () -> some View) -> some View {
-        HStack(spacing: 8) {
+    /// 带壳用哪一款：默认跟截图页一致（按本机型号自动识别）
+    private var bezelFrameRow: some View {
+        let frames = ScreenshotService.shared
+        return HStack(spacing: 8) {
+            Image(systemName: "rectangle.on.rectangle")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(T("外壳款式"))
+                    .font(.system(size: 10.5, weight: .medium))
+                Text(recorder.areaSpansDisplays && recorder.bezelFrameID == nil
+                     ? T("跨屏区域录制不加壳，可手动指定")
+                     : TF("自动匹配 · %@", recorder.resolvedBezelFrame?.device ?? T("默认外壳")))
+                    .font(.system(size: 8))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            Picker("", selection: Binding(
+                get: { recorder.bezelFrameID },
+                set: { recorder.bezelFrameID = $0 }
+            )) {
+                Text(T("自动识别")).tag(String?.none)
+                ForEach(frames.frames) { frame in
+                    Text(frame.device).tag(Optional(frame.id))
+                }
+            }
+            .labelsHidden()
+            .controlSize(.small)
+            .frame(maxWidth: 132)
+        }
+    }
+
+    private func optionRow(symbol: String, label: String, detail: String, @ViewBuilder toggle: () -> some View) -> some View {        HStack(spacing: 8) {
             Image(systemName: symbol)
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -392,37 +476,80 @@ struct RecorderView: View {
                 } else {
                     VStack(spacing: 3) {
                         ForEach(recentFiles, id: \.self) { url in
-                            Button {
-                                NSWorkspace.shared.activateFileViewerSelecting([url])
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: url.pathExtension == "m4a" ? "waveform" : "film")
-                                        .font(.system(size: 9, weight: .medium))
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 18)
-                                    Text(url.lastPathComponent)
-                                        .font(.system(size: 10))
-                                        .lineLimit(1)
-                                    Spacer(minLength: 4)
-                                    if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-                                       let size = attrs[.size] as? Int {
-                                        Text(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
-                                            .font(.system(size: 8, design: .rounded))
-                                            .foregroundStyle(.tertiary)
-                                    }
-                                }
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 5)
-                                .background {
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .fill(Color.primary.opacity(0.03))
-                                }
-                            }
-                            .buttonStyle(.plain)
+                            recentRow(url)
                         }
                     }
                 }
+
+                if recorder.isWrappingBezel {
+                    HStack(spacing: 7) {
+                        ProgressView(value: recorder.bezelProgress)
+                            .progressViewStyle(.linear)
+                            .controlSize(.mini)
+                        Text(TF("%d%%", Int(recorder.bezelProgress * 100)))
+                            .font(.system(size: 8.5, design: .rounded))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                }
+                if let bezelError {
+                    Text(bezelError)
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(AuroraTheme.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
+        }
+    }
+
+    /// 最近录像的一行：点行进访达，右侧「加壳」给已有录像补一个带壳版本
+    private func recentRow(_ url: URL) -> some View {
+        let isFramed = url.lastPathComponent.contains("带壳")
+        return HStack(spacing: 6) {
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: url.pathExtension == "m4a" ? "waveform" : "film")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 18)
+                    Text(url.lastPathComponent)
+                        .font(.system(size: 10))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                       let size = attrs[.size] as? NSNumber {
+                        Text(ByteCountFormatter.string(fromByteCount: size.int64Value, countStyle: .file))
+                            .font(.system(size: 8, design: .rounded))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if !isFramed && url.pathExtension == "mp4" {
+                Button {
+                    bezelError = nil
+                    Task { bezelError = await recorder.wrapRecording(url) }
+                } label: {
+                    Text(recorder.isWrappingBezel ? T("处理中…") : T("加壳"))
+                        .font(.system(size: 8.5, weight: .medium))
+                        .foregroundStyle(recorder.isWrappingBezel ? AnyShapeStyle(Color.secondary) : AnyShapeStyle(AuroraTheme.accent))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(AuroraTheme.accent.opacity(0.12)))
+                }
+                .buttonStyle(.plain)
+                .disabled(recorder.isWrappingBezel)
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.03))
         }
     }
 

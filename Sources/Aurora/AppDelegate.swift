@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var panelController: PanelController!
     private var welcomeController: WelcomeWindowController?
+    private var logitechSetupController: LogitechSetupWindowController?
     let state = AppState()
     private lazy var contextMenu: NSMenu = {
         let menu = NSMenu()
@@ -47,15 +48,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerHotKeys()
         registerBrightnessHotKeys()
         MiniClipboardController.shared.clipboard = state.clipboard
+        Debug.log("caret locator: \(CaretLocator.availability())")
         state.onShowMainPanel = { [weak self] in self?.openPanel() }
         state.onDismissMainPanel = { [weak self] in self?.panelController.hide(reason: "welcome", force: true) }
         welcomeController = WelcomeWindowController(state: state)
+        // 检测到罗技鼠标时（可能早在 AppState 初始化时就登记了）把向导窗口准备好
+        logitechSetupController = LogitechSetupWindowController(state: state)
         if !UserDefaults.standard.bool(forKey: "onboarding.completed")
             || UserDefaults.standard.bool(forKey: "onboarding.reopenAfterRestart") {
             UserDefaults.standard.removeObject(forKey: "onboarding.reopenAfterRestart")
             state.showWelcome = true
         }
 
+        // 设计走查：defaults write com.cary.aurora debugMiniClipboard -bool YES 后启动，
+        // 直接把 mini 剪切板弹出来看效果（看完自动清掉这个键）
+        if UserDefaults.standard.bool(forKey: "debugMiniClipboard") {
+            UserDefaults.standard.removeObject(forKey: "debugMiniClipboard")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                MiniClipboardController.shared.show()
+            }
+        }
         if let raw = UserDefaults.standard.string(forKey: "debugTab"),
            let module = AuroraModule(rawValue: raw) {
             state.module = module
@@ -187,11 +199,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func stepBrightness(up: Bool) {
-        let display = state.display
-        guard let main = display.displays.first(where: { $0.isMain }) ?? display.displays.first,
-              main.hasBrightness else { return }
-        let next = min(max(main.brightness + (up ? 0.06 : -0.06), 0), 1)
-        display.setBrightness(next, for: main.id, animated: true)
+        // 走 DisplayService 的步进：跟随鼠标所在屏 / 多屏同步 / OSD 都在里面
+        let fine = NSEvent.modifierFlags.contains([.option, .shift])
+        _ = state.display.stepBrightness(up: up, fine: fine)
     }
 
     @objc private func openPanel() {
@@ -229,6 +239,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 拆除按应用音量的 tap，避免退出瞬间把正在播放的声音吞掉
         state.logitech.shutdown()
         state.appAudio.shutdown()
+        // 还原软件调光，别把桌面留在被压暗的状态
+        state.display.shutdown()
         // 收掉壁纸窗口，把桌面还给系统壁纸
         state.wallpaper.teardown()
         WallpaperPreview.dismiss()

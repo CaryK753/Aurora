@@ -288,7 +288,7 @@ final class HotkeyService: ObservableObject {
         return text + (fallback?.uppercased() ?? "?")
     }
 
-    private static func namedKeyDisplay(_ keyCode: UInt32) -> String? {
+    static func namedKeyDisplay(_ keyCode: UInt32) -> String? {
         switch Int(keyCode) {
         case kVK_Return: return "↩"
         case kVK_Tab: return "⇥"
