@@ -56,18 +56,29 @@ jobs:
       - name: 生成 release 说明
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          PREVIOUS="$(git describe --tags --abbrev=0 "v${VERSION}^" 2>/dev/null || true)"
+          # 正文优先取 CHANGELOG 里对应版本的那一段（应用内「发现新版本」会原样展示），
+          # 找不到才退回按提交标题列一遍。
+          SECTION="$(awk -v head="## v${VERSION}" '
+            $0 == head { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md)"
           {
             echo "## Aurora v${VERSION}"
             echo
-            echo "macOS 26 及以上，通用二进制（Apple Silicon / Intel）。"
-            echo
-            if [ -n "$PREVIOUS" ]; then
-              echo "### 变更"
+            if [ -n "$SECTION" ]; then
+              echo "$SECTION" | sed '/^$/N;/^\n$/D'
               echo
-              git log --no-merges --pretty=format:"- %s" "${PREVIOUS}..HEAD" | head -60
-              echo
+            else
+              PREVIOUS="$(git describe --tags --abbrev=0 "v${VERSION}^" 2>/dev/null || true)"
+              if [ -n "$PREVIOUS" ]; then
+                echo "### 变更"
+                echo
+                git log --no-merges --pretty=format:"- %s" "${PREVIOUS}..HEAD" | head -60
+                echo
+              fi
             fi
+            echo "macOS 26 及以上，通用二进制（Apple Silicon / Intel）。"
             echo
             echo "### 安装"
             echo
