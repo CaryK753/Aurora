@@ -148,6 +148,8 @@ struct WelcomeView: View {
         }
         UserDefaults.standard.set(true, forKey: "onboarding.completed")
         UserDefaults.standard.removeObject(forKey: "onboarding.draftModules")
+        // 新用户刚看完介绍，不必再叠一个「新功能」窗口
+        ReleaseNotesStore.markSeen()
         step = 0
         state.showWelcome = false
         // 「开始使用」→ 立刻从菜单栏把主面板弹出来；「稍后设置」不弹

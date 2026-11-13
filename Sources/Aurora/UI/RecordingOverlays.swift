@@ -74,26 +74,42 @@ final class ClickHighlightService {
         isGlobal = false
     }
 
+    /// 录制开始前先把窗口建出来（隐藏），这样 ScreenCaptureKit 的
+    /// 「排除自身 + 例外包含覆盖层」过滤器里能有它的 window ID
+    @discardableResult
+    func prepare() -> CGWindowID? {
+        ensurePanel()
+        guard let window else { return nil }
+        window.orderOut(nil)
+        return CGWindowID(window.windowNumber)
+    }
+
+    private func ensurePanel() {
+        guard window == nil else { return }
+        let size = Self.rippleSize
+        let panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: CGSize(width: size, height: size)),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered, defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.level = .screenSaver
+        panel.ignoresMouseEvents = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        let hosting = NSHostingView(rootView: ClickRippleView(id: UUID()))
+        hosting.frame = NSRect(origin: .zero, size: CGSize(width: size, height: size))
+        panel.contentView = hosting
+        self.hosting = hosting
+        window = panel
+    }
+
+    private static let rippleSize: CGFloat = 168
+
     private func ripple(at point: NSPoint) {
-        let size: CGFloat = 168
-        if window == nil {
-            let panel = NSPanel(
-                contentRect: NSRect(origin: .zero, size: CGSize(width: size, height: size)),
-                styleMask: [.borderless, .nonactivatingPanel],
-                backing: .buffered, defer: false
-            )
-            panel.isOpaque = false
-            panel.backgroundColor = .clear
-            panel.hasShadow = false
-            panel.level = .screenSaver
-            panel.ignoresMouseEvents = true
-            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            let hosting = NSHostingView(rootView: ClickRippleView(id: UUID()))
-            hosting.frame = NSRect(origin: .zero, size: CGSize(width: size, height: size))
-            panel.contentView = hosting
-            self.hosting = hosting
-            window = panel
-        }
+        let size = Self.rippleSize
+        ensurePanel()
         guard let window, let hosting else { return }
         window.setFrameOrigin(NSPoint(x: point.x - size / 2, y: point.y - size / 2))
         window.orderFrontRegardless()
@@ -211,6 +227,15 @@ final class KeystrokeOverlayService {
         }
         fadeWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4, execute: work)
+    }
+
+    /// 录制开始前先把胶囊窗口建出来（隐藏），供采集过滤器「例外包含」
+    @discardableResult
+    func prepare() -> CGWindowID? {
+        ensurePanel()
+        guard let panel else { return nil }
+        panel.orderOut(nil)
+        return CGWindowID(panel.windowNumber)
     }
 
     private func ensurePanel() {

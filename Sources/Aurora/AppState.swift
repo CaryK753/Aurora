@@ -11,6 +11,8 @@ final class AppState: ObservableObject {
     @Published var module: AuroraModule = .overview
     @Published var showImport = false
     @Published var showWelcome = false
+    /// 更新后首次启动的「新功能」窗口
+    @Published var showWhatsNew = false
     /// 全局快捷键页（与设置页同层的单层内容页，不是覆盖层）
     @Published var showHotkeys = false
     /// 罗技鼠标设置向导（检测到设备后自动弹出）
@@ -85,6 +87,14 @@ final class AppState: ObservableObject {
         onDismissMainPanel?()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
             self?.showWelcome = true
+        }
+    }
+
+    /// 打开「新功能」窗口（关于页 / 更新完成后都可）
+    func openWhatsNew() {
+        onDismissMainPanel?()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            self?.showWhatsNew = true
         }
     }
 

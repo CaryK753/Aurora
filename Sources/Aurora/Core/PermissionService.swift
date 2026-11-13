@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import AVFoundation
 import Combine
 import CoreGraphics
 import UserNotifications
@@ -22,6 +23,10 @@ final class PermissionService: ObservableObject {
     @Published private(set) var fullDiskAccess = false
     /// 通知授权（更新、录制完成等即时提醒）
     @Published private(set) var notifications = false
+    /// 画中画录屏要用的摄像头
+    @Published private(set) var camera = false
+    /// 录屏混入麦克风
+    @Published private(set) var microphone = false
     @Published private(set) var lastCheck = Date.distantPast
     @Published private(set) var isChecking = false
     @Published private(set) var checkError: String?
@@ -69,6 +74,10 @@ final class PermissionService: ObservableObject {
                 }
             }
         }
+        statuses["camera"] = Self.avStatus(AVCaptureDevice.authorizationStatus(for: .video))
+        statuses["microphone"] = Self.avStatus(AVCaptureDevice.authorizationStatus(for: .audio))
+        camera = statuses["camera"] == .granted
+        microphone = statuses["microphone"] == .granted
         accessibility = statuses["accessibility"] == .granted
         screenRecording = statuses["screen"] == .granted
         inputMonitoring = statuses["input"] == .granted
@@ -104,6 +113,15 @@ final class PermissionService: ObservableObject {
         }
     }
 
+    private static func avStatus(_ status: AVAuthorizationStatus) -> PermissionStatus {
+        switch status {
+        case .authorized: return .granted
+        case .denied, .restricted: return .denied
+        case .notDetermined: return .unknown
+        @unknown default: return .unknown
+        }
+    }
+
     var items: [Item] {
         [
             Item(id: "accessibility", title: T("辅助功能"), subtitle: T("鼠标调校、侧键动作与粘贴"), symbol: "accessibility",
@@ -115,6 +133,12 @@ final class PermissionService: ObservableObject {
             Item(id: "input", title: T("输入监控"), subtitle: T("读取原始设备事件，可选"), symbol: "keyboard",
                  state: statuses["input"] ?? .unknown, pane: "Privacy_ListenEvent",
                  prompt: { [weak self] in self?.requestInputMonitoring() }),
+            Item(id: "camera", title: T("摄像头"), subtitle: T("画中画录屏时把摄像头画面录进视频"), symbol: "video",
+                 state: statuses["camera"] ?? .unknown, pane: "Privacy_Camera",
+                 prompt: { [weak self] in self?.requestCamera() }),
+            Item(id: "microphone", title: T("麦克风"), subtitle: T("把麦克风混进录屏的第二音轨，可选"), symbol: "mic",
+                 state: statuses["microphone"] ?? .unknown, pane: "Privacy_Microphone",
+                 prompt: { [weak self] in self?.requestMicrophone() }),
             Item(id: "notifications", title: T("通知"), subtitle: T("新版本、录制完成等即时提醒，可稍后授权"), symbol: "bell.badge",
                  state: statuses["notifications"] ?? .unknown, pane: "Notifications",
                  prompt: { [weak self] in self?.requestNotifications() }),
@@ -137,6 +161,24 @@ final class PermissionService: ObservableObject {
     func requestInputMonitoring() {
         _ = CGRequestListenEventAccess()
         openPane("Privacy_ListenEvent")
+    }
+
+    func requestCamera() {
+        Task { [weak self] in
+            let granted = await AVCaptureDevice.requestAccess(for: .video)
+            guard let self else { return }
+            self.refresh()
+            if !granted { self.openPane("Privacy_Camera") }
+        }
+    }
+
+    func requestMicrophone() {
+        Task { [weak self] in
+            let granted = await AVCaptureDevice.requestAccess(for: .audio)
+            guard let self else { return }
+            self.refresh()
+            if !granted { self.openPane("Privacy_Microphone") }
+        }
     }
 
     func requestNotifications() {

@@ -12,6 +12,8 @@ struct RecorderView: View {
     @ObservedObject var state: AppState
     @ObservedObject private var recorder = RecorderService.shared
     @ObservedObject private var permissions: PermissionService
+    @ObservedObject private var camera = CameraBubble.shared
+    @State private var cameraDevices: [CameraBubble.Device] = []
     @State private var recentFiles: [URL] = []
     @State private var overlayAccess = OverlayAccess.hasAccessibility
     @State private var bezelError: String?
@@ -32,6 +34,7 @@ struct RecorderView: View {
             recorder.refreshSources()
             reloadRecent()
             overlayAccess = OverlayAccess.hasAccessibility
+            cameraDevices = CameraBubble.availableDevices()
         }
         // 用户去系统设置勾完权限回来，这里跟着刷新
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -43,10 +46,14 @@ struct RecorderView: View {
         .onChange(of: recorder.highlightClicks) { _, on in
             if on, !overlayAccess { OverlayAccess.requestAccessibility() }
         }
-        // 录制过程中切画中画：立刻出现 / 收起，不用等下一次录制
+        // 开关就是气泡的开关：打开立刻出画面（可以先摆好位置），关掉就收起
         .onChange(of: recorder.pipCamera) { _, on in
-            guard recorder.isRecording else { return }
-            if on { CameraBubble.shared.show() } else { CameraBubble.shared.hide() }
+            if on {
+                cameraDevices = CameraBubble.availableDevices()
+                CameraBubble.shared.show(on: recorder.targetScreen)
+            } else {
+                CameraBubble.shared.hide()
+            }
         }
         .onReceive(recorder.$lastMovieURL) { _ in reloadRecent() }
     }
@@ -322,6 +329,9 @@ struct RecorderView: View {
                 optionRow(symbol: "video.fill.badge.plus", label: T("画中画摄像头"), detail: T("录制时屏幕角落悬浮摄像头气泡，一并录进画面")) {
                     AuroraToggle(isOn: $recorder.pipCamera)
                 }
+                if recorder.pipCamera {
+                    cameraOptions
+                }
                 Divider().opacity(0.4)
                 optionRow(symbol: "macbook", label: T("录完自动加壳"), detail: T("停止后把成片套进设备外壳，原片保留；也可以稍后在「最近录像」里手动加壳")) {
                     AuroraToggle(isOn: $recorder.bezelRecording)
@@ -381,8 +391,102 @@ struct RecorderView: View {
     }
 
     /// 带壳用哪一款：默认跟截图页一致（按本机型号自动识别）
-    private var bezelFrameRow: some View {
-        let frames = ScreenshotService.shared
+    // MARK: 画中画设置
+
+    /// 缩进在「画中画摄像头」下面的一组紧凑设置
+    private var cameraOptions: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: "video")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 18)
+                Text(T("摄像头"))
+                    .font(.system(size: 10.5, weight: .medium))
+                Spacer(minLength: 4)
+                Picker("", selection: $camera.deviceID) {
+                    Text(T("系统默认")).tag(CameraBubble.defaultDeviceID)
+                    ForEach(cameraDevices) { device in
+                        Text(device.isContinuity ? TF("%@（连续互通）", device.name) : device.name)
+                            .tag(device.id)
+                    }
+                }
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(maxWidth: 168)
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "square.on.circle")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 18)
+                Text(T("形状"))
+                    .font(.system(size: 10.5, weight: .medium))
+                Spacer(minLength: 4)
+                segmentPicker(
+                    options: CameraBubble.Shape.allCases.map(\.title),
+                    current: CameraBubble.Shape.allCases.firstIndex(of: camera.shape) ?? 0
+                ) { index in
+                    camera.shape = CameraBubble.Shape.allCases[index]
+                }
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 18)
+                Text(T("大小"))
+                    .font(.system(size: 10.5, weight: .medium))
+                Spacer(minLength: 4)
+                Button {
+                    camera.mirrored.toggle()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "flip.horizontal")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text(T("镜像"))
+                            .font(.system(size: 9.5, weight: .medium))
+                    }
+                    .foregroundStyle(camera.mirrored ? Color.accentColor : Color.secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3.5)
+                    .background(Capsule().fill(Color.primary.opacity(camera.mirrored ? 0.0 : 0.06)))
+                }
+                .buttonStyle(.plain)
+                .help(T("左右翻转画面，像照镜子一样"))
+                segmentPicker(
+                    options: CameraBubble.Size.allCases.map(\.title),
+                    current: CameraBubble.Size.allCases.firstIndex(of: camera.size) ?? 1
+                ) { index in
+                    camera.size = CameraBubble.Size.allCases[index]
+                }
+            }
+
+            if camera.isDenied {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(AuroraTheme.warn)
+                    Text(T("没有摄像头权限，画中画不会出现在录像里"))
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    Button(T("去授权")) { CameraBubble.shared.openCameraSettings() }
+                        .controlSize(.mini)
+                }
+            }
+
+            Text(T("气泡可以拖动摆放，右键改形状 / 尺寸 / 摄像头；录制窗口时只有落在窗口内的气泡会被录进去。"))
+                .font(.system(size: 8))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.leading, 26)
+    }
+
+    private var bezelFrameRow: some View {        let frames = ScreenshotService.shared
         return HStack(spacing: 8) {
             Image(systemName: "rectangle.on.rectangle")
                 .font(.system(size: 9, weight: .medium))

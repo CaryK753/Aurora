@@ -122,7 +122,9 @@ enum DevPreview {
         let state = AppState(preview: true)
         // 让采样跑起来，截图里才有真实数字
         RunLoop.main.run(until: Date().addingTimeInterval(2.8))
-        if let target = AuroraModule(rawValue: module) {
+        // recorder-pip：把画中画开关打开，预览摄像头选项块
+        if module == "recorder-pip" { RecorderService.shared.pipCamera = true }
+        if let target = AuroraModule(rawValue: module == "recorder-pip" ? "recorder" : module) {
             state.module = target
         }
         // 离屏渲染不会跑视图的 .task，扫描得手动起一次
@@ -248,6 +250,46 @@ enum WindowSnapshot {    /// 截图编辑器真窗口快照（检查工具栏在
         let window = EditorWindow(image: cg)
         window.orderFrontRegardless()
         RunLoop.main.run(until: Date().addingTimeInterval(0.9))
+
+        guard let view = window.contentView?.superview else { return 1 }
+        let bounds = view.bounds
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: bounds) else { return 1 }
+        view.cacheDisplay(in: bounds, to: rep)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return 1 }
+        do {
+            try png.write(to: URL(fileURLWithPath: path))
+            print("已输出：\(path)")
+            window.orderOut(nil)
+            return 0
+        } catch {
+            print("写入失败：\(error.localizedDescription)")
+            return 1
+        }
+    }
+
+
+    /// 「新功能」窗口的真窗口快照（看标题栏、圆角与背景）
+    static func captureWhatsNew(to path: String, appearance: String) -> Int32 {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        app.appearance = appearance == "light" ? NSAppearance(named: .aqua) : NSAppearance(named: .darkAqua)
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 660),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = .windowBackgroundColor
+        let preview = ReleaseNotesStore.previewContent()
+        window.contentView = NSHostingView(rootView: WhatsNewView(
+            notes: preview.notes,
+            version: preview.version,
+            onContinue: {},
+            onOpenReleasePage: {}
+        )
+        .environment(\.colorScheme, appearance == "light" ? .light : .dark))
+        window.center()
+        window.orderFrontRegardless()
+        RunLoop.main.run(until: Date().addingTimeInterval(1.0))
 
         guard let view = window.contentView?.superview else { return 1 }
         let bounds = view.bounds

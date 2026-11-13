@@ -147,9 +147,21 @@ final class ScreenshotService: ObservableObject {
     /// 主 bundle 里的资源（开发期也兼容仓库 Resources 目录）
     nonisolated static let framesDirectoryName = "DeviceFrames"
 
+    /// 外壳资源都在 Contents/Resources/DeviceFrames/ 下，而 Bundle 的资源查找**不会**递归到子目录，
+    /// 必须显式带 subdirectory；否则只有开发机（仓库还在）能靠下面的路径兜底找到，装到别的机器上就是空的。
     nonisolated static func resourceURL(_ name: String) -> URL? {
-        if let url = Bundle.main.url(forResource: (name as NSString).deletingPathExtension, withExtension: (name as NSString).pathExtension) {
+        let base = (name as NSString).deletingPathExtension
+        let ext = (name as NSString).pathExtension
+        if let url = Bundle.main.url(forResource: base, withExtension: ext, subdirectory: framesDirectoryName) {
             return url
+        }
+        // 有些打包工具会把资源平铺到 Resources 根目录
+        if let url = Bundle.main.url(forResource: base, withExtension: ext) {
+            return url
+        }
+        if let root = Bundle.main.resourceURL {
+            let direct = root.appendingPathComponent("\(framesDirectoryName)/\(name)")
+            if FileManager.default.fileExists(atPath: direct.path) { return direct }
         }
         // swift run / 调试时的仓库路径兜底
         let candidate = URL(fileURLWithPath: #filePath)

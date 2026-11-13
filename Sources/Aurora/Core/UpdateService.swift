@@ -139,6 +139,8 @@ final class UpdateService: ObservableObject {
                     return
                 }
                 if Self.isNewer(release.version, than: self.currentVersion) {
+                    // 存一份远端正文：本机 CHANGELOG 里还没有这一版时，「新功能」窗口拿它兜底
+                    ReleaseNotesStore.cacheRemoteNotes(release.notes, version: release.version)
                     if self.autoUpdate {
                         try await self.download(release)
                     } else {
@@ -232,30 +234,44 @@ final class UpdateService: ObservableObject {
     }
 
     /// 下载完成后的询问：同意才替换，拒绝就把状态停在「有新版本」
+    /// 正文统一走 ReleaseNotes 解析，绝不再把 <h2>/<li> 这类标签直接显示出来。
     private func promptInstall(_ release: AuroraRelease) {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = TF("发现新版本 %@", release.version)
         let size = stagedApp.map { Self.formattedSize($0) } ?? ""
-        var body = TF("当前版本 %@，可以现在更新。", currentVersion)
-        if !size.isEmpty {
-            body += "\n" + TF("安装包已下载（%@）。", size)
-        }
-        body += "\n" + T("更新会自动替换 Aurora.app 并重新启动，当前窗口与设置不会丢失。")
-        if !release.notes.isEmpty {
-            body += "\n\n" + Self.trimmedNotes(release.notes)
-        }
-        alert.informativeText = body
+        alert.informativeText = Self.installSummary(release: release, currentVersion: currentVersion, size: size)
         alert.addButton(withTitle: T("立即更新"))
         alert.addButton(withTitle: T("稍后"))
         alert.window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.popUpMenuWindow)) + 1)
 
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn, let app = stagedApp {
+            // 说明已缓存在 ReleaseNotesStore，替换重启后由新版本自己弹「新功能」
             replaceAndRelaunch(with: app)
         } else {
             declinedVersion = release.version
         }
+    }
+
+    /// 更新弹窗的正文：几行版本信息 + 这次更新的要点（自动去标签、去 Markdown 记号）
+    nonisolated static func installSummary(release: AuroraRelease, currentVersion: String, size: String) -> String {
+        var body = TF("当前版本 %@，可以现在更新。", currentVersion)
+        if !size.isEmpty {
+            body += "\n" + TF("安装包已下载（%@）。", size)
+        }
+        body += "\n" + T("更新会自动替换 Aurora.app 并重新启动，当前窗口与设置不会丢失。")
+
+        let notes = ReleaseNotesParser.parse(release.notes, version: release.version)
+        let highlights = notes.highlights(limit: 4)
+        guard !highlights.isEmpty else { return body }
+        body += "\n\n" + T("本次更新") + "：\n" + highlights.map { "• " + $0 }.joined(separator: "\n")
+        let rest = notes.itemCount - highlights.count
+        if rest > 0 {
+            body += "\n" + TF("…以及另外 %d 项更新", rest)
+        }
+        body += "\n\n" + T("更新后的首次启动会打开「新功能」窗口，可查看完整说明。")
+        return body
     }
 
     // MARK: - 安装
@@ -469,7 +485,7 @@ final class UpdateService: ObservableObject {
     }
 
 
-    /// 从 releases.atom 取某个 tag 的正文（HTML → 纯文本），失败就返回 nil
+    /// 从 releases.atom 取某个 tag 的正文（原样返回 HTML，交给 ReleaseNotesParser 解析）
     nonisolated private static func releaseNotesFromAtom(tag: String) async -> String? {
         guard let url = URL(string: "https://github.com/\(repository)/releases.atom") else { return nil }
         var request = URLRequest(url: url)
@@ -484,29 +500,8 @@ final class UpdateService: ObservableObject {
         guard let open = entry.range(of: "<content"),
               let openEnd = entry.range(of: ">", range: open.lowerBound..<entry.endIndex)?.upperBound,
               let close = entry.range(of: "</content>", range: openEnd..<entry.endIndex) else { return nil }
-        let html = String(entry[openEnd..<close.lowerBound])
-        let text = htmlToPlainText(html)
-        return text.isEmpty ? nil : text
-    }
-
-    /// 极简 HTML → 文本：去标签、解实体、压空行
-    nonisolated private static func htmlToPlainText(_ html: String) -> String {
-        var text = html
-        // 换行标签转成换行
-        for tag in ["</p>", "<br>", "<br/>", "<br />", "</li>", "</h1>", "</h2>", "</h3>"] {
-            text = text.replacingOccurrences(of: tag, with: "\n", options: .caseInsensitive)
-        }
-        text = text.replacingOccurrences(of: "<li>", with: "· ", options: .caseInsensitive)
-        // 去掉剩余标签
-        text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-        // 常用实体
-        let entities = ["&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"", "&#39;": "'", "&nbsp;": " "]
-        for (key, value) in entities { text = text.replacingOccurrences(of: key, with: value) }
-        // 压掉多余空行
-        let lines = text.components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        return lines.joined(separator: "\n")
+        let html = String(entry[openEnd..<close.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return html.isEmpty ? nil : html
     }
 
     /// 从 expanded_assets 的 HTML 里提取 /releases/download/... 链接
@@ -624,14 +619,6 @@ final class UpdateService: ObservableObject {
             total += (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         }
         return total > 0 ? ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file) : ""
-    }
-
-    private nonisolated static func trimmedNotes(_ notes: String) -> String {
-        let lines = notes
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .prefix(6)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-        return lines.joined(separator: "\n")
     }
 }
 

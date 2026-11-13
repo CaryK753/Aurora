@@ -4,6 +4,9 @@
 <dict>
     <key>com.apple.security.device.audio-input</key>
     <true/>
+    <!-- 画中画摄像头：hardened runtime 下没有这项，AVCaptureDeviceInput 会被系统拦下 -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
     <key>com.apple.security.automation.apple-events</key>
     <true/>
 </dict>

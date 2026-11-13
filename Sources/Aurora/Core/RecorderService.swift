@@ -162,6 +162,9 @@ final class RecorderService: ObservableObject {
     /// 会话是否已用首个视频帧的时间戳对齐（SCStream 的时间戳是开机以来的
     /// host time，直接用 .zero 建会话会让成片时长变成"开机时长"）
     private var sessionStarted = false
+    /// 已写入的视频帧数（诊断用）
+    private var appendedVideoFrames = 0
+    private var loggedWriterFailure = false
 
     // MARK: 麦克风采集
     private var micSession: AVCaptureSession?
@@ -213,6 +216,13 @@ final class RecorderService: ObservableObject {
         mediaQueue = DispatchQueue(label: "aurora.recorder.media")
         micQueue = DispatchQueue(label: "aurora.recorder.mic")
         refreshSources()
+
+        // 气泡上的 ✕ 要回到开关上；权限 / 设备问题只弹提示，
+        // 气泡留在屏幕上显示原因（授权后自动恢复），别把开关一巴掌拍灭
+        CameraBubble.shared.onClose = { [weak self] in self?.pipCamera = false }
+        CameraBubble.shared.onUnavailable = { message in
+            auroraDelegate?.state.showToast(message, symbol: "video.slash")
+        }
     }
 
     // MARK: - 源列表
@@ -332,6 +342,23 @@ final class RecorderService: ObservableObject {
             .0 ?? NSScreen.main
     }
 
+    /// 窗口落在哪块 SCDisplay 上（交叠面积最大的一块）
+    private static func display(covering rect: CGRect, in content: SCShareableContent?) -> SCDisplay? {
+        guard let content else { return nil }
+        var best: SCDisplay?
+        var bestArea: CGFloat = 0
+        for display in content.displays {
+            let hit: CGRect = display.frame.intersection(rect)
+            guard !hit.isNull else { continue }
+            let area: CGFloat = hit.width * hit.height
+            if area > bestArea {
+                bestArea = area
+                best = display
+            }
+        }
+        return best
+    }
+
     private var targetScreenIsBuiltIn: Bool {
         guard let id = targetScreen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else {
             return true
@@ -421,14 +448,16 @@ final class RecorderService: ObservableObject {
                     micEnabled = await AVCaptureDevice.requestAccess(for: .audio)
                 }
             }
-            self.beginRecording(micEnabled: micEnabled)
+            await self.beginRecording(micEnabled: micEnabled)
         }
     }
 
-    private func beginRecording(micEnabled: Bool) {
+    private func beginRecording(micEnabled: Bool) async {
         guard !isRecording, let source = selectedSource else { return }
         discardRequested = false
         finishing = false
+        appendedVideoFrames = 0
+        loggedWriterFailure = false
 
         let stamp = Self.fileStamp()
         let url = outputDirectory.appendingPathComponent("Aurora \(stamp).mp4")
@@ -445,16 +474,71 @@ final class RecorderService: ObservableObject {
         let conf = SCStreamConfiguration()
         let filter: SCContentFilter
         var areaSourceRect: CGRect?
+        var windowSourceRect: CGRect?
+
+        // Aurora 自己的面板、控制条不该出现在录像里。做法与 Snapzy 一致：
+        // 整块应用排除，再把要录进去的覆盖层（摄像头气泡 / 按键胶囊 / 点击涟漪）
+        // 用 exceptingWindows 单独「例外包含」回来。
+        // 覆盖层窗口必须先建出来，否则拿不到它们的 window ID。
+        var overlayWindowIDs: [CGWindowID] = []
+        var activeOverlayIDs: [CGWindowID] = []   // 这次录制真的会画出来的覆盖层
+        if let id = CameraBubble.shared.prepare(on: targetScreen) {
+            overlayWindowIDs.append(id)
+            if pipCamera { activeOverlayIDs.append(id) }
+        }
+        if let id = KeystrokeOverlayService.shared.prepare() {
+            overlayWindowIDs.append(id)
+            if showKeystrokes { activeOverlayIDs.append(id) }
+        }
+        if let id = ClickHighlightService.shared.prepare() {
+            overlayWindowIDs.append(id)
+            if highlightClicks { activeOverlayIDs.append(id) }
+        }
+
+        let shareable = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        let ownApps = shareable?.applications.filter {
+            guard let bundleID = Bundle.main.bundleIdentifier else { return false }
+            return $0.bundleIdentifier == bundleID
+        } ?? []
+        let overlayWindows = shareable?.windows.filter { overlayWindowIDs.contains($0.windowID) } ?? []
+
         switch source.kind {
         case .display:
             guard let display = source.display else { return }
-            filter = SCContentFilter(display: display, excludingWindows: [])
+            filter = SCContentFilter(
+                display: display,
+                excludingApplications: ownApps,
+                exceptingWindows: overlayWindows
+            )
         case .window:
             guard let window = source.window else { return }
-            filter = SCContentFilter(desktopIndependentWindow: window)
+            // 覆盖层落在窗口所在的屏幕上时，改成「显示器 + 只包含这个窗口和覆盖层」，
+            // 这样画中画 / 按键胶囊也能出现在窗口录制里；没有覆盖层就沿用窗口级采集
+            let onScreenOverlays = overlayWindows.filter {
+                activeOverlayIDs.contains($0.windowID) && window.frame.intersects($0.frame)
+            }
+            if !onScreenOverlays.isEmpty,
+               let display = Self.display(covering: window.frame, in: shareable) {
+                filter = SCContentFilter(
+                    display: display,
+                    including: [window] + onScreenOverlays
+                )
+                windowSourceRect = CGRect(
+                    x: window.frame.minX - display.frame.minX,
+                    y: window.frame.minY - display.frame.minY,
+                    width: window.frame.width,
+                    height: window.frame.height
+                )
+            } else {
+                filter = SCContentFilter(desktopIndependentWindow: window)
+            }
         case .area:
             guard let rect = source.rect, let display = areaDisplay else { return }
-            filter = SCContentFilter(display: display, excludingWindows: [])
+            filter = SCContentFilter(
+                display: display,
+                excludingApplications: ownApps,
+                exceptingWindows: overlayWindows
+            )
             // 全局 NS 坐标 → 该显示屏局部坐标（SC 左上原点）
             let mid = CGPoint(x: rect.midX, y: rect.midY)
             let screen = NSScreen.screens.first { $0.frame.contains(mid) } ?? NSScreen.main
@@ -473,11 +557,16 @@ final class RecorderService: ObservableObject {
             conf.sourceRect = areaSourceRect
             conf.width = max(2, Int(areaSourceRect.width) * scale)
             conf.height = max(2, Int(areaSourceRect.height) * scale)
+        } else if let windowSourceRect {
+            conf.sourceRect = windowSourceRect
+            conf.width = max(2, Int(windowSourceRect.width) * scale)
+            conf.height = max(2, Int(windowSourceRect.height) * scale)
         } else {
             let contentRect = filter.contentRect
             conf.width = Int(contentRect.width) * scale
             conf.height = Int(contentRect.height) * scale
         }
+        Debug.log("recorder: source=\(source.kind.rawValue) \(conf.width)x\(conf.height) scale=\(scale) overlays=\(overlayWindowIDs.count) excepted=\(overlayWindows.count)")
 
         // 编码器要求宽高为偶数：区域框选很容易拖出奇数尺寸，
         // 奇数会走到 startWriting 之后才失败，最后留下一个 0 字节的 mp4
@@ -582,10 +671,12 @@ final class RecorderService: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 if let error {
+                    Debug.log("recorder: startCapture failed \(error)")
                     self.lastError = error.localizedDescription
                     self.stop()
                     return
                 }
+                Debug.log("recorder: started \(source.kind.rawValue) \(conf.width)x\(conf.height) pip=\(self.pipCamera)")
                 self.isRecording = true
                 self.isPaused = false
                 self.accumulated = 0
@@ -598,7 +689,7 @@ final class RecorderService: ObservableObject {
                 KeystrokeOverlayService.shared.targetScreen = self.targetScreen
                 RecorderBar.shared.show()
                 if micEnabled { self.startMicCapture() }
-                if self.pipCamera { CameraBubble.shared.show() }
+                if self.pipCamera { CameraBubble.shared.show(on: self.targetScreen) }
                 if self.highlightClicks { ClickHighlightService.shared.start() }
                 if self.showKeystrokes { KeystrokeOverlayService.shared.start() }
             }
@@ -614,7 +705,8 @@ final class RecorderService: ObservableObject {
         stopTicker()
         preventSleep(false)
         RecorderBar.shared.hide()
-        CameraBubble.shared.hide()
+        // 关掉开关时才收气泡；开关还开着就留着预览，避免「开关是开的但气泡没了」
+        if !pipCamera { CameraBubble.shared.hide() }
         statusNote = discard ? T("正在丢弃…") : T("正在保存…")
 
         stopMicCapture()
@@ -644,7 +736,10 @@ final class RecorderService: ObservableObject {
 
     private func streamDidStop(_ error: Error?) {
         if let error {
+            Debug.log("recorder: stream stopped with error \(error)")
             lastError = error.localizedDescription
+        } else {
+            Debug.log("recorder: stream stopped")
         }
         finishWriters()
     }
@@ -691,6 +786,8 @@ final class RecorderService: ObservableObject {
                             try? FileManager.default.removeItem(at: url)
                         }
                         let reason = self.lastError ?? writer.error?.localizedDescription ?? T("录制文件写入失败")
+                        Debug.log("recorder: frames appended=\(self.appendedVideoFrames)")
+                        Debug.log("recorder: finish failed status=\(writer.status.rawValue) \(reason)")
                         self.lastError = reason
                         self.statusNote = nil
                         NotificationService.shared.notifyRecordingFailed(reason: reason)
@@ -798,6 +895,8 @@ final class RecorderService: ObservableObject {
         movieURL = nil
         discardRequested = false
         finishing = false
+        appendedVideoFrames = 0
+        loggedWriterFailure = false
         sessionStarted = false
         mediaQueue.async { [weak self] in self?.pauseTimeline = RecorderPauseTimeline() }
     }
@@ -821,6 +920,18 @@ final class RecorderService: ObservableObject {
             videoInput.append(sampleBuffer)
         } else if let retimed = RecorderPauseTimeline.retimed(sampleBuffer, at: mapped) {
             videoInput.append(retimed)
+        }
+        appendedVideoFrames += 1
+        if appendedVideoFrames == 1 || appendedVideoFrames % 300 == 0 {
+            Debug.log("recorder: frames=\(appendedVideoFrames) writer=\(writer.status.rawValue) ready=\(videoInput.isReadyForMoreMediaData)")
+        }
+        if writer.status != .writing, !loggedWriterFailure {
+            loggedWriterFailure = true
+            if let error = writer.error as NSError? {
+                Debug.log("recorder: writer failed \(error.domain) \(error.code) \(error.userInfo)")
+            } else {
+                Debug.log("recorder: writer failed \(writer.status.rawValue)")
+            }
         }
     }
 

@@ -1854,15 +1854,20 @@ enum SelfTest {
     }
 
     /// 录屏往返自测：真录 N 秒 → 停止 → 校验落盘的 mp4 有视频轨且大小正常
-    static func recorderRoundTrip(seconds: Double) -> Int32 {
+    static func recorderRoundTrip(seconds: Double, pip: Bool = false) -> Int32 {
         let service = RecorderService.shared
         guard service.hasScreenPermission else {
             print("✗ 没有屏幕录制权限，跳过")
             return 2
         }
-        // 自测不碰麦克风 / 摄像头，避免弹权限框
+        // 自测默认不碰麦克风 / 摄像头，避免弹权限框；pip 用例要验证画中画
         service.recordMic = false
-        service.pipCamera = false
+        service.pipCamera = pip
+        // 诊断用：AURORA_TEST_HEVC=0 / AURORA_TEST_FPS=30 / AURORA_TEST_LORES=1
+        let env = ProcessInfo.processInfo.environment
+        if let v = env["AURORA_TEST_HEVC"] { service.useHEVC = (v != "0") }
+        if let v = env["AURORA_TEST_FPS"], let fps = Int(v) { service.fps = fps }
+        if env["AURORA_TEST_LORES"] == "1" { service.hiRes = false }
         service.highlightClicks = false
         service.showKeystrokes = false
         // 源列表是异步扫描的，等它出来再开始
@@ -1906,8 +1911,10 @@ enum SelfTest {
         let duration = CMTimeGetSeconds(asset.duration)
         detail = "大小 \(size) 字节 · 视频轨 \(video.count) · 音频轨 \(audio.count) · 时长 \(String(format: "%.1f", duration))s"
         print(ok ? "✓ 录制保存成功：\(url.lastPathComponent) \(detail)" : "✗ 录制文件异常：\(detail)")
-        // 清理自测文件
-        try? FileManager.default.removeItem(at: url)
+        // 清理自测文件（AURORA_KEEP_TEST_VIDEO=1 时留着抽帧看效果）
+        if ProcessInfo.processInfo.environment["AURORA_KEEP_TEST_VIDEO"] != "1" {
+            try? FileManager.default.removeItem(at: url)
+        }
         return ok ? 0 : 1
     }
 }

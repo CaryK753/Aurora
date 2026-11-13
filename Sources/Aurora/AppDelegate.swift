@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var panelController: PanelController!
     private var welcomeController: WelcomeWindowController?
+    private var whatsNewController: WhatsNewWindowController?
     private var logitechSetupController: LogitechSetupWindowController?
     let state = AppState()
     private lazy var contextMenu: NSMenu = {
@@ -52,6 +53,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         state.onShowMainPanel = { [weak self] in self?.openPanel() }
         state.onDismissMainPanel = { [weak self] in self?.panelController.hide(reason: "welcome", force: true) }
         welcomeController = WelcomeWindowController(state: state)
+        // 更新后的第一次启动：介绍这一版的新功能（每个版本一次）
+        whatsNewController = WhatsNewWindowController(state: state)
         // 检测到罗技鼠标时（可能早在 AppState 初始化时就登记了）把向导窗口准备好
         logitechSetupController = LogitechSetupWindowController(state: state)
         if !UserDefaults.standard.bool(forKey: "onboarding.completed")
@@ -59,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UserDefaults.standard.removeObject(forKey: "onboarding.reopenAfterRestart")
             state.showWelcome = true
         }
+        presentWhatsNewIfNeeded()
 
         // 设计走查：defaults write com.cary.aurora debugMiniClipboard -bool YES 后启动，
         // 直接把 mini 剪切板弹出来看效果（看完自动清掉这个键）
@@ -113,6 +117,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.state.showWallpaper = true
                 }
             }
+        }
+        // 开发走查：defaults write com.cary.aurora debugCameraBubble -bool YES 后启动，
+        // 只把画中画气泡摆出来（不录屏），用来核对样式、拖动与缩放
+        if UserDefaults.standard.bool(forKey: "debugCameraBubble") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                CameraBubble.shared.show(on: RecorderService.shared.targetScreen)
+            }
+        }
+        // 开发走查：defaults write com.cary.aurora debugRecordPip 6 后启动，
+        // 自动打开画中画录一段（保留文件，供抽帧核对气泡有没有进画面）
+        if let raw = UserDefaults.standard.object(forKey: "debugRecordPip") {
+            UserDefaults.standard.removeObject(forKey: "debugRecordPip")
+            let seconds = (raw as? Double) ?? Double(raw as? Int ?? 6)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                let recorder = RecorderService.shared
+                let previous = recorder.pipCamera
+                recorder.pipCamera = true
+                recorder.start()
+                DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+                    recorder.stop()
+                    recorder.pipCamera = previous
+                }
+            }
+        }
+    }
+
+    /// 更新后的第一次启动弹「新功能」；这一版没有说明就静默记下，不打扰
+    private func presentWhatsNewIfNeeded() {
+        let defaults = UserDefaults.standard
+        // 设计走查：defaults write com.cary.aurora debugWhatsNew -bool YES（下次启动生效）
+        if defaults.bool(forKey: "debugWhatsNew") {
+            defaults.removeObject(forKey: "debugWhatsNew")
+            defaults.removeObject(forKey: ReleaseNotesStore.seenVersionKey)
+        }
+        guard defaults.bool(forKey: "onboarding.completed"),
+              ReleaseNotesStore.shouldShow() else { return }
+        guard ReleaseNotesStore.notes() != nil else {
+            Debug.log("whatsnew: no notes for \(ReleaseNotesStore.currentVersion), skipped")
+            ReleaseNotesStore.markSeen()
+            return
+        }
+        Debug.log("whatsnew: \(ReleaseNotesStore.currentVersion) unseen, will present")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self, !self.state.showWelcome else { return }
+            self.state.showWhatsNew = true
         }
     }
 

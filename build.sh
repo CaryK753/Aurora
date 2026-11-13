@@ -99,6 +99,11 @@ if [ -f "$ROOT/Resources/AppIcon.icns" ]; then
   cp "$ROOT/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 fi
 
+# 「新功能」窗口的离线更新说明：按版本号从 CHANGELOG 里取对应段落
+if [ -f "$ROOT/CHANGELOG.md" ]; then
+  cp "$ROOT/CHANGELOG.md" "$APP_DIR/Contents/Resources/CHANGELOG.md"
+fi
+
 # 截图模块的 Apple 官方设备外壳（PNG + 屏幕矩形清单）
 if [ -d "$ROOT/Resources/DeviceFrames" ]; then
   mkdir -p "$APP_DIR/Contents/Resources/DeviceFrames"
