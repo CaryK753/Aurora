@@ -152,6 +152,17 @@ jobs:
             dist/Aurora-${{ steps.version.outputs.version }}.zip
             dist/Aurora-${{ steps.version.outputs.version }}.zip.sha256
 
+      # 同一版本重发（tag 重指）时 action-gh-release 只换了资产、正文会留在旧内容上，
+      # 这里显式再写一次，保证「发现新版本」弹窗读到的说明和 CHANGELOG 一致。
+      - name: 同步已存在 release 的说明
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file release-notes.md
+          fi
+
       - name: 清理签名钥匙串
         if: always()
         run: |
