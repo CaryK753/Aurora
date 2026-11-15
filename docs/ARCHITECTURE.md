@@ -40,7 +40,26 @@
 
 `build.sh` 默认优先使用固定证书（`AURORA_SIGN_ID`），没有就退回 ad-hoc。
 
-> TCC（辅助功能 / 屏幕录制 / 输入监控 / 完全磁盘访问）按「签名 + bundle id」记录授权。ad-hoc 每次重建 cdhash 都会变，于是出现「系统设置里明明勾上了，应用内仍显示未授权」。
+> TCC（辅助功能 / 屏幕录制 / 输入监控 / 完全磁盘访问 / 摄像头）按签名的**指定要求**记录授权：
+> ad-hoc 签名的指定要求是 `cdhash H"…"`（`codesign -d -r-` 可查），每次重建都会变，于是出现「系统设置里明明勾上了，应用内仍显示未授权」；换一个版本更新后更是全部失效。用固定证书签名时指定要求跟着证书（`certificate leaf[subject.CN] = "…"`）走，跨版本稳定。
+
+Release 工作流（`.github/workflows/release.yml`）从仓库 Secrets 取证书，导入一个临时钥匙串再打包：
+
+| Secret | 内容 |
+| --- | --- |
+| `AURORA_CERT_P12` | 证书与私钥导出的 p12，base64 后的一行 |
+| `AURORA_CERT_PASSWORD` | 上面 p12 的导出密码 |
+| `AURORA_SIGN_ID` | 证书全名，如 `Apple Development: name@example.com (XXXXXXXXXX)` |
+
+步骤要点：`security create-keychain` → `import -T /usr/bin/codesign` → `set-key-partition-list`（不加这步 codesign 取私钥会被拦）→ `list-keychains -s` 把临时钥匙串塞进搜索列表（`build.sh` 靠 `find-identity` 认证书）→ 打包 → `always()` 里删除钥匙串。没配 Secrets 时工作流只告警并退回 ad-hoc，fork 出去也能跑通。
+
+重新导出证书（证书续签后要重做）：
+
+```bash
+security export -t identities -f pkcs12 -k ~/Library/Keychains/login.keychain-db -o aurora.p12 -P '<密码>'
+base64 -i aurora.p12 | gh secret set AURORA_CERT_P12
+gh secret set AURORA_CERT_PASSWORD --body '<密码>'
+```
 
 `Resources/Aurora.entitlements` 保留 `audio-input` 与 `apple-events`，供按应用音量与自动化动作使用。
 

@@ -96,7 +96,7 @@ Then open the app again (the first launch may still need **right-click → Open*
 sudo xattr -dr com.apple.quarantine /Applications/Aurora.app
 ```
 
-> The build is ad-hoc signed and not notarised — the usual trade-off for open-source projects without a paid developer account. It does not make the app less safe; building from source is equally supported, and the command above applies to local builds too.
+> The build is signed with a fixed certificate but not notarised — the usual trade-off for open-source projects without a paid developer account. It does not make the app less safe; building from source is equally supported, and the command above applies to local builds too.
 
 ### Build from source
 
@@ -160,7 +160,8 @@ The built-in updater reads this repository's GitHub releases:
 - The first launch after an update opens a What's New window describing that version (read from the bundled `CHANGELOG.md`, so it works offline). Each version is shown once; reopen it any time from **Settings › About › What's New**.
 - You can also run a manual check from **Settings › About**, or turn automatic updates off and keep manual checks.
 - Only the app bundle is replaced. Settings, clipboard history and custom menu items live in `~/Library/Application Support/Aurora` and are never touched.
-- Official builds are ad-hoc signed by CI. If you previously ran a build signed with your own developer certificate, the signature change makes macOS treat it as a different app — **re-grant Accessibility and friends once after that first update** (updates between your own fixed-identity builds are unaffected).
+- Official builds use the **same fixed certificate** as local source builds (CI imports `AURORA_CERT_P12` / `AURORA_CERT_PASSWORD` / `AURORA_SIGN_ID` from repository secrets into a temporary keychain before packaging). TCC identifies an app by its designated requirement, and that requirement follows the certificate — so **permissions survive updates**; they only need re-granting if the certificate itself changes or is renewed.
+- The package is still not notarised, so Gatekeeper may block the first launch. (`build.sh` falls back to ad-hoc signing where no certificate is configured — those builds change their cdhash on every rebuild and do need re-granting after updates.)
 
 ## Project layout
 
