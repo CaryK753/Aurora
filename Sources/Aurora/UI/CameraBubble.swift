@@ -282,6 +282,8 @@ final class CameraBubble: ObservableObject {
         panel.ignoresMouseEvents = false
         // 默认 .readOnly：允许被 ScreenCaptureKit 录到
         panel.sharingType = .readOnly
+        // 别让 AppKit 的窗口状态恢复在下次启动时把气泡单独捞回来
+        panel.isRestorable = false
 
         let content = CameraPreviewView(frame: NSRect(origin: .zero, size: size))
         content.onDragEnded = { [weak self] in self?.persistOrigin() }

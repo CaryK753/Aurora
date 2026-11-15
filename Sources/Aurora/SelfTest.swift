@@ -42,8 +42,35 @@ enum SelfTest {
         var y = run(PointerConfig(scrollSpeed: 2), 10)
         check("2× 速度", y.0 == 20, "10 → \(y.0)")
 
-        y = run(PointerConfig(invertScroll: true), 10)
-        check("反转方向", y.0 == -10, "10 → \(y.0)")
+        y = run(PointerConfig(invertTrackpad: true), 10)
+        check("反转触控板", y.0 == -10, "10 → \(y.0)")
+
+        // 鼠标滚轮（非连续行事件）与触控板（连续像素事件）走各自的开关：
+        // 只反转鼠标时触控板必须保持原方向 —— 1.4.1 那个「触控板莫名反了」的回归点
+        func wheelRun(_ config: PointerConfig, _ dy: Int32) -> Int64 {
+            engine.update(config)
+            let e = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: dy, wheel2: 0, wheel3: 0)!
+            e.setIntegerValueField(.scrollWheelEventIsContinuous, value: 0)
+            _ = engine.process(type: .scrollWheel, event: e)
+            return e.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+        }
+
+        let wheelInverted = wheelRun(PointerConfig(invertMouse: true), 10)
+        check("反转鼠标滚轮", wheelInverted == -10, "10 → \(wheelInverted)")
+
+        let wheelPlain = wheelRun(PointerConfig(invertTrackpad: true), 10)
+        check("只反转触控板不动鼠标", wheelPlain == 10, "10 → \(wheelPlain)")
+
+        let trackpadWithMouseInvert = run(PointerConfig(invertMouse: true), 10).0
+        check("只反转鼠标不动触控板", trackpadWithMouseInvert == 10, "10 → \(trackpadWithMouseInvert)")
+
+        // 旧总开关的迁移：可见开关写过就以可见开关为准，且旧键必须删掉
+        let kept = PointerService.migrateLegacyInvert(legacy: true, mouse: false, trackpad: false)
+        check("旧总开关不再偷偷反转触控板", !kept.mouse && !kept.trackpad && kept.dropLegacy, "→ \(kept)")
+        let carried = PointerService.migrateLegacyInvert(legacy: true, mouse: nil, trackpad: nil)
+        check("没有新键时旧值搬进两个可见开关", carried.mouse && carried.trackpad && carried.dropLegacy, "→ \(carried)")
+        let clean = PointerService.migrateLegacyInvert(legacy: nil, mouse: nil, trackpad: nil)
+        check("全新安装不凭空反转", !clean.mouse && !clean.trackpad && !clean.dropLegacy, "→ \(clean)")
 
         y = run(PointerConfig(shiftToHorizontal: true), 12, flags: .maskShift)
         check("Shift 横向", y.0 == 0 && y.1 == 12, "纵向 \(y.0) · 横向 \(y.1)")

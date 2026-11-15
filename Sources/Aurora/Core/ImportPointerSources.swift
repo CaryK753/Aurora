@@ -9,7 +9,7 @@ extension ImportService {
         var fields: [ImportField] = []
         if let enabled {
             fields.append(flagField("mos.reverse", title: "反转滚动方向", target: .invertScroll,
-                                    value: enabled && vertical, location: "鼠标 › 反转滚动方向"))
+                                    value: enabled && vertical, location: "鼠标 › 反转鼠标滚轮 · 反转触控板"))
         }
         return ImportSource(id: "mos", name: "Mos", subtitle: T("平滑滚动"), symbol: "computermouse.fill",
                             tint: AuroraTheme.ok, fields: fields,
@@ -32,7 +32,7 @@ extension ImportService {
         let values = ImportParsing.linearMouse(schemes)
         if let reverse = values.reverse {
             source.fields.append(flagField("lm.reverse", title: "反转滚动方向", target: .invertScroll,
-                                           value: reverse, location: "鼠标 › 反转滚动方向"))
+                                           value: reverse, location: "鼠标 › 反转鼠标滚轮 · 反转触控板"))
         }
         if let horizontal = values.shiftHorizontal {
             source.fields.append(flagField("lm.shift", title: "Shift 横向滚动", target: .shiftHorizontal,

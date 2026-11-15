@@ -119,8 +119,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         // 开发走查：defaults write com.cary.aurora debugCameraBubble -bool YES 后启动，
-        // 只把画中画气泡摆出来（不录屏），用来核对样式、拖动与缩放
+        // 只把画中画气泡摆出来（不录屏），用来核对样式、拖动与缩放。
+        // 一次性钩子，用完即清：留在偏好里就会变成「每次打开 Aurora 都自己弹出摄像头小窗」。
         if UserDefaults.standard.bool(forKey: "debugCameraBubble") {
+            UserDefaults.standard.removeObject(forKey: "debugCameraBubble")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 CameraBubble.shared.show(on: RecorderService.shared.targetScreen)
             }

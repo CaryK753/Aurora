@@ -73,7 +73,7 @@ struct PointerConfig: Equatable {
     var acceleration: Double = 0.0 // 附加加速度 0 ... 1
     var scrollSpeed: Double = 1.0  // 滚轮速度倍率 0.3 ... 3.0
     var scrollAcceleration: Double = 0.0 // 滚得越快、走得越远 0 ... 1
-    var invertScroll: Bool = false       // 兼容旧设置：同时反转鼠标与触控板
+    /// 反转只认这两个可见开关：界面上没有的开关绝不能偷偷改方向
     var invertMouse: Bool = false        // 只反转滚轮鼠标（Mos 的 Reverse for mouse）
     var invertTrackpad: Bool = false     // 只反转触控板 / 妙控鼠标
     /// 平滑滚动（Mos 的核心能力）：把一格一格的滚轮事件插值成连续像素滚动
@@ -219,7 +219,7 @@ final class PointerEngine: @unchecked Sendable {
         let hasMacro = onNativeButton != nil || newConfig.macroBindings.values.contains { $0 != MacroAction.none.rawValue }
         let needsEngine = newConfig.speed != 1.0 || newConfig.acceleration > 0
             || newConfig.scrollSpeed != 1.0 || newConfig.scrollAcceleration > 0
-            || newConfig.invertScroll || newConfig.invertMouse || newConfig.invertTrackpad
+            || newConfig.invertMouse || newConfig.invertTrackpad
             || newConfig.smoothScroll
             || newConfig.shiftToHorizontal
             || newConfig.modifierInvert != .none || hasMacro
@@ -385,11 +385,11 @@ extension PointerEngine {
             factor *= 1 + config.scrollAcceleration * boost
         }
 
-        // 反转：鼠标与触控板分开（Mos 的两个独立开关），旧设置 invertScroll 视为两者都反
-        var sign: Double = 1
-        let reversed = isContinuous ? (config.invertTrackpad || config.invertScroll)
-                                    : (config.invertMouse || config.invertScroll)
-        if reversed { sign = -1 }
+        // 反转：鼠标与触控板分开（Mos 的两个独立开关）
+        // 只读这两个可见开关；曾经那个「反转滚动方向」总开关会把两者一起翻过来，
+        // 而界面上看不到它，表现就是「触控板莫名反了」。
+        let reversed = isContinuous ? config.invertTrackpad : config.invertMouse
+        var sign: Double = reversed ? -1 : 1
         if let flag = config.modifierInvert.flag, event.flags.contains(flag) {
             sign *= -1
             // 反转后把修饰键从事件里摘掉，避免目标 App 再按一次修饰键解释
@@ -451,7 +451,6 @@ final class PointerService: ObservableObject {
     @Published var acceleration: Double { didSet { persist(); sync() } }
     @Published var scrollSpeed: Double { didSet { persist(); sync() } }
     @Published var scrollAcceleration: Double { didSet { persist(); sync() } }
-    @Published var invertScroll: Bool { didSet { persist(); sync() } }
     @Published var invertMouse: Bool { didSet { persist(); sync() } }
     @Published var invertTrackpad: Bool { didSet { persist(); sync() } }
     @Published var smoothScroll: Bool { didSet { persist(); sync() } }
@@ -481,15 +480,40 @@ final class PointerService: ObservableObject {
     var onPermissionRequest: (() -> Void)?
     private let defaults = UserDefaults.standard
 
+    // MARK: - 反转开关的旧键迁移
+
+    static let legacyInvertKey = "pointer.invertScroll"
+    static let invertMouseKey = "pointer.invertMouse"
+    static let invertTrackpadKey = "pointer.invertTrackpad"
+
+    /// 1.4.1 之前只有一个「反转滚动方向」总开关，对鼠标和触控板同时生效
+    ///（导入 Mos / LinearMouse 时也会写它）。后来拆成两个可见开关，但事件引擎
+    /// 仍在读这个总开关：界面上两个开关都显示「关」，触控板却还是反向滚。
+    /// 这里一次性把旧值搬进两个可见键再把旧键删掉；可见键已经写过的那就以它为准
+    ///（1.4.x 的 persist 本来就是从旧值派生出这两个键的，所以它们才是当前实际状态）。
+    static func migrateLegacyInvert(legacy: Bool?, mouse: Bool?, trackpad: Bool?)
+        -> (mouse: Bool, trackpad: Bool, dropLegacy: Bool) {
+        (
+            mouse: mouse ?? legacy ?? false,
+            trackpad: trackpad ?? legacy ?? false,
+            dropLegacy: legacy != nil
+        )
+    }
+
     init() {
         speed = defaults.object(forKey: "pointer.speed") as? Double ?? 1.0
         acceleration = defaults.object(forKey: "pointer.acceleration") as? Double ?? 0.0
         scrollSpeed = defaults.object(forKey: "pointer.scrollSpeed") as? Double ?? 1.0
         scrollAcceleration = defaults.object(forKey: "pointer.scrollAcceleration") as? Double ?? 0.0
-        let legacyInvert = defaults.object(forKey: "pointer.invertScroll") as? Bool ?? false
-        invertScroll = legacyInvert
-        invertMouse = defaults.object(forKey: "pointer.invertMouse") as? Bool ?? legacyInvert
-        invertTrackpad = defaults.object(forKey: "pointer.invertTrackpad") as? Bool ?? legacyInvert
+        let migration = Self.migrateLegacyInvert(
+            legacy: defaults.object(forKey: Self.legacyInvertKey) as? Bool,
+            mouse: defaults.object(forKey: Self.invertMouseKey) as? Bool,
+            trackpad: defaults.object(forKey: Self.invertTrackpadKey) as? Bool
+        )
+        invertMouse = migration.mouse
+        invertTrackpad = migration.trackpad
+        // 旧总开关用完即删：留着它只会重新变成「界面上看不见的反转」
+        if migration.dropLegacy { defaults.removeObject(forKey: Self.legacyInvertKey) }
         smoothScroll = defaults.object(forKey: "pointer.smoothScroll") as? Bool ?? true
         smoothDuration = defaults.object(forKey: "pointer.smoothDuration") as? Double ?? 0.24
         smoothBypass = defaults.object(forKey: "pointer.smoothBypass") as? Bool ?? true
@@ -529,9 +553,8 @@ final class PointerService: ObservableObject {
         defaults.set(acceleration, forKey: "pointer.acceleration")
         defaults.set(scrollSpeed, forKey: "pointer.scrollSpeed")
         defaults.set(scrollAcceleration, forKey: "pointer.scrollAcceleration")
-        defaults.set(invertScroll, forKey: "pointer.invertScroll")
-        defaults.set(invertMouse, forKey: "pointer.invertMouse")
-        defaults.set(invertTrackpad, forKey: "pointer.invertTrackpad")
+        defaults.set(invertMouse, forKey: Self.invertMouseKey)
+        defaults.set(invertTrackpad, forKey: Self.invertTrackpadKey)
         defaults.set(smoothScroll, forKey: "pointer.smoothScroll")
         defaults.set(smoothDuration, forKey: "pointer.smoothDuration")
         defaults.set(smoothBypass, forKey: "pointer.smoothBypass")
@@ -567,7 +590,6 @@ final class PointerService: ObservableObject {
                 acceleration: acceleration,
                 scrollSpeed: scrollSpeed,
                 scrollAcceleration: scrollAcceleration,
-                invertScroll: invertScroll,
                 invertMouse: invertMouse,
                 invertTrackpad: invertTrackpad,
                 smoothScroll: smoothScroll,
@@ -612,7 +634,6 @@ final class PointerService: ObservableObject {
         acceleration = 0.0
         scrollSpeed = 1.0
         scrollAcceleration = 0.0
-        invertScroll = false
         invertMouse = false
         invertTrackpad = false
         smoothScroll = true
@@ -629,7 +650,7 @@ final class PointerService: ObservableObject {
     var isDefault: Bool {
         speed == 1.0 && acceleration == 0
             && scrollSpeed == 1.0 && scrollAcceleration == 0
-            && !invertScroll && !invertMouse && !invertTrackpad && !shiftToHorizontal
+            && !invertMouse && !invertTrackpad && !shiftToHorizontal
             && smoothScroll && abs(smoothDuration - 0.24) < 0.001 && smoothBypass
             && modifierInvert == .none
             && macroBindings == [3: .back, 4: .forward]

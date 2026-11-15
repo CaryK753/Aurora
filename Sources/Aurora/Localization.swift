@@ -440,7 +440,7 @@ enum L10n {
         ("移除背景", "Remove background"),
         ("移除图像背景", "Remove image background"),
         ("转换图像格式", "Convert image"),
-        ("鼠标 › 反转滚动方向", "Pointer › Invert scroll"),
+        ("鼠标 › 反转鼠标滚轮 · 反转触控板", "Pointer › Reverse mouse wheel · trackpad"),
         ("鼠标 › 滚轮速度", "Pointer › Scroll speed"),
         ("鼠标 › 滚轮速度（换算）", "Pointer › Scroll speed (converted)"),
         ("鼠标 › 指针速度（换算）", "Pointer › Pointer speed (converted)"),

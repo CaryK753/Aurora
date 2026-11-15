@@ -31,7 +31,11 @@ extension ImportService {
 
     private func applyField(_ field: ImportField, state: AppState, touchedDisplays: inout Set<CGDirectDisplayID>) -> Bool {
         switch (field.target, field.value) {
-        case let (.invertScroll, .flag(value)): state.pointer.invertScroll = value
+        case let (.invertScroll, .flag(value)):
+            // 旧版这一个是「总开关」，鼠标与触控板一起反；现在写进两个可见开关，
+            // 界面上能看见、也能单独改回来，不再留一个看不见却仍在改方向的键
+            state.pointer.invertMouse = value
+            state.pointer.invertTrackpad = value
         case let (.shiftHorizontal, .flag(value)): state.pointer.shiftToHorizontal = value
         case let (.scrollSpeed, .number(value)):
             guard value.isFinite else { return false }
