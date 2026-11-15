@@ -143,6 +143,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        // 走查：defaults write com.cary.aurora debugKeystrokeProbe -int 45 后**从访达启动**，
+        // 45 秒内把捕获到的每个按键写进日志（只记录、不弹胶囊）。一次性，读完即删。
+        // 必须从访达启动：从终端拉起会按终端那套 TCC 走，HID tap 建不起来。
+        if let raw = UserDefaults.standard.object(forKey: "debugKeystrokeProbe") {
+            UserDefaults.standard.removeObject(forKey: "debugKeystrokeProbe")
+            let seconds = (raw as? Int) ?? 45
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                let overlay = KeystrokeOverlayService.shared
+                overlay.targetScreen = NSScreen.main
+                overlay.suppressDisplay = true
+                overlay.onCapture = { text in Debug.log("keystroke probe: \(text)") }
+                let global = overlay.start()
+                Debug.log("keystroke probe: 开始 \(seconds)s · global=\(global) · "
+                          + "accessibility=\(OverlayAccess.hasAccessibility) "
+                          + "inputMonitoring=\(CGPreflightListenEventAccess())")
+                DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(seconds)) {
+                    // 走查窗口结束时如果正在录屏，就把 tap 留给录制用，别把胶囊掐掉
+                    if !RecorderService.shared.isRecording { overlay.stop() }
+                    overlay.onCapture = nil
+                    overlay.suppressDisplay = false
+                    Debug.log("keystroke probe: 结束")
+                }
+            }
+        }
     }
 
     /// 更新后的第一次启动弹「新功能」；这一版没有说明就静默记下，不打扰

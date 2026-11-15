@@ -16,6 +16,8 @@ struct RecorderView: View {
     @State private var cameraDevices: [CameraBubble.Device] = []
     @State private var recentFiles: [URL] = []
     @State private var overlayAccess = OverlayAccess.hasAccessibility
+    /// 按键显示走「输入监控」，和点击高亮的辅助功能是两项权限
+    @State private var keyAccess = OverlayAccess.hasKeyboardAccess
     @State private var bezelError: String?
 
     init(state: AppState) {
@@ -34,14 +36,16 @@ struct RecorderView: View {
             recorder.refreshSources()
             reloadRecent()
             overlayAccess = OverlayAccess.hasAccessibility
+            keyAccess = OverlayAccess.hasKeyboardAccess
             cameraDevices = CameraBubble.availableDevices()
         }
         // 用户去系统设置勾完权限回来，这里跟着刷新
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             overlayAccess = OverlayAccess.hasAccessibility
+            keyAccess = OverlayAccess.hasKeyboardAccess
         }
         .onChange(of: recorder.showKeystrokes) { _, on in
-            if on, !overlayAccess { OverlayAccess.requestAccessibility() }
+            if on, !keyAccess { OverlayAccess.requestKeyboardAccess() }
         }
         .onChange(of: recorder.highlightClicks) { _, on in
             if on, !overlayAccess { OverlayAccess.requestAccessibility() }
@@ -340,21 +344,29 @@ struct RecorderView: View {
                     bezelFrameRow
                 }
                 Divider().opacity(0.4)
-                optionRow(symbol: "keyboard", label: T("显示按键"), detail: T("按下的组合键实时显示在屏幕底部（需要辅助功能权限）")) {
+                optionRow(symbol: "keyboard", label: T("显示按键"), detail: T("按下的组合键实时显示在屏幕底部，系统快捷键与功能键也会显示（需要输入监控权限）")) {
                     AuroraToggle(isOn: $recorder.showKeystrokes)
                 }
 
-                if (recorder.showKeystrokes || recorder.highlightClicks) && !overlayAccess {
+                if (recorder.showKeystrokes && !keyAccess) || (recorder.highlightClicks && !overlayAccess) {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 9))
                             .foregroundStyle(AuroraTheme.warn)
-                        Text(T("这两个效果要「辅助功能」权限才能录到你自己的操作"))
+                        Text(recorder.showKeystrokes && !keyAccess
+                             ? T("按键显示要「输入监控」权限才能录到系统快捷键与功能键")
+                             : T("点击高亮要「辅助功能」权限才能录到你自己的点击"))
                             .font(.system(size: 8.5))
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 4)
-                        Button(T("去授权")) { OverlayAccess.requestAccessibility() }
-                            .controlSize(.mini)
+                        Button(T("去授权")) {
+                            if recorder.showKeystrokes && !keyAccess {
+                                OverlayAccess.requestKeyboardAccess()
+                            } else {
+                                OverlayAccess.requestAccessibility()
+                            }
+                        }
+                        .controlSize(.mini)
                     }
                 }
 

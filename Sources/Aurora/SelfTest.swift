@@ -774,6 +774,30 @@ enum SelfTest {
         check("⇧⌘␣", text(kVK_Space, cmdShift, chars: " "), "⇧⌘␣")
         check("⌘⌫", text(kVK_Delete, [.command]), "⌘⌫")
 
+        // HID 事件流拿到的是 KeyPress（不是 NSEvent），文案口径必须一致，
+        // 尤其是被系统抢走的 ⌘Space 和媒体键模式下的功能键
+        func press(_ keyCode: Int, _ flags: NSEvent.ModifierFlags = [],
+                   chars: String = "", ignoring: String? = nil) -> String? {
+            KeystrokeOverlayService.displayText(for: KeyPress(
+                keyCode: UInt16(keyCode),
+                flags: CGEventFlags(rawValue: UInt64(flags.rawValue)),
+                characters: chars.isEmpty ? nil : chars,
+                charactersIgnoringModifiers: ignoring ?? (chars.isEmpty ? nil : chars),
+                isRepeat: false
+            ))
+        }
+        check("⌘␣ 聚焦搜索", press(kVK_Space, [.command], chars: " "), "⌘␣")
+        check("F1 走事件流路径", press(kVK_F1), "F1")
+        check("⌥⌘R 录制热键", press(kVK_ANSI_R, [.command, .option], chars: "r"), "⌥⌘R")
+
+        // NX_SYSDEFINED 的功能键
+        check("媒体键 亮度 +", KeystrokeOverlayService.mediaText(key: 2), "🔆")
+        check("媒体键 亮度 −", KeystrokeOverlayService.mediaText(key: 3), "🔅")
+        check("媒体键 静音", KeystrokeOverlayService.mediaText(key: 7), "🔇")
+        check("媒体键 播放 / 暂停", KeystrokeOverlayService.mediaText(key: 16), "⏯")
+        let unknownMedia = KeystrokeOverlayService.mediaText(key: 99) == nil
+        check("认不出的功能键不弹空胶囊", unknownMedia ? "ok" : "弹了", "ok")
+
         // 胶囊要能放下最长的组合键，不能被截断
         let long = "⌃⌥⇧⌘A"
         let size = KeystrokeOverlayService.panelSize(for: long)

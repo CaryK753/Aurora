@@ -19,10 +19,23 @@ import SwiftUI
 enum OverlayAccess {
     static var hasAccessibility: Bool { AXIsProcessTrusted() }
 
+    /// 按键显示要的是「输入监控」：只读的全局键盘 tap 归这一项管，
+    /// 有辅助功能权限时系统也一并放行（老系统只有辅助功能这一道门）
+    static var hasKeyboardAccess: Bool { AXIsProcessTrusted() || CGPreflightListenEventAccess() }
+
     /// 弹系统授权提示（只会跳一次，之后要用户自己在设置里勾）
     static func requestAccessibility() {
         let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+    }
+
+    /// 键盘监听走「输入监控」；没有辅助功能的话先要辅助功能（其它模块也要）
+    static func requestKeyboardAccess() {
+        if !AXIsProcessTrusted() { requestAccessibility() }
+        _ = CGRequestListenEventAccess()
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            NSWorkspace.shared.open(url)
+        }
     }
 }
 
@@ -158,10 +171,123 @@ struct ClickRippleView: View {
 
 // MARK: - 按键显示
 
+/// 一次按下（跨线程传值，所以先把字符解析出来，不暴露 CGEvent）
+struct KeyPress: Sendable {
+    var keyCode: UInt16
+    var flags: CGEventFlags
+    var characters: String?
+    var charactersIgnoringModifiers: String?
+    var isRepeat: Bool
+
+    init(keyCode: UInt16, flags: CGEventFlags, characters: String?,
+         charactersIgnoringModifiers: String?, isRepeat: Bool) {
+        self.keyCode = keyCode
+        self.flags = flags
+        self.characters = characters
+        self.charactersIgnoringModifiers = charactersIgnoringModifiers
+        self.isRepeat = isRepeat
+    }
+
+    var modifierFlags: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: UInt(flags.rawValue)) }
+}
+
+/// HID 层的只读键盘 tap。
+///
+/// 为什么不用 `NSEvent.addGlobalMonitorForEvents`：
+///  · 系统快捷键（⌘Space 聚焦搜索、⌘Tab、调度中心…）在到达全局监听之前就被拆走了，
+///    监听里根本看不到；
+///  · F1…F12 在「媒体键」模式下走的是 NX_SYSDEFINED（亮度 / 音量 / 播放），不是 keyDown，
+///    而且 Aurora 自己的亮度接管还会把它们吞掉；
+///  · Aurora 自己注册的 Carbon 热键（⌥⌘A 等）同样会消失。
+/// 挂在 `.cghidEventTap` 上就能在所有这一切之前先看到一次按键，只监听（.listenOnly）不改事件。
+final class KeystrokeTap: @unchecked Sendable {
+    private static let systemDefinedRaw: UInt32 = 14
+
+    private var tap: CFMachPort?
+    private var source: CFRunLoopSource?
+    var onKey: ((KeyPress) -> Void)?
+    /// NX_SYSDEFINED 的功能键（只在按下时回调）
+    var onMedia: ((Int32) -> Void)?
+
+    var isRunning: Bool { tap != nil }
+
+    func start() -> Bool {
+        if tap != nil { return true }
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << Self.systemDefinedRaw)
+        guard let created = CGEvent.tapCreate(
+            tap: .cghidEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: mask,
+            callback: auroraKeystrokeTapCallback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else { return false }
+
+        tap = created
+        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, created, 0)
+        source = runLoopSource
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        CGEvent.tapEnable(tap: created, enable: true)
+        return true
+    }
+
+    func stop() {
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+        }
+        if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        tap = nil
+        source = nil
+    }
+
+    func process(type: CGEventType, event: CGEvent) {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            return
+        }
+        if type.rawValue == Self.systemDefinedRaw {
+            guard let mediaEvent = NSEvent(cgEvent: event),
+                  mediaEvent.subtype.rawValue == 8 else { return }
+            let key = Int32((mediaEvent.data1 & 0xFFFF_0000) >> 16)
+            // 0xA 按下、0xB 抬起；按住会连发 0xA，正好可以跟手（音量 / 亮度）
+            guard (mediaEvent.data1 & 0x0000_FF00) >> 8 == 0xA else { return }
+            onMedia?(key)
+            return
+        }
+        guard type == .keyDown else { return }
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+        // 字符交给 NSEvent 解析：跟现有按键文案逻辑同一套口径（忽略修饰键取字符）
+        let nsEvent = NSEvent(cgEvent: event)
+        onKey?(KeyPress(
+            keyCode: keyCode,
+            flags: event.flags,
+            characters: nsEvent?.characters,
+            charactersIgnoringModifiers: nsEvent?.charactersIgnoringModifiers,
+            isRepeat: isRepeat
+        ))
+    }
+}
+
+private func auroraKeystrokeTapCallback(
+    proxy: CGEventTapProxy,
+    type: CGEventType,
+    event: CGEvent,
+    userInfo: UnsafeMutableRawPointer?
+) -> Unmanaged<CGEvent>? {
+    guard let userInfo else { return Unmanaged.passUnretained(event) }
+    let tap = Unmanaged<KeystrokeTap>.fromOpaque(userInfo).takeUnretainedValue()
+    tap.process(type: type, event: event)
+    // 只监听，原样放行
+    return Unmanaged.passUnretained(event)
+}
+
 @MainActor
 final class KeystrokeOverlayService {
     static let shared = KeystrokeOverlayService()
 
+    private var tap: KeystrokeTap?
     private var monitors: [Any] = []
     private var panel: NSPanel?
     private var hosting: NSHostingView<KeystrokePillView>?
@@ -171,28 +297,45 @@ final class KeystrokeOverlayService {
     /// 录制所在屏幕：按键胶囊要出现在被录的那块屏上（多屏时不跟主屏）
     var targetScreen: NSScreen?
 
+    // MARK: 走查钩子（defaults write com.cary.aurora debugKeystrokeProbe -int 45）
+    /// 捕获到的文案先交给这里（走查时写日志）
+    var onCapture: ((String) -> Void)?
+    /// 只记录、不弹胶囊
+    var suppressDisplay = false
+
     @discardableResult
     func start() -> Bool {
-        guard monitors.isEmpty else { return isGlobal }
-        isGlobal = OverlayAccess.hasAccessibility
-        let mask: NSEvent.EventTypeMask = [.keyDown]
+        guard tap == nil, monitors.isEmpty else { return isGlobal }
 
-        if isGlobal, let global = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] event in
-            guard !event.isARepeat else { return }
-            Task { @MainActor in self?.show(event: event) }
-        }) {
-            monitors.append(global)
+        let tap = KeystrokeTap()
+        tap.onKey = { [weak self] press in
+            Task { @MainActor in self?.handle(press) }
         }
-        if let local = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
-            if !event.isARepeat { Task { @MainActor in self?.show(event: event) } }
+        tap.onMedia = { [weak self] key in
+            Task { @MainActor in self?.handleMedia(key) }
+        }
+        if tap.start() {
+            self.tap = tap
+            isGlobal = true
+            Debug.log("keystroke: HID tap 已挂上（全局，含系统快捷键与功能键）")
+            return true
+        }
+
+        // 没有「输入监控 / 辅助功能」：退回本 App 内监听，至少录制页里点开就有反应
+        Debug.log("keystroke: HID tap 不可用（缺输入监控 / 辅助功能），退回本 App 内监听")
+        if let local = NSEvent.addLocalMonitorForEvents(matching: [.keyDown], handler: { [weak self] event in
+            if !event.isARepeat { Task { @MainActor in self?.show(text: Self.displayText(for: event)) } }
             return event
         }) {
             monitors.append(local)
         }
-        return isGlobal
+        isGlobal = false
+        return false
     }
 
     func stop() {
+        tap?.stop()
+        tap = nil
         for monitor in monitors { NSEvent.removeMonitor(monitor) }
         monitors = []
         fadeWork?.cancel()
@@ -202,8 +345,19 @@ final class KeystrokeOverlayService {
         isGlobal = false
     }
 
-    private func show(event: NSEvent) {
-        guard let text = Self.displayText(for: event) else { return }
+    private func handle(_ press: KeyPress) {
+        guard !press.isRepeat else { return }
+        show(text: Self.displayText(for: press))
+    }
+
+    private func handleMedia(_ key: Int32) {
+        show(text: Self.mediaText(key: key))
+    }
+
+    private func show(text: String?) {
+        guard let text else { return }
+        onCapture?(text)
+        guard !suppressDisplay else { return }
 
         ensurePanel()
         guard let panel, let hosting else { return }
@@ -274,25 +428,66 @@ final class KeystrokeOverlayService {
     /// ⌃⌥⇧⌘ + 主键。方向键 / F 键 / 空格等用符号，其余用真实字符
     /// （⇧⌘V 显示 ⇧⌘V，⇧⌘4 显示 ⇧⌘4，F1 显示 F1）
     static func displayText(for event: NSEvent) -> String? {
-        let modifiers = HotkeyService.carbonModifiers(from: event.modifierFlags)
-        let symbols = modifierSymbols(modifiers)
+        displayText(
+            keyCode: event.keyCode,
+            modifiers: event.modifierFlags,
+            characters: event.characters,
+            ignoring: event.charactersIgnoringModifiers
+        )
+    }
 
-        if let named = HotkeyService.namedKeyDisplay(UInt32(event.keyCode)) {
+    static func displayText(for press: KeyPress) -> String? {
+        displayText(
+            keyCode: press.keyCode,
+            modifiers: press.modifierFlags,
+            characters: press.characters,
+            ignoring: press.charactersIgnoringModifiers
+        )
+    }
+
+    static func displayText(keyCode: UInt16, modifiers: NSEvent.ModifierFlags,
+                            characters: String?, ignoring: String?) -> String? {
+        let carbon = HotkeyService.carbonModifiers(from: modifiers)
+        let symbols = modifierSymbols(carbon)
+
+        if let named = HotkeyService.namedKeyDisplay(UInt32(keyCode)) {
             return symbols + named
         }
-        if let character = character(for: event) {
+        if let character = character(characters: characters, ignoring: ignoring) {
             return symbols + character.uppercased()
         }
         return symbols.isEmpty ? nil : symbols
     }
 
-    private static func character(for event: NSEvent) -> String? {
+    /// 功能键在「媒体键」模式下走 NX_SYSDEFINED，只有按下才显示一次；
+    /// 认不出来的（比如键盘上的特殊键）直接不显示，别弹一个空胶囊
+    static func mediaText(key: Int32) -> String? {
+        switch key {
+        case 0: return "🔊 +"        // 音量 +
+        case 1: return "🔊 −"        // 音量 −
+        case 7: return "🔇"          // 静音
+        case 2: return "🔆"          // 亮度 +
+        case 3: return "🔅"          // 亮度 −
+        case 16: return "⏯"          // 播放 / 暂停
+        case 17: return "⏭"          // 下一曲
+        case 18: return "⏮"          // 上一曲
+        case 19: return "⏩"
+        case 20: return "⏪"
+        case 21: return "⌨︎ +"       // 键盘背光 +
+        case 22: return "⌨︎ −"
+        case 23: return "⌨︎"
+        case 14: return "⏏"          // 退盘
+        default: return nil
+        }
+    }
+
+    private static func character(characters: String?, ignoring: String?) -> String? {
         // 用「忽略修饰键」的字符：⇧⌘4 显示 4（而不是 $），⇧⌘V 显示 V，
         // 系统菜单里的快捷键也是这个口径
-        if let raw = event.charactersIgnoringModifiers, isPrintable(raw) {
+        if let raw = ignoring, isPrintable(raw) {
             return raw
         }
-        if let typed = event.characters, isPrintable(typed) {
+        if let typed = characters, isPrintable(typed) {
             return typed
         }
         return nil
