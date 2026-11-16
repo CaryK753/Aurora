@@ -1905,14 +1905,22 @@ enum SelfTest {
     }
 
     /// 录屏往返自测：真录 N 秒 → 停止 → 校验落盘的 mp4 有视频轨且大小正常
-    static func recorderRoundTrip(seconds: Double, pip: Bool = false) -> Int32 {
+    static func recorderRoundTrip(seconds: Double, pip: Bool = false, microphone: Bool = false) -> Int32 {
+        let keys = ["recorder.mic", "recorder.pip", "recorder.hevc", "recorder.fps", "recorder.hiRes", "recorder.clickHighlight", "recorder.keystrokes", "recorder.source"]
+        let saved = Dictionary(uniqueKeysWithValues: keys.map { ($0, UserDefaults.standard.object(forKey: $0)) })
+        defer {
+            for key in keys {
+                if let value = saved[key] ?? nil { UserDefaults.standard.set(value, forKey: key) }
+                else { UserDefaults.standard.removeObject(forKey: key) }
+            }
+        }
         let service = RecorderService.shared
         guard service.hasScreenPermission else {
             print("✗ 没有屏幕录制权限，跳过")
             return 2
         }
         // 自测默认不碰麦克风 / 摄像头，避免弹权限框；pip 用例要验证画中画
-        service.recordMic = false
+        service.recordMic = microphone
         service.pipCamera = pip
         // 诊断用：AURORA_TEST_HEVC=0 / AURORA_TEST_FPS=30 / AURORA_TEST_LORES=1
         let env = ProcessInfo.processInfo.environment
@@ -1956,6 +1964,10 @@ enum SelfTest {
         var ok = size > 10_000
         let asset = AVURLAsset(url: url)
         let tracks = asset.tracks
+        if microphone {
+            print("麦克风已写入采样数：\(service.lastMicrophoneSamples)")
+            if service.lastMicrophoneSamples == 0 { ok = false }
+        }
         let video = tracks.filter { $0.mediaType == .video }
         let audio = tracks.filter { $0.mediaType == .audio }
         if video.isEmpty { ok = false }

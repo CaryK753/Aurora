@@ -28,7 +28,7 @@ struct RecorderView: View {
     var body: some View {
         VStack(spacing: 12) {
             controlCard
-            if !recorder.isRecording { sourceCard }
+            if !recorder.isRecording { sourceCard.disabled(recorder.optionsLocked) }
             optionsCard
             recentCard
         }
@@ -161,7 +161,7 @@ struct RecorderView: View {
                     HStack(spacing: 6) {
                         Image(systemName: recorder.isRecording ? "stop.fill" : "record.circle")
                             .font(.system(size: 11, weight: .semibold))
-                        Text(recorder.isRecording ? T("停止录制") : T("开始录制"))
+                        Text(recorder.isStarting ? T("正在启动录制…") : recorder.isStopping ? T("正在保存…") : recorder.isRecording ? T("停止录制") : T("开始录制"))
                             .font(.system(size: 12, weight: .semibold))
                     }
                     .foregroundStyle(.white)
@@ -173,7 +173,7 @@ struct RecorderView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(!permissions.screenRecording && !recorder.isRecording)
+                .disabled((!permissions.screenRecording && !recorder.isRecording) || recorder.isStarting || recorder.isStopping)
                 .opacity(!permissions.screenRecording && !recorder.isRecording ? 0.5 : 1)
 
                 Text(T("录制时屏幕底部会显示控制条，可暂停或丢弃，随时点停止。"))
@@ -309,12 +309,20 @@ struct RecorderView: View {
         GlassCard(padding: 12) {
             VStack(alignment: .leading, spacing: 9) {
                 SectionLabel(text: T("录制选项"), symbol: "slider.horizontal.3")
+                if recorder.optionsLocked {
+                    Text(T("请停止录制后调整录制选项"))
+                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                }
 
                 optionRow(symbol: "speaker.wave.2", label: T("系统声音"), detail: T("录进 MP4 音轨；窗口录制不支持系统声音")) {
-                    AuroraToggle(isOn: $recorder.systemAudio)
+                    AuroraToggle(isOn: Binding(
+                        get: { recorder.systemAudio && recorder.selectedSource?.supportsSystemAudio == true },
+                        set: { recorder.systemAudio = $0 }
+                    ))
+                    .disabled(recorder.selectedSource?.supportsSystemAudio != true)
                 }
                 Divider().opacity(0.4)
-                optionRow(symbol: "mic", label: T("麦克风"), detail: T("混入同一个 MP4（第二音轨），输出只有一个文件")) {
+                optionRow(symbol: "mic", label: T("麦克风"), detail: T("与系统声音合成为同一条音轨，输出一个 MP4 文件")) {
                     AuroraToggle(isOn: $recorder.recordMic)
                 }
                 Divider().opacity(0.4)
@@ -330,7 +338,7 @@ struct RecorderView: View {
                     AuroraToggle(isOn: $recorder.highlightClicks)
                 }
                 Divider().opacity(0.4)
-                optionRow(symbol: "video.fill.badge.plus", label: T("画中画摄像头"), detail: T("录制时屏幕角落悬浮摄像头气泡，一并录进画面")) {
+                optionRow(symbol: "video.fill.badge.plus", label: T("画中画摄像头"), detail: T("屏幕角落显示摄像头气泡；放入录制范围内才会录入画面")) {
                     AuroraToggle(isOn: $recorder.pipCamera)
                 }
                 if recorder.pipCamera {
@@ -399,6 +407,7 @@ struct RecorderView: View {
                     ) { recorder.useHEVC = ($0 == 0) }
                 }
             }
+            .disabled(recorder.optionsLocked)
         }
     }
 

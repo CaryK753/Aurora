@@ -10,6 +10,7 @@ final class DesktopService: ObservableObject {
     @Published private(set) var showHiddenFiles: Bool
     @Published private(set) var showAllExtensions: Bool
     @Published private(set) var lastToggle = Date.distantPast
+    @Published private(set) var lastError: String?
 
     private let domain = "com.apple.finder" as CFString
 
@@ -19,19 +20,41 @@ final class DesktopService: ObservableObject {
         showAllExtensions = (CFPreferencesCopyAppValue("AppleShowAllExtensions" as CFString, kCFPreferencesAnyApplication) as? Bool) ?? false
     }
 
-    func setShowHiddenFiles(_ enabled: Bool) {
+    @discardableResult
+    func setShowHiddenFiles(_ enabled: Bool) -> Bool {
+        guard save("AppleShowAllFiles", enabled, app: domain) else { return false }
         showHiddenFiles = enabled
-        CFPreferencesSetAppValue("AppleShowAllFiles" as CFString, NSNumber(value: enabled), domain)
-        CFPreferencesAppSynchronize(domain)
-        Self.restartFinder()
+        return refreshFinder()
     }
 
-    func setShowAllExtensions(_ enabled: Bool) {
+    @discardableResult
+    func setShowAllExtensions(_ enabled: Bool) -> Bool {
+        guard save("AppleShowAllExtensions", enabled, app: kCFPreferencesAnyApplication) else { return false }
         showAllExtensions = enabled
-        CFPreferencesSetValue("AppleShowAllExtensions" as CFString, NSNumber(value: enabled),
-                              kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
-        CFPreferencesSynchronize(kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
-        Self.restartFinder()
+        return refreshFinder()
+    }
+
+    private func save(_ key: String, _ value: Bool, app: CFString) -> Bool {
+        lastError = nil
+        let old = CFPreferencesCopyValue(key as CFString, app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        CFPreferencesSetValue(key as CFString, NSNumber(value: value), app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        let synced = CFPreferencesSynchronize(app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        let stored = CFPreferencesCopyValue(key as CFString, app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? NSNumber
+        guard synced, stored?.boolValue == value else {
+            CFPreferencesSetValue(key as CFString, old, app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+            CFPreferencesSynchronize(app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+            lastError = T("桌面设置未保存，请在系统设置中重试")
+            return false
+        }
+        return true
+    }
+
+    private func refreshFinder() -> Bool {
+        guard Self.restartFinder() else {
+            lastError = T("设置已保存，但未能刷新访达，请手动重新打开访达")
+            return false
+        }
+        return true
     }
 
     static func readVisible() -> Bool {
@@ -41,23 +64,28 @@ final class DesktopService: ObservableObject {
         return true
     }
 
-    func setIconsVisible(_ visible: Bool) {
+    @discardableResult
+    func setIconsVisible(_ visible: Bool) -> Bool {
+        guard save("CreateDesktop", visible, app: domain) else { return false }
         iconsVisible = visible
-        CFPreferencesSetAppValue("CreateDesktop" as CFString, NSNumber(value: visible), domain)
-        CFPreferencesAppSynchronize(domain)
         lastToggle = Date()
-        Self.restartFinder()
+        return refreshFinder()
     }
 
     func toggle() {
         setIconsVisible(!iconsVisible)
     }
 
-    static func restartFinder() {
+    @discardableResult
+    static func restartFinder() -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
         process.arguments = ["Finder"]
-        try? process.run()
+        process.standardError = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        do { try process.run() } catch { return false }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
     }
 
     /// 打开访达设置面板，方便用户核对相关项

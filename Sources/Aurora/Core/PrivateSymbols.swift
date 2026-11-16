@@ -123,11 +123,13 @@ enum DDCChannels {
         }
         if result.count == displays.count { return result }
 
-        // 2) IORegistry 兜底：按 Unit 顺序把 External 代理配给还没拿到通道的外接屏
-        var remaining = displays.filter { result[$0] == nil }
-        for service in IOAVShim.externalServices() where !remaining.isEmpty {
-            guard let channel = DDCChannel(service: service), channel.isResponsive else { continue }
-            result[remaining.removeFirst()] = channel
+        // macOS 26 的 CGS 查询可能失效。只有单屏且只有一个候选服务时，
+        // 才能确定对应关系；不能用枚举顺序猜测，否则可能调错另一块屏。
+        if result.isEmpty, displays.count == 1 {
+            let services = IOAVShim.externalServices()
+            if services.count == 1, let channel = DDCChannel(service: services[0]), channel.isResponsive {
+                result[displays[0]] = channel
+            }
         }
         return result
     }
@@ -138,6 +140,7 @@ final class DDCChannel {
     private let chipAddress: UInt32 = 0x37      // 7bit address
     private let dataAddress: UInt32 = 0x51
     private let service: CFTypeRef
+    private let transferLock = NSLock()
 
     /// 通道是否真的能通信：拿亮度（0x10）探一次，读不到就当没有 DDC
     var isResponsive: Bool { read(0x10) != nil }
@@ -190,7 +193,10 @@ final class DDCChannel {
     }
 
     func read(_ vcp: UInt8) -> (current: UInt16, max: UInt16)? {
-        guard let reply = transfer(send: [vcp], replyLength: 11), reply.count >= 10 else { return nil }
+        transferLock.lock()
+        defer { transferLock.unlock() }
+        guard let reply = transfer(send: [vcp], replyLength: 11), reply.count >= 10,
+              reply[2] == 0x02, reply[3] == 0, reply[4] == vcp else { return nil }
         let max = UInt16(reply[6]) << 8 | UInt16(reply[7])
         let current = UInt16(reply[8]) << 8 | UInt16(reply[9])
         guard max > 0 else { return nil }
@@ -199,6 +205,8 @@ final class DDCChannel {
 
     @discardableResult
     func write(_ vcp: UInt8, value: UInt16) -> Bool {
-        transfer(send: [vcp, UInt8(value >> 8), UInt8(value & 0xFF)], replyLength: 0) != nil
+        transferLock.lock()
+        defer { transferLock.unlock() }
+        return transfer(send: [vcp, UInt8(value >> 8), UInt8(value & 0xFF)], replyLength: 0) != nil
     }
 }

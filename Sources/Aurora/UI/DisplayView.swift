@@ -28,6 +28,7 @@ struct DisplayView: View {
             } else {
                 ForEach(service.displays) { display in
                     displayCard(display)
+                        .disabled(service.pendingSoftwareMode.contains(display.id))
                 }
             }
             DisplayBehaviorCard(service: service, permissions: permissions)
@@ -37,6 +38,9 @@ struct DisplayView: View {
             }
             restoreCard
             tipCard
+        }
+        .onChange(of: service.lastError) { _, error in
+            if let error { state.showToast(error, symbol: "exclamationmark.triangle") }
         }
     }
 
@@ -128,7 +132,7 @@ struct DisplayView: View {
                 }
 
                 if !display.hasBrightness && !display.hasVolume {
-                    Text(T("该显示器未提供 DDC 通道；可在「高级」里开启强制软件调光"))
+                    Text(T("未确认此屏的 DDC 通道；可在「高级」里开启强制软件调光"))
                         .font(.system(size: 9.5))
                         .foregroundStyle(.tertiary)
                 }

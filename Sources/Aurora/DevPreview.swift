@@ -35,6 +35,7 @@ enum DevPreview {
         case .pointer: PointerView(state: state)
         case .trackpad: TrackpadView(service: state.trackpad)
         case .keyboard: KeyboardView(state: state)
+        case .input: InputView(state: state)
         case .menu: ContextMenuView(state: state)
         case .desktop: DesktopView(state: state)
         case .clipboard: ClipboardView(state: state)

@@ -116,6 +116,9 @@ final class DDCManager: @unchecked Sendable {
 @MainActor
 final class DisplayService: ObservableObject {
     @Published private(set) var displays: [DisplayItem] = []
+    @Published private(set) var lastError: String?
+    private var writeRevisions: [String: Int] = [:]
+    @Published private(set) var pendingSoftwareMode: Set<CGDirectDisplayID> = []
 
     @Published var restoreOnLaunch: Bool = UserDefaults.standard.bool(forKey: "display.restoreOnLaunch")
     /// 亮度切换用 ~0.2s 缓动过渡，避免点预设时「啪」地跳一下
@@ -250,7 +253,7 @@ final class DisplayService: ObservableObject {
 
             if isBuiltIn, let value = DisplayServicesShim.brightness(of: id) {
                 item.hasBrightness = true
-                if fadeTasks[id] == nil { item.brightness = Double(value) }
+                if fadeTasks[id] == nil, !tuning.softwareOnly { item.brightness = Double(value) }
             }
             item.softwareBrightness = Double(gamma.level(for: id))
             item.softwareOnly = tuning.softwareOnly || (!isBuiltIn && !item.hasBrightness)
@@ -323,7 +326,8 @@ final class DisplayService: ObservableObject {
                 for (id, value) in results {
                     guard let index = self.displays.firstIndex(where: { $0.id == id }) else { continue }
                     // 正在调光时不要用 DDC 读回值覆盖（读取有延迟，会把滑杆拽回去）
-                    if let brightness = value.brightness, self.fadeTasks[id] == nil {
+                    if let brightness = value.brightness, self.fadeTasks[id] == nil,
+                       !self.tunings.tuning(for: id).softwareOnly {
                         self.displays[index].brightness = brightness.0
                         self.displays[index].hasBrightness = true
                         // 首轮 refresh 时还没读到 DDC，softwareOnly 会被判成 true；
@@ -350,17 +354,18 @@ final class DisplayService: ObservableObject {
     // MARK: - 写入
 
     func setBrightness(_ value: Double, for id: CGDirectDisplayID, animated: Bool = false) {
-        guard let index = displays.firstIndex(where: { $0.id == id }) else { return }
+        guard !pendingSoftwareMode.contains(id), value.isFinite,
+              let index = displays.firstIndex(where: { $0.id == id }) else { return }
         let clamped = min(max(value, 0), 1)
         let start = displays[index].brightness
         displays[index].brightness = clamped
-        saveBrightness(clamped, for: id)
+        lastError = nil
 
         fadeTasks[id]?.cancel()
         fadeTasks[id] = nil
 
         guard animated, smoothTransition else {
-            applyBrightness(clamped, for: id)
+            guard applyBrightness(clamped, for: id) else { return }
             propagate(from: id, start: start, end: clamped)
             return
         }
@@ -372,7 +377,10 @@ final class DisplayService: ObservableObject {
                 let t = Double(step) / Double(steps)
                 // easeOutCubic：起步快、收尾稳，观感最接近系统亮度键
                 let eased = 1 - pow(1 - t, 3)
-                self?.applyBrightness(start + (clamped - start) * eased, for: id)
+                guard self?.applyBrightness(start + (clamped - start) * eased, for: id) == true else {
+                    self?.fadeTasks[id] = nil
+                    return
+                }
                 try? await Task.sleep(nanoseconds: 16_000_000)
             }
             self?.fadeTasks[id] = nil
@@ -406,45 +414,74 @@ final class DisplayService: ObservableObject {
             guard abs(clamped - other.brightness) > 0.0005 else { continue }
             guard let index = displays.firstIndex(where: { $0.id == other.id }) else { continue }
             displays[index].brightness = clamped
-            saveBrightness(clamped, for: other.id)
             applyBrightness(clamped, for: other.id)
         }
         isLinking = false
     }
 
     /// 把 0...1 的「逻辑亮度」拆成硬件 + 软件两段后真正落地
-    private func applyBrightness(_ value: Double, for id: CGDirectDisplayID) {
-        guard let item = displays.first(where: { $0.id == id }) else { return }
+    @discardableResult
+    private func applyBrightness(_ value: Double, for id: CGDirectDisplayID) -> Bool {
+        guard let item = displays.first(where: { $0.id == id }) else { return false }
         let tuning = tunings.tuning(for: id)
         let hardwareValue = combinedDimming ? max((value - switchingPoint) / max(1 - switchingPoint, 0.01), 0) : value
         let softwareValue = combinedDimming ? (value < switchingPoint ? value / max(switchingPoint, 0.01) : 1) : 1
 
         if item.isBuiltIn && !tuning.softwareOnly {
-            DisplayServicesShim.setBrightness(Float(hardwareValue), of: id)
-            applySoftwareDimming(softwareValue, for: id, avoidGamma: tuning.avoidGamma)
-            return
+            guard DisplayServicesShim.setBrightness(Float(hardwareValue), of: id) else {
+                lastError = T("显示器亮度设置失败，请在系统设置中检查")
+                if let actual = DisplayServicesShim.brightness(of: id),
+                   let index = displays.firstIndex(where: { $0.id == id }) {
+                    displays[index].brightness = Double(actual)
+                }
+                return false
+            }
+            if applySoftwareDimming(softwareValue, for: id, avoidGamma: tuning.avoidGamma) {
+                saveBrightness(value, for: id)
+                return true
+            }
+            return false
         }
 
         // 外接屏：能走 DDC 就走硬件，DDC 不可用或强制软件模式时纯 gamma
         if !tuning.softwareOnly, ddc.channel(for: id) != nil, item.hasBrightness {
-            writeDDC(id, channel: .brightness, value: hardwareValue)
-            applySoftwareDimming(softwareValue, for: id, avoidGamma: tuning.avoidGamma)
+            guard writeDDC(id, channel: .brightness, value: hardwareValue) else { return false }
+            return applySoftwareDimming(softwareValue, for: id, avoidGamma: tuning.avoidGamma)
         } else {
-            applySoftwareDimming(value, for: id, avoidGamma: tuning.avoidGamma)
+            if applySoftwareDimming(value, for: id, avoidGamma: tuning.avoidGamma) {
+                saveBrightness(value, for: id)
+                return true
+            }
+            return false
         }
     }
 
-    private func applySoftwareDimming(_ level: Double, for id: CGDirectDisplayID, avoidGamma: Bool) {
+    @discardableResult
+    private func applySoftwareDimming(_ level: Double, for id: CGDirectDisplayID, avoidGamma: Bool) -> Bool {
         guard !avoidGamma else {
             // 与其它改 gamma 的 App 冲突时不动 gamma 表，退回纯硬件（避免画面被抢来抢去）
             gamma.reset(id)
-            return
+            if level < 0.999 { lastError = T("当前显示器配置不支持软件调光，请恢复此屏默认设置后重试") }
+            return level >= 0.999
+        }
+        if level >= 0.999, gamma.level(for: id) >= 0.999 {
+            if let index = displays.firstIndex(where: { $0.id == id }) { displays[index].softwareBrightness = 1 }
+            return true
         }
         gamma.capture(id)
-        gamma.apply(Float(level), to: id)
+        guard gamma.apply(Float(level), to: id) else {
+            lastError = T("软件调光失败，显示器未接受亮度设置")
+            if let index = displays.firstIndex(where: { $0.id == id }), tunings.tuning(for: id).softwareOnly {
+                displays[index].brightness = Double(gamma.level(for: id))
+            }
+            let key = "\(id)-brightness"
+            writeRevisions[key, default: 0] += 1
+            return false
+        }
         if let index = displays.firstIndex(where: { $0.id == id }) {
             displays[index].softwareBrightness = level
         }
+        return true
     }
 
     /// 给快捷键 / 原生亮度键用：按 1/16 或 1% 步进
@@ -507,11 +544,9 @@ final class DisplayService: ObservableObject {
         displays[index].volume = clamped
         let tuning = tunings.tuning(for: id)
         if clamped > 0.001 { mutedVolumes[id] = nil }
-        if !tuning.softwareOnly {
-            writeDDC(id, channel: .volume, value: clamped)
-            if tuning.muteAtZero, let channel = ddc.channel(for: id) {
-                writer.submit(key: "\(id)-mute", channel: channel, codes: [0x8D], value: clamped <= 0.001 ? 1 : 2)
-            }
+        writeDDC(id, channel: .volume, value: clamped)
+        if tuning.muteAtZero, let channel = ddc.channel(for: id) {
+            writer.submit(key: "\(id)-mute", channel: channel, codes: [0x8D], value: clamped <= 0.001 ? 1 : 2)
         }
         if withOSD, showOSD, !tuning.hideOSD {
             DisplayOSD.shared.show(channel: .volume, value: clamped, muted: clamped <= 0.001, on: screen(for: id))
@@ -563,17 +598,34 @@ final class DisplayService: ObservableObject {
         return UInt16(min(max(raw.rounded(), Double(bounds.min)), Double(bounds.max)))
     }
 
-    private func writeDDC(_ id: CGDirectDisplayID, channel: DisplayChannel, value: Double) {
+    @discardableResult
+    private func writeDDC(_ id: CGDirectDisplayID, channel: DisplayChannel, value: Double) -> Bool {
         let tuning = tunings.tuning(for: id)
-        guard !tuning.softwareOnly, let ddcChannel = ddc.channel(for: id) else { return }
+        guard (channel != .brightness || !tuning.softwareOnly), let ddcChannel = ddc.channel(for: id) else {
+            lastError = T("当前显示器没有可用的硬件控制通道")
+            return false
+        }
         let codes = tuning.remapCodes(channel)
         let payload = encode(value, for: id, channel: channel)
+        let key = "\(id)-\(channel.rawValue)"
+        let revision = (writeRevisions[key] ?? 0) + 1
+        writeRevisions[key] = revision
+        let brightness = displays.first(where: { $0.id == id })?.brightness
         writer.submit(
-            key: "\(id)-\(channel.rawValue)",
-            channel: ddcChannel,
-            codes: codes.isEmpty ? [channel.vcp] : codes,
-            value: payload
-        )
+            key: key, channel: ddcChannel,
+            codes: codes.isEmpty ? [channel.vcp] : codes, value: payload
+        ) { [weak self] success in
+            Task { @MainActor in
+                guard let self, self.writeRevisions[key] == revision else { return }
+                if !success {
+                    self.lastError = T("显示器未接受设置，请检查连接或改用软件调光")
+                    self.readDDCInBackground()
+                } else if channel == .brightness, let brightness {
+                    self.saveBrightness(brightness, for: id)
+                }
+            }
+        }
+        return true
     }
 
     // MARK: - 原生亮度键
@@ -625,20 +677,53 @@ final class DisplayService: ObservableObject {
     }
 
     func setSoftwareOnly(_ enabled: Bool, for id: CGDirectDisplayID) {
+        guard let item = displays.first(where: { $0.id == id }), !pendingSoftwareMode.contains(id),
+              tunings.tuning(for: id).softwareOnly != enabled else { return }
+        lastError = nil
+        fadeTasks[id]?.cancel()
+        fadeTasks[id] = nil
+        if enabled, !item.isBuiltIn, let channel = ddc.channel(for: id) {
+            pendingSoftwareMode.insert(id)
+            let codes = tunings.tuning(for: id).remapCodes(.brightness)
+            writer.submit(key: "\(id)-brightness", channel: channel,
+                          codes: codes.isEmpty ? [DisplayChannel.brightness.vcp] : codes,
+                          value: encode(1, for: id, channel: .brightness)) { [weak self] success in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.pendingSoftwareMode.remove(id)
+                    guard success else {
+                        self.lastError = T("显示器未接受设置，请检查连接或改用软件调光")
+                        return
+                    }
+                    self.finishSoftwareMode(enabled, item: item)
+                }
+            }
+            return
+        }
+        if enabled, item.isBuiltIn, !DisplayServicesShim.setBrightness(1, of: id) {
+            lastError = T("显示器亮度设置失败，请在系统设置中检查")
+            return
+        }
+        finishSoftwareMode(enabled, item: item)
+    }
+
+    private func finishSoftwareMode(_ enabled: Bool, item: DisplayItem) {
+        let id = item.id
+        if enabled {
+            guard applySoftwareDimming(item.brightness, for: id, avoidGamma: tunings.tuning(for: id).avoidGamma) else {
+                let failure = lastError
+                setBrightness(item.brightness, for: id)
+                lastError = failure
+                return
+            }
+        } else {
+            gamma.reset(id)
+        }
         tunings.update(id) { $0.softwareOnly = enabled }
         if let index = displays.firstIndex(where: { $0.id == id }) {
             displays[index].softwareOnly = enabled
         }
-        if enabled {
-            // 切到软件调光时先把硬件拉回满亮，否则会「双重变暗」
-            if displays.first(where: { $0.id == id })?.isBuiltIn == false {
-                writeDDC(id, channel: .brightness, value: 1)
-            }
-            applySoftwareDimming(displays.first(where: { $0.id == id })?.brightness ?? 1, for: id, avoidGamma: false)
-        } else {
-            gamma.reset(id)
-            setBrightness(displays.first(where: { $0.id == id })?.brightness ?? 1, for: id)
-        }
+        if !enabled { setBrightness(item.brightness, for: id) }
     }
 
     func resetTuning(for id: CGDirectDisplayID) {

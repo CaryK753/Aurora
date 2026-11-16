@@ -554,27 +554,22 @@ final class PerAppAudioService: ObservableObject {
     }
 
     func setVolume(_ value: Double, for bundleID: String) {
+        guard value.isFinite, isSupported, moduleEnabled else { return }
+        lastError = nil
         let clamped = min(max(value, 0), 1.5)
         volumes[bundleID] = clamped
-        persist()
-        if let chain = chains[bundleID] {
-            chain.setGain(Float(clamped))
-        }
+        chains[bundleID]?.setGain(Float(clamped))
         syncChains()
+        if abs(clamped - 1) > 0.001, chains[bundleID] == nil, failures[bundleID] != nil {
+            volumes[bundleID] = 1
+            lastError = TF("无法接管 %@ 的音频", bundleID)
+        }
+        persist()
         refresh()
     }
 
     func toggleMute(_ bundleID: String) {
-        let current = volume(for: bundleID)
-        if current > 0.001 {
-            volumes[bundleID] = 0
-        } else {
-            volumes[bundleID] = 1.0
-        }
-        persist()
-        chains[bundleID]?.setGain(Float(volume(for: bundleID)))
-        syncChains()
-        refresh()
+        setVolume(volume(for: bundleID) > 0.001 ? 0 : 1, for: bundleID)
     }
 
     func resetAll() {
@@ -607,6 +602,7 @@ final class PerAppAudioService: ObservableObject {
     func refresh() {
         guard moduleEnabled else { return }
         let processes = Self.audioProcesses()
+        syncChains(processes: processes)
         var visible: [AppAudioItem] = []
         var seen = Set<String>()
 
@@ -649,7 +645,6 @@ final class PerAppAudioService: ObservableObject {
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
         controlledCount = chains.values.filter(\.isRunning).count
-        syncChains(processes: processes)
     }
 
     /// 让链路状态与「音量是否为默认」保持一致
@@ -679,6 +674,9 @@ final class PerAppAudioService: ObservableObject {
                 if chain.stalled {
                     Debug.log("audio: \(key) 链路无数据，已拆除以免静音")
                     failures[key] = Date()
+                    volumes[key] = 1
+                    persist()
+                    lastError = TF("无法接管 %@ 的音频", key)
                 }
                 chain.teardown()
                 chains.removeValue(forKey: key)
@@ -698,6 +696,8 @@ final class PerAppAudioService: ObservableObject {
                 failures.removeValue(forKey: target.bundleID)
             } else {
                 failures[target.bundleID] = Date()
+                volumes[target.bundleID] = 1
+                persist()
                 lastError = TF("无法接管 %@ 的音频", target.bundleID)
             }
         }

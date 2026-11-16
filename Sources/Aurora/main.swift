@@ -13,6 +13,152 @@ if CommandLine.arguments.contains("--logitech-diagnostics") || CommandLine.argum
     exit(lines.contains(where: { $0.hasPrefix("error:") }) ? 1 : 0)
 }
 
+/// 临时诊断：把前台某个 App 的 AX 树打出来（用于核对系统设置里的开关真实状态）
+if CommandLine.arguments.contains("--ax-dump") {
+    var target = "com.apple.systempreferences"
+    if let index = CommandLine.arguments.firstIndex(of: "--ax-dump"), index + 1 < CommandLine.arguments.count {
+        let candidate = CommandLine.arguments[index + 1]
+        if !candidate.hasPrefix("--") { target = candidate }
+    }
+    let apps = NSRunningApplication.runningApplications(withBundleIdentifier: target)
+    guard let app = apps.first else { print("未运行：\(target)"); exit(1) }
+    var lines: [String] = []
+    func walk(_ element: AXUIElement, depth: Int) {
+        guard depth <= 16, lines.count < 900 else { return }
+        var role = "", title = "", value = "", desc = "", ident = ""
+        for (attr, out) in [("AXRole", 0), ("AXTitle", 1), ("AXValue", 2), ("AXDescription", 3), ("AXIdentifier", 4)] {
+            var raw: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, attr as CFString, &raw) == .success, let v = raw {
+                let text = String(describing: v)
+                switch out {
+                case 0: role = text
+                case 1: title = text
+                case 2: value = text
+                case 3: desc = text
+                default: ident = text
+                }
+            }
+        }
+        var extras: [String] = []
+        for (name, label) in [("AXEnabled", "enabled"), ("AXSelected", "selected")] {
+            var raw: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, name as CFString, &raw) == .success, let v = raw {
+                extras.append("\(label)=\(v)")
+            }
+        }
+        lines.append(String(repeating: "  ", count: depth) + role + " | " + (title.isEmpty ? value : title) + (desc.isEmpty ? "" : " | d=" + desc) + (ident.isEmpty || ident == "nil" ? "" : " | id=" + ident) + (extras.isEmpty ? "" : " | " + extras.joined(separator: " ")))
+        var children: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+           let list = children as? [AXUIElement] {
+            for child in list { walk(child, depth: depth + 1) }
+        }
+    }
+    func find(_ element: AXUIElement, matching needle: String, depth: Int) -> AXUIElement? {
+        guard depth <= 16 else { return nil }
+        for attr in ["AXDescription", "AXTitle", "AXValue"] {
+            var raw: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, attr as CFString, &raw) == .success, let v = raw,
+               String(describing: v).contains(needle) {
+                return element
+            }
+        }
+        var children: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+           let list = children as? [AXUIElement] {
+            for child in list { if let hit = find(child, matching: needle, depth: depth + 1) { return hit } }
+        }
+        return nil
+    }
+
+    // --ax-click x,y：在屏幕坐标（点）点一下，用于操作侧栏这类 AXPress 无效的控件
+    if let index = CommandLine.arguments.firstIndex(of: "--ax-click"), index + 1 < CommandLine.arguments.count {
+        let parts = CommandLine.arguments[index + 1].split(separator: ",").compactMap { Double($0) }
+        if parts.count == 2 {
+            let point = CGPoint(x: parts[0], y: parts[1])
+            for type in [CGEventType.leftMouseDown, .leftMouseUp] {
+                CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?
+                    .post(tap: .cghidEventTap)
+                usleep(30_000)
+            }
+            print("// clicked \(point.x),\(point.y)")
+            RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+        }
+    }
+
+    let root = AXUIElementCreateApplication(app.processIdentifier)
+    // --ax-press 标签：先点一下这个按钮，等待界面切换后再 dump
+    // --ax-select 标签：选中侧栏行（AXPress 对 AXRow 无效）
+    if let index = CommandLine.arguments.firstIndex(of: "--ax-select"), index + 1 < CommandLine.arguments.count {
+        let needle = CommandLine.arguments[index + 1]
+        func rowContaining(_ element: AXUIElement, depth: Int) -> AXUIElement? {
+            guard depth <= 16 else { return nil }
+            var role = ""
+            var raw: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, "AXRole" as CFString, &raw) == .success, let v = raw {
+                role = String(describing: v)
+            }
+            if role == "AXRow", find(element, matching: needle, depth: 0) != nil { return element }
+            var children: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+               let list = children as? [AXUIElement] {
+                for child in list { if let hit = rowContaining(child, depth: depth + 1) { return hit } }
+            }
+            return nil
+        }
+        if let row = rowContaining(AXUIElementCreateApplication(app.processIdentifier), depth: 0) {
+            let result = AXUIElementSetAttributeValue(row, kAXSelectedAttribute as CFString, kCFBooleanTrue)
+            print("// selected \(needle) -> \(result.rawValue)")
+        } else {
+            print("// row not found: \(needle)")
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+    }
+
+    // --ax-check 标签：勾选与这段文字同组的复选框（系统设置里的开关都长这样）
+    if let index = CommandLine.arguments.firstIndex(of: "--ax-check"), index + 1 < CommandLine.arguments.count {
+        let needle = CommandLine.arguments[index + 1]
+        let app0 = AXUIElementCreateApplication(app.processIdentifier)
+        if let label = find(app0, matching: needle, depth: 0) {
+            var parent: CFTypeRef?
+            if AXUIElementCopyAttributeValue(label, kAXParentAttribute as CFString, &parent) == .success,
+               let group = parent {
+                let groupElement = unsafeBitCast(group, to: AXUIElement.self)
+                var children: CFTypeRef?
+                if AXUIElementCopyAttributeValue(groupElement, kAXChildrenAttribute as CFString, &children) == .success,
+                   let list = children as? [AXUIElement] {
+                    for child in list {
+                        var role: CFTypeRef?
+                        AXUIElementCopyAttributeValue(child, "AXRole" as CFString, &role)
+                        if let r = role, String(describing: r) == "AXCheckBox" {
+                            print("// toggling checkbox near \(needle) -> \(AXUIElementPerformAction(child, kAXPressAction as CFString).rawValue)")
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(1.0))
+    }
+
+    var needles: [String] = []
+    for (i, arg) in CommandLine.arguments.enumerated() where arg == "--ax-press" {
+        if i + 1 < CommandLine.arguments.count { needles.append(CommandLine.arguments[i + 1]) }
+    }
+    for needle in needles {
+        if let hit = find(root, matching: needle, depth: 0) {
+            let result = AXUIElementPerformAction(hit, kAXPressAction as CFString)
+            print("// pressed \(needle) -> \(result.rawValue)")
+        } else {
+            print("// not found: \(needle)")
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(1.2))
+    }
+
+    walk(root, depth: 0)
+    print(lines.joined(separator: "\n"))
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--permission-probe") {
     let data = try JSONEncoder().encode(PermissionSnapshot.capture())
     FileHandle.standardOutput.write(data)
@@ -172,6 +318,12 @@ if let index = CommandLine.arguments.firstIndex(of: "--snapshot") {
 if CommandLine.arguments.contains("--audio-mute-test") {
     var code: Int32 = 0
     MainActor.assumeIsolated { code = SelfTest.audioMuteLeak() }
+    exit(code)
+}
+
+if CommandLine.arguments.contains("--record-mic-test") {
+    var code: Int32 = 0
+    MainActor.assumeIsolated { code = SelfTest.recorderRoundTrip(seconds: 3, microphone: true) }
     exit(code)
 }
 
@@ -413,6 +565,21 @@ if CommandLine.arguments.contains("--device-test") {
 }
 
 /// 外壳资源自检：确认打包后的 app 能从 Contents/Resources/DeviceFrames 里读到 PNG 与清单
+/// 键盘设置自检：直接读系统的功能键 / Fn 键真实键值，并做一次写入回读
+if CommandLine.arguments.contains("--keyboard-report") {
+    let global = UserDefaults.standard.object(forKey: "com.apple.keyboard.fnState") as? NSNumber
+    let domain = CFPreferencesCopyAppValue(
+        "com.apple.keyboard.fnState" as CFString, "com.apple.keyboard" as CFString
+    ) as? NSNumber
+    let fnUsage = (CFPreferencesCopyAppValue(
+        "AppleFnUsageType" as CFString, "com.apple.HIToolbox" as CFString
+    ) as? NSNumber)?.intValue ?? 0
+    print("F1–F12 标准功能键：NSGlobalDomain=\(global?.boolValue.description ?? "未设置") · com.apple.keyboard=\(domain?.boolValue.description ?? "未设置")")
+    print("生效判定（任一为真即开启）：\(KeyboardService.readFunctionKeys())")
+    print("Fn / 🌐 键功能：AppleFnUsageType=\(fnUsage)（\(FnKeyUsage(rawValue: fnUsage)?.title ?? "未知")）")
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--frames-report") {
     var code: Int32 = 0
     MainActor.assumeIsolated {

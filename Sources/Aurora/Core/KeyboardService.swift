@@ -110,6 +110,34 @@ private func auroraCleanTapCallback(
     return engine.process(type: type, event: event)
 }
 
+/// Fn / 🌐 键功能（对应系统 keyboard › 「按 🌐 键时」）
+enum FnKeyUsage: Int, CaseIterable, Identifiable {
+    case doNothing = 0
+    case changeInputSource = 1
+    case emoji = 2
+    case dictation = 3
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .doNothing: return T("不做任何事")
+        case .changeInputSource: return T("切换输入法")
+        case .emoji: return T("显示表情与符号")
+        case .dictation: return T("启动听写")
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .doNothing: return "circle.slash"
+        case .changeInputSource: return "character.cursor.ibeam"
+        case .emoji: return "face.smiling"
+        case .dictation: return "mic"
+        }
+    }
+}
+
 // MARK: - 服务
 
 @MainActor
@@ -125,12 +153,22 @@ final class KeyboardService: ObservableObject {
     @Published var keyRepeatRate: Double {
         didSet { guard !loading else { return }; writeRepeat() }
     }
+    /// F1–F12 直接作为标准功能键（系统「Use F1, F2, etc. keys as standard function keys」）
     @Published var functionKeysFirst: Bool {
         didSet {
             guard !loading else { return }
-            writeBoolGlobal("com.apple.keyboard.fnState", functionKeysFirst)
+            applyFunctionKeys(functionKeysFirst)
         }
     }
+    /// Fn / 🌐 键的功能（com.apple.HIToolbox AppleFnUsageType）
+    @Published var fnUsage: FnKeyUsage {
+        didSet {
+            guard !loading else { return }
+            applyFnUsage(fnUsage)
+        }
+    }
+    /// 功能键设置是否真的落到系统里（回读校验的结果）
+    @Published private(set) var functionKeysVerified = true
 
     var onToast: ((String, String) -> Void)?
     var onRequestPermission: (() -> Void)?
@@ -153,7 +191,8 @@ final class KeyboardService: ObservableObject {
         let rate = defaults.object(forKey: "KeyRepeat") as? Double ?? 6
         keyRepeatDelay = min(max(delay, 10), 60)
         keyRepeatRate = min(max(rate, 1), 12)
-        functionKeysFirst = defaults.bool(forKey: "com.apple.keyboard.fnState")
+        functionKeysFirst = Self.readFunctionKeys()
+        fnUsage = FnKeyUsage(rawValue: Self.readFnUsage()) ?? .doNothing
         loading = false
         reloadTypes()
 
@@ -216,7 +255,7 @@ final class KeyboardService: ObservableObject {
         }
     }
 
-    // MARK: - 重复速率
+    // MARK: - 系统键盘偏好
 
     private func writeRepeat() {
         repeatTask?.cancel()
@@ -225,22 +264,69 @@ final class KeyboardService: ObservableObject {
         repeatTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 320_000_000)
             guard !Task.isCancelled else { return }
-            shell("/usr/bin/defaults", ["write", "-g", "InitialKeyRepeat", "-int", "\(delay)"])
-            shell("/usr/bin/defaults", ["write", "-g", "KeyRepeat", "-int", "\(rate)"])
+            let savedDelay = writePreference("InitialKeyRepeat", NSNumber(value: delay))
+            let savedRate = writePreference("KeyRepeat", NSNumber(value: rate))
+            if !savedDelay || !savedRate {
+                loading = true
+                keyRepeatDelay = (Self.readPreference("InitialKeyRepeat")?.doubleValue ?? 25)
+                keyRepeatRate = (Self.readPreference("KeyRepeat")?.doubleValue ?? 6)
+                loading = false
+                onToast?(T("键盘设置未保存，请在系统设置中重试"), "exclamationmark.triangle")
+            } else {
+                onToast?(T("已保存键盘设置，可能需要重新登录后生效"), "keyboard")
+            }
         }
     }
 
-    private func writeBoolGlobal(_ key: String, _ value: Bool) {
-        shell("/usr/bin/defaults", ["write", "-g", key, "-bool", value ? "true" : "false"])
+    nonisolated private static func readPreference(_ key: String, domain: CFString = kCFPreferencesAnyApplication) -> NSNumber? {
+        CFPreferencesCopyValue(key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? NSNumber
     }
 
-    private func shell(_ path: String, _ arguments: [String]) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        process.standardError = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        try? process.run()
+    private func writePreference(_ key: String, _ value: NSNumber, domain: CFString = kCFPreferencesAnyApplication) -> Bool {
+        let old = CFPreferencesCopyValue(key as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        CFPreferencesSetValue(key as CFString, value, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        let synced = CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        guard synced, Self.readPreference(key, domain: domain) == value else {
+            CFPreferencesSetValue(key as CFString, old, domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+            CFPreferencesSynchronize(domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+            return false
+        }
+        return true
+    }
+
+    nonisolated static func readFunctionKeys() -> Bool {
+        Self.readPreference("com.apple.keyboard.fnState", domain: "com.apple.keyboard" as CFString)?.boolValue
+            ?? Self.readPreference("com.apple.keyboard.fnState")?.boolValue ?? false
+    }
+
+    nonisolated static func readFnUsage() -> Int {
+        Self.readPreference("AppleFnUsageType", domain: "com.apple.HIToolbox" as CFString)?.intValue ?? 0
+    }
+
+    private func applyFunctionKeys(_ on: Bool) {
+        let key = "com.apple.keyboard.fnState"
+        let globalSaved = writePreference(key, NSNumber(value: on))
+        let domainSaved = writePreference(key, NSNumber(value: on), domain: "com.apple.keyboard" as CFString)
+        functionKeysVerified = globalSaved && domainSaved && Self.readFunctionKeys() == on
+        if !functionKeysVerified {
+            loading = true
+            functionKeysFirst = Self.readFunctionKeys()
+            loading = false
+            onToast?(T("功能键设置没有写进系统，可改用系统设置里的同名开关"), "exclamationmark.triangle")
+        } else {
+            onToast?(T("已保存键盘设置，可能需要重新登录后生效"), "keyboard")
+        }
+    }
+
+    private func applyFnUsage(_ usage: FnKeyUsage) {
+        guard writePreference("AppleFnUsageType", NSNumber(value: usage.rawValue), domain: "com.apple.HIToolbox" as CFString) else {
+            loading = true
+            fnUsage = FnKeyUsage(rawValue: Self.readFnUsage()) ?? .doNothing
+            loading = false
+            onToast?(T("键盘设置未保存，请在系统设置中重试"), "exclamationmark.triangle")
+            return
+        }
+        onToast?(T("已保存键盘设置，可能需要重新登录后生效"), "globe")
     }
 
     private func runAdmin(_ command: String, completion: @escaping (Bool, String) -> Void) {

@@ -1,4 +1,10 @@
 import SwiftUI
+import Combine
+
+extension Notification.Name {
+    /// 「新功能」窗口真正上屏（WhatsNewWindowController 发出）
+    static let auroraWhatsNewShown = Notification.Name("aurora.whatsNew.shown")
+}
 
 /// 更新后首次启动的「新功能」窗口：沿用欢迎窗的结构（大图标 + 标题 + 可滚动内容 + 底部按钮）
 struct WhatsNewView: View {
@@ -39,10 +45,10 @@ struct WhatsNewView: View {
                     .frame(height: 26)
                     .allowsHitTesting(false)
                 }
-                .onAppear {
-                    // 键盘焦点偶尔会先落到内容里的可点项上，把滚动位置带到底部
-                    proxy.scrollTo(topID, anchor: .top)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                // 窗口真正上屏之后才滚动：内容在窗口隐藏时也会构建，
+                // 那时 scrollTo 会因为视图还没进 ScrollView 直接断言崩溃
+                .onReceive(NotificationCenter.default.publisher(for: .auroraWhatsNewShown)) { _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
                         proxy.scrollTo(topID, anchor: .top)
                     }
                 }

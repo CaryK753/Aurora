@@ -14,7 +14,7 @@ struct WelcomePermissions: View {
     private var items: [PermissionService.Item] {
         service.items.filter { item in
             switch item.id {
-            case "accessibility": return selection.contains(.pointer) || selection.contains(.clipboard)
+            case "accessibility": return selection.contains(.pointer) || selection.contains(.clipboard) || selection.contains(.input)
             case "screen", "input": return selection.contains(.pointer)
             case "camera", "microphone": return selection.contains(.recorder)
             // 通知与模块无关：更新、录制完成、截图保存都会用到，默认展示

@@ -125,7 +125,11 @@ struct WallpaperRulePanel: View {
                 Image(systemName: "photo")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(.secondary)
-                Text(library.item(id: current)?.name ?? T("未指定"))
+                // 壁纸名字可以很长（例如 xxx_upscayl_4x_ultramix-balanced-4x）。
+                // 菜单是 fixedSize 的，名字多长它就多宽，一行撑到比面板还宽时，
+                // 整页内容会被挤到左边缘、右边控件全被裁掉。所以名字本身先按
+                // 显示宽度截断：菜单里仍然列出全名，这一行只放得下的部分。
+                Text(Self.menuTitle(library.item(id: current)?.name ?? T("未指定")))
                     .lineLimit(1)
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 7, weight: .bold))
@@ -138,6 +142,23 @@ struct WallpaperRulePanel: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+    }
+
+    /// 按显示宽度截断：中日韩字符算 2，其它算 1，超过 34 个「半角宽」就收尾。
+    /// 10pt 字号下大约 190pt，正好塞得进「时间 — 菜单 — 删除」这一行。
+    static func menuTitle(_ name: String, budget: Int = 34) -> String {
+        var used = 0
+        var output = ""
+        for character in name {
+            let isWide = character.unicodeScalars.contains { $0.value > 0x2E7F }
+            let width = isWide ? 2 : 1
+            if used + width > budget {
+                return output + "…"
+            }
+            used += width
+            output.append(character)
+        }
+        return output
     }
 
     private func thumbDot(_ item: WallpaperItem) -> some View {
@@ -246,7 +267,7 @@ struct WallpaperRulePanel: View {
                     SectionLabel(text: T("按时间"), symbol: "clock.fill")
                     Spacer()
                     if let item = service.previewResolution() {
-                        Text(TF("现在 · %@", item.name))
+                        Text(TF("现在 · %@", WallpaperRulePanel.menuTitle(item.name, budget: 22)))
                             .font(.system(size: 8.5, weight: .medium))
                             .foregroundStyle(AuroraTheme.accent)
                             .lineLimit(1)
@@ -301,25 +322,31 @@ struct WallpaperRulePanel: View {
 
     private func slotRow(_ slot: WallpaperSlot) -> some View {
         let active = service.previewResolution()?.id == slot.itemID
-        return HStack(spacing: 6) {
-            slotTimePickers(slot)
+        // 时间一行、壁纸一行：名字再长也只影响第二行，不会把「时间 + 菜单 + 删除」
+        // 挤成一整行超宽——之前正是这样把整页内容撑出面板、左右两边被裁掉。
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                slotTimePickers(slot)
+                Spacer(minLength: 6)
+                Button {
+                    var updated = rule
+                    updated.slots.removeAll { $0.id == slot.id }
+                    withAnimation(.smooth(duration: 0.2)) { rule = updated }
+                } label: {
+                    Image(systemName: "minus.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .help(T("删除这个时间点"))
+            }
             itemMenu(slot.itemID, allowNone: true) { value in
                 updateSlot(slot.id) { $0.itemID = value }
             }
-            Button {
-                var updated = rule
-                updated.slots.removeAll { $0.id == slot.id }
-                withAnimation(.smooth(duration: 0.2)) { rule = updated }
-            } label: {
-                Image(systemName: "minus.circle.fill")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-            }
-            .buttonStyle(.plain)
-            .help(T("删除这个时间点"))
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 7)
-        .padding(.vertical, 4)
+        .padding(.vertical, 5)
         .background {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(active ? AuroraTheme.accent.opacity(0.08) : Color.primary.opacity(0.035))
@@ -696,7 +723,7 @@ struct WallpaperDisplayPanel: View {
                     Image(systemName: "photo")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(.secondary)
-                    Text(service.currentItem(for: display.id)?.name ?? T("未指定"))
+                    Text(WallpaperRulePanel.menuTitle(service.currentItem(for: display.id)?.name ?? T("未指定")))
                         .lineLimit(1)
                 } else {
                     Image(systemName: "wand.and.stars")
@@ -745,5 +772,221 @@ struct WallpaperDisplayPanel: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+    }
+}
+
+// MARK: - 播放与省电
+
+struct WallpaperPlaybackPanel: View {
+    @ObservedObject var service: WallpaperService
+    @ObservedObject var state: AppState
+
+    private var options: WallpaperPlaybackOptions { service.playbackOptions }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            statusCard
+            optionsCard
+            tipRow
+        }
+    }
+
+    // MARK: 当前状态
+
+    private var statusCard: some View {
+        let reason = service.isManuallyPaused
+            ? WallpaperPauseReason.manual
+            : (service.globalPauseReason ?? service.pauseReasons.values.first)
+        return GlassCard(padding: 12) {
+            VStack(alignment: .leading, spacing: 10) {
+                SectionLabel(text: T("播放状态"), symbol: "playpause.fill")
+
+                HStack(spacing: 9) {
+                    IconBadge(
+                        symbol: reason?.symbol ?? "waveform",
+                        color: reason == nil ? AuroraTheme.ok : AuroraTheme.warn,
+                        size: 26
+                    )
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(reason?.title ?? T("正在显示"))
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(reason?.detail ?? T("桌面画面正常显示，没有被省电策略停住"))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 6)
+                    Button {
+                        let paused = service.isManuallyPaused
+                        service.toggleManualPause()
+                        state.showToast(
+                            paused ? T("壁纸继续播放") : T("壁纸已暂停"),
+                            symbol: paused ? "play.fill" : "pause.fill"
+                        )
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: service.isManuallyPaused ? "play.fill" : "pause.fill")
+                                .font(.system(size: 8, weight: .bold))
+                            Text(service.isManuallyPaused ? T("继续") : T("暂停"))
+                                .font(.system(size: 9.5, weight: .medium))
+                        }
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.primary.opacity(0.07)))
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .help(service.isManuallyPaused ? T("恢复播放壁纸") : T("暂时停住壁纸画面"))
+                }
+
+                if !service.pauseReasons.isEmpty, !service.isManuallyPaused {
+                    HStack(spacing: 5) {
+                        // 多块屏可能是同一个原因，去重后再铺，否则 ForEach 会撞 id
+                        ForEach(Array(Set(service.pauseReasons.values)).sorted { $0.rawValue < $1.rawValue }, id: \.self) { item in
+                            Text(item.title)
+                                .font(.system(size: 8.5, weight: .medium))
+                                .foregroundStyle(AuroraTheme.warn)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(AuroraTheme.warn.opacity(0.12)))
+                        }
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: 省电开关
+
+    private var optionsCard: some View {
+        GlassCard(padding: 12) {
+            VStack(alignment: .leading, spacing: 9) {
+                SectionLabel(text: T("什么时候停住画面"), symbol: "leaf.fill")
+
+                toggleRow(
+                    symbol: "lock.fill",
+                    title: T("锁屏与休眠时暂停"),
+                    detail: T("锁屏、屏幕保护、显示器休眠、整机睡眠都不再解码"),
+                    keyPath: \.pauseOnLock
+                )
+
+                divider
+
+                toggleRow(
+                    symbol: "rectangle.inset.filled",
+                    title: T("全屏应用时暂停"),
+                    detail: T("那块屏被游戏或全屏视频占满时停住，退出全屏自动继续"),
+                    keyPath: \.pauseOnFullscreen
+                )
+
+                divider
+
+                toggleRow(
+                    symbol: "battery.25",
+                    title: T("低电量模式暂停"),
+                    detail: T("系统进入低电量模式后让出解码与合成开销"),
+                    keyPath: \.pauseInLowPower
+                )
+
+                divider
+
+                toggleRow(
+                    symbol: "thermometer.high",
+                    title: T("温度偏高时暂停"),
+                    detail: T("芯片开始降频时先停壁纸，把余量留给正在用的应用"),
+                    keyPath: \.pauseOnThermal
+                )
+
+                divider
+
+                HStack(spacing: 9) {
+                    IconBadge(symbol: "battery.0", color: AuroraTheme.accent, size: 24)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(T("电量低于阈值时暂停"))
+                            .font(.system(size: 11.5, weight: .medium))
+                        Text(T("用电池供电时生效，插上电源立刻恢复"))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 4)
+                    batteryMenu
+                }
+            }
+        }
+    }
+
+    private var divider: some View {
+        Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 0.6).padding(.leading, 33)
+    }
+
+    private func toggleRow(
+        symbol: String,
+        title: String,
+        detail: String,
+        keyPath: WritableKeyPath<WallpaperPlaybackOptions, Bool>
+    ) -> some View {
+        HStack(spacing: 9) {
+            IconBadge(symbol: symbol, color: AuroraTheme.accent, size: 24)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 11.5, weight: .medium))
+                Text(detail)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 4)
+            AuroraToggle(isOn: Binding(
+                get: { service.playbackOptions[keyPath: keyPath] },
+                set: { value in
+                    var next = service.playbackOptions
+                    next[keyPath: keyPath] = value
+                    service.setPlaybackOptions(next)
+                }
+            ))
+        }
+    }
+
+    private var batteryMenu: some View {
+        Menu {
+            Button(T("关闭")) { setBatteryFloor(0) }
+            Divider()
+            ForEach([5, 10, 20, 30, 50], id: \.self) { value in
+                Button("\(value)%") { setBatteryFloor(value) }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text(options.batteryFloor > 0 ? "\(options.batteryFloor)%" : T("关闭"))
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(.tertiary)
+            }
+            .font(.system(size: 10, weight: .medium))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    private func setBatteryFloor(_ value: Int) {
+        var next = service.playbackOptions
+        next.batteryFloor = value
+        service.setPlaybackOptions(next)
+    }
+
+    private var tipRow: some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: "info.circle.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+            Text(T("暂停只是停住画面，壁纸不会消失也不会换成系统壁纸；条件解除后从原来那一帧接着播。锁屏与登录界面由系统负责，仍显示系统壁纸。"))
+                .font(.system(size: 8.5))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 4)
     }
 }

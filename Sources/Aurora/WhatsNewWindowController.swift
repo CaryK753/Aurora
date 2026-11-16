@@ -37,6 +37,9 @@ final class WhatsNewWindowController: NSObject, NSWindowDelegate {
                 self.window.contentView = NSHostingView(rootView: self.content())
                 self.window.makeKeyAndOrderFront(nil)
                 NSApp.activate(ignoringOtherApps: true)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    NotificationCenter.default.post(name: .auroraWhatsNewShown, object: nil)
+                }
                 Debug.log("whatsnew: showing \(ReleaseNotesStore.currentVersion) window=\(self.window.frame) content=\(self.window.contentLayoutRect)")
             } else {
                 self.window.orderOut(nil)

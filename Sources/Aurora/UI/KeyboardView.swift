@@ -23,6 +23,7 @@ struct KeyboardView: View {
             AnyView(typeCard),
             AnyView(testCard),
             AnyView(cleanCard),
+            AnyView(functionKeyCard),
             AnyView(repeatCard)
         ].compactMap { $0 })
         .onAppear { service.reloadTypes() }
@@ -295,6 +296,99 @@ struct KeyboardView: View {
         }
     }
 
+
+    // MARK: - 功能键与 Fn
+
+    private var functionKeyCard: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: 11) {
+                SectionLabel(text: T("功能键"), symbol: "fn")
+
+                HStack(spacing: 9) {
+                    IconBadge(symbol: "f.cursive", size: 24, style: .tinted)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(T("F1–F12 直接作为功能键"))
+                            .font(.system(size: 11, weight: .medium))
+                        Text(T("关闭时优先调节亮度、音量等；打开后 F1 就是 F1"))
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 4)
+                    AuroraToggle(isOn: $service.functionKeysFirst)
+                }
+
+                HStack(spacing: 5) {
+                    Image(systemName: service.functionKeysVerified ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                        .font(.system(size: 8))
+                        .foregroundStyle(service.functionKeysVerified ? AuroraTheme.ok : AuroraTheme.warn)
+                    Text(service.functionKeysVerified
+                         ? (service.functionKeysFirst
+                            ? T("已保存：F1–F12 为标准功能键")
+                            : T("已保存：F1–F12 为亮度、音量等快捷键"))
+                         : T("没有写进系统，请改用系统设置里的开关"))
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 4)
+                    Button(T("按键测试")) {
+                        state.dismissMainPanel()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                            KeyTestWindowController.shared.show()
+                        }
+                    }
+                    .buttonStyle(SoftButtonStyle())
+                    .font(.system(size: 9))
+                }
+
+                Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 0.6)
+
+                HStack(spacing: 9) {
+                    IconBadge(symbol: "globe", size: 24, style: .tinted)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(T("Fn / 🌐 键功能"))
+                            .font(.system(size: 11, weight: .medium))
+                        Text(T("Apple 键盘上左下角那颗键，按下去做什么"))
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 4)
+                    Menu {
+                        ForEach(FnKeyUsage.allCases) { usage in
+                            Button {
+                                service.fnUsage = usage
+                            } label: {
+                                if service.fnUsage == usage {
+                                    Label(usage.title, systemImage: "checkmark")
+                                } else {
+                                    Label(usage.title, systemImage: usage.symbol)
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text(service.fnUsage.title)
+                                .font(.system(size: 9.5, weight: .medium))
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 6.5, weight: .bold))
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.primary.opacity(0.06)))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                }
+
+                Text(T("已确认偏好保存；实际按键行为可能需要重新登录后生效。外接键盘若自带 Fn Lock，以键盘自身开关为准。"))
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     // MARK: - 重复
 
     private var repeatCard: some View {
@@ -320,24 +414,6 @@ struct KeyboardView: View {
                     range: 1...12,
                     displayText: TF("%d 次/秒", max(1, Int((60 / max(service.keyRepeatRate, 1)).rounded())))
                 )
-
-                Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 0.6)
-
-                HStack(spacing: 9) {
-                    Image(systemName: "fn")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 14)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(T("F1–F12 直接作为功能键"))
-                            .font(.system(size: 11, weight: .medium))
-                        Text(T("关闭时优先调节亮度、音量等系统功能"))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 4)
-                    AuroraToggle(isOn: $service.functionKeysFirst)
-                }
 
                 Text(T("重复速率写入系统偏好，对所有 App 生效。"))
                     .font(.system(size: 8.5))

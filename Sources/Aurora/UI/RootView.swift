@@ -134,8 +134,30 @@ struct AuroraRootView: View {
         return state.isPinned ? PanelController.pinnedCornerRadius : PanelController.floatingCornerRadius
     }
 
+    /// 模块多的时候按数量压缩图标与间距，保证全部塞得下（面板高度固定 664）
+    private var railItemHeight: CGFloat {
+        let count = state.visibleModules.count + 1   // + 全局快捷键入口
+        if count >= 15 { return 27 }
+        if count >= 13 { return 30 }
+        return 32
+    }
+
+    private var railSpacing: CGFloat {
+        let count = state.visibleModules.count + 1
+        if count >= 15 { return 2 }
+        if count >= 13 { return 3 }
+        return 4
+    }
+
+    private var railIconSize: CGFloat {
+        let count = state.visibleModules.count + 1
+        if count >= 15 { return 12.5 }
+        if count >= 13 { return 13 }
+        return 14
+    }
+
     private var rail: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: railSpacing) {
             ForEach(state.visibleModules) { module in
                 if module.startsGroup {
                     Rectangle()
@@ -289,10 +311,10 @@ struct AuroraRootView: View {
                         }
                 }
                 Image(systemName: module.symbol)
-                    .font(.system(size: 14, weight: selected ? .semibold : .regular))
+                    .font(.system(size: railIconSize, weight: selected ? .semibold : .regular))
                     .foregroundStyle(selected ? AnyShapeStyle(AuroraTheme.accent) : AnyShapeStyle(Color.secondary))
             }
-            .frame(width: 36, height: 32)
+            .frame(width: 36, height: railItemHeight)
         }
         .buttonStyle(.plain)
         .help(T(module.title))
@@ -310,10 +332,10 @@ struct AuroraRootView: View {
                         .fill(AuroraTheme.accent.opacity(0.16))
                 }
                 Image(systemName: "command.square")
-                    .font(.system(size: 14, weight: .regular))
+                    .font(.system(size: railIconSize, weight: .regular))
                     .foregroundStyle(state.showHotkeys ? AnyShapeStyle(AuroraTheme.accent) : AnyShapeStyle(Color.secondary))
             }
-            .frame(width: 36, height: 32)
+            .frame(width: 36, height: railItemHeight)
         }
         .buttonStyle(.plain)
         .help(T("全局快捷键"))
@@ -452,6 +474,8 @@ struct AuroraRootView: View {
                         TrackpadView(service: state.trackpad)
                     case .keyboard:
                         KeyboardView(state: state)
+                    case .input:
+                        InputView(state: state)
                     case .menu:
                         ContextMenuView(state: state)
                     case .desktop:

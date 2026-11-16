@@ -46,11 +46,18 @@ struct ProceduralWallpaperView: View {
     @ObservedObject private var clock = ProceduralClock.shared
 
     var body: some View {
-        ZStack {
-            backdrop
-            scene(t: clock.time)
+        // 所有场景都按画布尺寸算坐标：之前用 0.5 / 0.32 这种「比例」直接喂给
+        // .position，那是点数不是百分比，元素全被塞在左上角 0.5pt 处，
+        // 位移也只有 0.16pt，肉眼就是一张静止的背景色。
+        GeometryReader { geo in
+            let size = geo.size
+            ZStack {
+                backdrop
+                scene(t: clock.time, size: size)
+            }
+            .frame(width: size.width, height: size.height)
+            .clipped()
         }
-        .clipped()
         .ignoresSafeArea()
         .onAppear { clock.retain() }
         .onDisappear { clock.release() }
@@ -68,18 +75,20 @@ struct ProceduralWallpaperView: View {
     }
 
     @ViewBuilder
-    private func scene(t: Double) -> some View {
+    private func scene(t: Double, size: CGSize) -> some View {
         switch style {
         case "waves": waves(t: t)
-        case "mesh": mesh(t: t)
-        case "sunset": sunset(t: t)
-        default: aurora(t: t)
+        case "mesh": mesh(t: t, size: size)
+        case "sunset": sunset(t: t, size: size)
+        default: aurora(t: t, size: size)
         }
     }
 
     // 极光：几条大光带在缓慢摇摆
-    private func aurora(t: Double) -> some View {
+    private func aurora(t: Double, size: CGSize) -> some View {
         let hues = ProceduralWallpaper.baseHues(for: "aurora")
+        let w = max(size.width, 1)
+        let h = max(size.height, 1)
         return ZStack {
             ForEach(0..<hues.count, id: \.self) { i in
                 let phase = t * 0.18 + Double(i) * 1.7
@@ -88,20 +97,21 @@ struct ProceduralWallpaperView: View {
                         LinearGradient(
                             colors: [
                                 ProceduralWallpaper.color(hues[i], shift: hueShift, bri: 0.7, opacity: 0.0),
-                                ProceduralWallpaper.color(hues[i], shift: hueShift, bri: 0.65, opacity: 0.34),
+                                ProceduralWallpaper.color(hues[i], shift: hueShift, bri: 0.68, opacity: 0.42),
                                 ProceduralWallpaper.color(hues[i], shift: hueShift, bri: 0.7, opacity: 0.0)
                             ],
                             startPoint: .leading,
                             endPoint: .trailing
                         )
                     )
-                    .frame(width: 900, height: 340 + CGFloat(i) * 60)
-                    .rotationEffect(.degrees(-24 + Double(i) * 5))
+                    // 每条带子各占一段高度，别都糊在同一处，否则糊成一片灰紫
+                    .frame(width: w * 1.2, height: h * (0.15 + Double(i) * 0.045))
+                    .rotationEffect(.degrees(-18 + Double(i) * 7))
                     .position(
-                        x: 0.5 + 0.16 * sin(phase) * 1.0,
-                        y: 0.32 + 0.1 * cos(phase * 0.8 + Double(i))
+                        x: w * (0.5 + 0.09 * sin(phase)),
+                        y: h * (0.26 + 0.16 * Double(i) + 0.05 * cos(phase * 0.8 + Double(i)))
                     )
-                    .blur(radius: 70)
+                    .blur(radius: h * 0.045)
             }
         }
     }
@@ -131,8 +141,11 @@ struct ProceduralWallpaperView: View {
     }
 
     // 流光：一团团柔光缓慢漂移
-    private func mesh(t: Double) -> some View {
+    private func mesh(t: Double, size: CGSize) -> some View {
         let hues = ProceduralWallpaper.baseHues(for: "mesh")
+        let w = max(size.width, 1)
+        let h = max(size.height, 1)
+        let radius = min(w, h) * 0.45
         return ZStack {
             ForEach(0..<hues.count, id: \.self) { i in
                 let phase = t * (0.1 + Double(i) * 0.03) + Double(i) * 2.1
@@ -145,22 +158,25 @@ struct ProceduralWallpaperView: View {
                             ],
                             center: .center,
                             startRadius: 0,
-                            endRadius: 480
+                            endRadius: radius
                         )
                     )
-                    .frame(width: 900, height: 900)
+                    .frame(width: radius * 2, height: radius * 2)
                     .position(
-                        x: 0.5 + 0.34 * sin(phase),
-                        y: 0.5 + 0.3 * cos(phase * 1.31 + 1.2)
+                        x: w * (0.5 + 0.32 * sin(phase)),
+                        y: h * (0.5 + 0.28 * cos(phase * 1.31 + 1.2))
                     )
-                    .blur(radius: 30)
+                    .blur(radius: min(w, h) * 0.035)
             }
         }
     }
 
     // 暮色：地平线上的落日光晕，颜色随时间缓慢游移
-    private func sunset(t: Double) -> some View {
+    private func sunset(t: Double, size: CGSize) -> some View {
         let hues = ProceduralWallpaper.baseHues(for: "sunset")
+        let w = max(size.width, 1)
+        let h = max(size.height, 1)
+        let radius = min(w, h) * 0.55
         let glow = 0.5 + 0.06 * sin(t * 0.1)
         return ZStack {
             LinearGradient(
@@ -182,12 +198,12 @@ struct ProceduralWallpaperView: View {
                         ],
                         center: .center,
                         startRadius: 0,
-                        endRadius: 520
+                        endRadius: radius
                     )
                 )
-                .frame(width: 900, height: 900)
-                .position(x: 0.5 + 0.1 * sin(t * 0.05), y: glow)
-                .blur(radius: 26)
+                .frame(width: radius * 2, height: radius * 2)
+                .position(x: w * (0.5 + 0.08 * sin(t * 0.05)), y: h * glow)
+                .blur(radius: min(w, h) * 0.03)
         }
     }
 }
@@ -250,37 +266,77 @@ struct ProceduralStaticPreview: View {
 // TimelineView(.animation) 在"被遮挡"的窗口里会暂停刷新——表现就是
 // 程序化壁纸设上去以后完全静止。这里用自建 Timer 驱动时间，
 // 不依赖窗口可见性，只要视图在刷新就会重绘。
+//
+// 锁屏 / 休眠 / 低电量时整条定时器直接停掉（20fps 的空转也是电），
+// 恢复时把停掉的那段时间从时间轴上扣掉，画面从原处接着漂，不会跳一下。
 
 @MainActor
 final class ProceduralClock: ObservableObject {
     static let shared = ProceduralClock()
 
-    /// 绝对时间（秒），与之前 TimelineView 的 date 语义一致
+    /// 绝对时间（秒），已扣除暂停过的时长
     @Published private(set) var time: Double = Date().timeIntervalSinceReferenceDate
 
     private var timer: Timer?
     private var users = 0
-    // 壁纸是缓慢漂移的渐变，20fps 足够顺滑，也能省电
+    /// 明确要求「别动」的画面持有者（按屏区分，别的槽位恢复时不会把它带起来）
+    private var holdingTokens: Set<String> = []
+    private var pausedTotal: TimeInterval = 0
+    private var pausedSince: Date?
     private let fps: Double = 20
+
+    private var isPaused: Bool { pausedSince != nil }
 
     func retain() {
         users += 1
+        update()
+    }
+
+    func release() {
+        users = max(0, users - 1)
+        update()
+    }
+
+    func setPlaying(_ playing: Bool, token: String) {
+        if playing {
+            holdingTokens.remove(token)
+        } else {
+            holdingTokens.insert(token)
+        }
+        update()
+    }
+
+    func forget(token: String) {
+        guard holdingTokens.remove(token) != nil else { return }
+        update()
+    }
+
+    private func update() {
+        let shouldRun = users > 0 && holdingTokens.isEmpty
+        if shouldRun {
+            if let since = pausedSince {
+                pausedTotal += Date().timeIntervalSince(since)
+                pausedSince = nil
+            }
+            startTimerIfNeeded()
+        } else {
+            if pausedSince == nil { pausedSince = Date() }
+            timer?.invalidate()
+            timer = nil
+        }
+    }
+
+    private func startTimerIfNeeded() {
         guard timer == nil else { return }
         let interval = 1.0 / fps
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.time = Date().timeIntervalSinceReferenceDate
+                guard let self, !self.isPaused else { return }
+                self.time = Date().timeIntervalSinceReferenceDate - self.pausedTotal
             }
         }
         timer.tolerance = interval * 0.35
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
-    }
-
-    func release() {
-        users = max(0, users - 1)
-        guard users == 0 else { return }
-        timer?.invalidate()
-        timer = nil
     }
 }

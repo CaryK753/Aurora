@@ -142,10 +142,10 @@ struct DesktopView: View {
                         isOn: Binding(
                             get: { service.iconsVisible },
                             set: { visible in
-                                service.setIconsVisible(visible)
+                                let ok = service.setIconsVisible(visible)
                                 state.showToast(
-                                    visible ? T("桌面图标已显示") : T("桌面图标已隐藏"),
-                                    symbol: visible ? "eye.fill" : "eye.slash.fill"
+                                    service.lastError ?? T("已保存，正在刷新访达"),
+                                    symbol: ok ? "eye.fill" : "exclamationmark.triangle"
                                 )
                             }
                         )
@@ -229,8 +229,8 @@ struct DesktopView: View {
                         isOn: Binding(
                             get: { service.showHiddenFiles },
                             set: { value in
-                                service.setShowHiddenFiles(value)
-                                state.showToast(value ? T("已显示隐藏文件") : T("已隐藏隐藏文件"), symbol: "eye.slash.fill")
+                                let ok = service.setShowHiddenFiles(value)
+                                state.showToast(service.lastError ?? T("已保存，正在刷新访达"), symbol: ok ? "eye.slash.fill" : "exclamationmark.triangle")
                             }
                         )
                     )
@@ -252,8 +252,8 @@ struct DesktopView: View {
                         isOn: Binding(
                             get: { service.showAllExtensions },
                             set: { value in
-                                service.setShowAllExtensions(value)
-                                state.showToast(value ? T("已显示扩展名") : T("已隐藏扩展名"), symbol: "doc.text.fill")
+                                let ok = service.setShowAllExtensions(value)
+                                state.showToast(service.lastError ?? T("已保存，正在刷新访达"), symbol: ok ? "doc.text.fill" : "exclamationmark.triangle")
                             }
                         )
                     )
@@ -266,8 +266,8 @@ struct DesktopView: View {
         GlassCard(padding: 12) {
             VStack(spacing: 6) {
                 Button {
-                    DesktopService.restartFinder()
-                    state.showToast(T("访达已重新启动"), symbol: "arrow.clockwise")
+                    let ok = DesktopService.restartFinder()
+                    state.showToast(ok ? T("已请求重新启动访达") : T("未能重新启动访达，请手动重试"), symbol: ok ? "arrow.clockwise" : "exclamationmark.triangle")
                 } label: {
                     HStack(spacing: 9) {
                         IconBadge(symbol: "arrow.clockwise", color: AuroraTheme.accent, size: 24)

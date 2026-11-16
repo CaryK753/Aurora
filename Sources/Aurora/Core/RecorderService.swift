@@ -3,7 +3,7 @@
 //
 //  参考 QuickRecorder / Recordly 的主要功能：
 //  · 录制源：整块屏幕 / 指定窗口（SCShareableContent）
-//  · 系统声音 + 麦克风混进同一个 mp4（两条音轨），输出永远只有一个文件
+//  · 系统声音 + 麦克风混进同一个 mp4（两条音轨），保存前合成为一条音轨，输出永远只有一个文件
 //  · 暂停 / 恢复、丢弃重录（Recordly 同款交互）
 //  · 帧率 30/60、H.264/H.265、高分辨率（Retina 原生像素）、指针显隐
 //  · 悬浮控制条（待机态 / 录制态）、录制期间阻止系统休眠
@@ -18,18 +18,6 @@ import ScreenCaptureKit
 import VideoToolbox
 
 // MARK: - 录制源
-
-struct RecorderSource: Identifiable, Equatable {
-    enum Kind: String { case display, window, area }
-    let id: String
-    let kind: Kind
-    let title: String
-    let subtitle: String
-    var display: SCDisplay?
-    var window: SCWindow?
-    /// 区域录制：全局 NS 坐标矩形
-    var rect: CGRect?
-}
 
 // MARK: - 暂停时间轴（参考 Snapzy 的 RecordingPauseTimeline）
 //
@@ -107,7 +95,11 @@ final class RecorderService: ObservableObject {
     @Published var selectedSourceID: String {
         didSet { UserDefaults.standard.set(selectedSourceID, forKey: "recorder.source") }
     }
+    @Published private(set) var lastMicrophoneSamples = 0
     @Published private(set) var isRecording = false
+    @Published private(set) var isStarting = false
+    @Published private(set) var isStopping = false
+    var optionsLocked: Bool { isRecording || isStarting || isStopping }
     @Published private(set) var isPaused = false
     @Published private(set) var elapsedText = "0:00"
     @Published private(set) var lastMovieURL: URL?
@@ -163,13 +155,11 @@ final class RecorderService: ObservableObject {
     /// host time，直接用 .zero 建会话会让成片时长变成"开机时长"）
     private var sessionStarted = false
     /// 已写入的视频帧数（诊断用）
+    private var appendedMicFrames = 0
     private var appendedVideoFrames = 0
     private var loggedWriterFailure = false
 
     // MARK: 麦克风采集
-    private var micSession: AVCaptureSession?
-    private var micQueue: DispatchQueue!
-    private var micSink: RecorderMicSink?
 
     // MARK: 计时 / 其它
     /// 计时按「已完成段 + 当前段」算，暂停时不走表
@@ -214,7 +204,6 @@ final class RecorderService: ObservableObject {
         bezelRecording = ud.object(forKey: "recorder.bezel") as? Bool ?? false
         bezelFrameID = ud.string(forKey: "recorder.bezelFrame")
         mediaQueue = DispatchQueue(label: "aurora.recorder.media")
-        micQueue = DispatchQueue(label: "aurora.recorder.mic")
         refreshSources()
 
         // 气泡上的 ✕ 要回到开关上；权限 / 设备问题只弹提示，
@@ -253,7 +242,8 @@ final class RecorderService: ObservableObject {
                 ))
             }
             self.sources = list
-            if self.selectedSourceID.isEmpty || !list.contains(where: { $0.id == self.selectedSourceID }) {
+            let hasAreaSelection = self.selectedSourceID == Self.areaSourceID && self.areaRect != nil
+            if !hasAreaSelection && (self.selectedSourceID.isEmpty || !list.contains(where: { $0.id == self.selectedSourceID })) {
                 self.selectedSourceID = list.first?.id ?? ""
             }
         }
@@ -428,7 +418,7 @@ final class RecorderService: ObservableObject {
     }
 
     func start() {
-        guard !isRecording else { return }
+        guard !isRecording, !isStarting, !isStopping, !finishing else { return }
         lastError = nil
         guard hasScreenPermission else {
             lastError = T("需要「屏幕录制」权限才能录屏")
@@ -438,7 +428,10 @@ final class RecorderService: ObservableObject {
             lastError = T("先选择一个录制源")
             return
         }
+        lastMicrophoneSamples = 0
+        isStarting = true
         Task { @MainActor in
+            defer { self.isStarting = false }
             // 麦克风权限要在建 writer 之前敲定：音轨输入必须在 startWriting 前加入
             var micEnabled = false
             if recordMic {
@@ -447,6 +440,10 @@ final class RecorderService: ObservableObject {
                 } else {
                     micEnabled = await AVCaptureDevice.requestAccess(for: .audio)
                 }
+            }
+            guard !recordMic || micEnabled else {
+                lastError = T("麦克风未获授权，请授权或关闭麦克风后重试")
+                return
             }
             await self.beginRecording(micEnabled: micEnabled)
         }
@@ -457,6 +454,7 @@ final class RecorderService: ObservableObject {
         discardRequested = false
         finishing = false
         appendedVideoFrames = 0
+        appendedMicFrames = 0
         loggedWriterFailure = false
 
         let stamp = Self.fileStamp()
@@ -578,7 +576,9 @@ final class RecorderService: ObservableObject {
         conf.showsCursor = showCursor
         conf.pixelFormat = kCVPixelFormatType_32BGRA
         conf.colorSpaceName = CGColorSpace.sRGB
-        conf.capturesAudio = systemAudio && source.kind == .display
+        conf.capturesAudio = systemAudio && source.supportsSystemAudio
+        conf.captureMicrophone = micEnabled
+        conf.microphoneCaptureDeviceID = AVCaptureDevice.default(for: .audio)?.uniqueID
         conf.sampleRate = 48000
         conf.channelCount = 2
 
@@ -613,21 +613,10 @@ final class RecorderService: ObservableObject {
             audioInput = audio
         }
         if micEnabled {
-            // 采样率 / 声道数必须与麦克风实际格式一致，否则第一个缓冲 append 时
-            // writer 直接 fail。AVCaptureDevice.Format.audioChannelCount 不存在，
-            // 从 formatDescription 的 ASBD 里读
-            var micRate = 48_000
-            var micChannels = 1
-            if let device = AVCaptureDevice.default(for: .audio),
-               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(device.activeFormat.formatDescription) {
-                // Format 没有 sampleRate 属性，一律从 ASBD 读
-                micRate = max(1, Int(asbd.pointee.mSampleRate))
-                micChannels = max(1, Int(asbd.pointee.mChannelsPerFrame))
-            }
             let mic = AVAssetWriterInput(mediaType: .audio, outputSettings: [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: micRate,
-                AVNumberOfChannelsKey: micChannels,
+                AVSampleRateKey: 48000,
+                AVNumberOfChannelsKey: 1,
                 AVEncoderBitRateKey: 128_000
             ])
             mic.expectsMediaDataInRealTime = true
@@ -638,6 +627,7 @@ final class RecorderService: ObservableObject {
         let sink = RecorderStreamSink(
             onVideo: { [weak self] buffer in self?.appendVideo(buffer) },
             onAudio: { [weak self] buffer in self?.appendSystemAudio(buffer) },
+            onMicrophone: { [weak self] buffer in self?.appendMic(buffer) },
             onStopped: { [weak self] error in Task { @MainActor in self?.streamDidStop(error) } }
         )
         self.sink = sink
@@ -648,6 +638,7 @@ final class RecorderService: ObservableObject {
             if conf.capturesAudio {
                 try stream.addStreamOutput(sink, type: .audio, sampleHandlerQueue: mediaQueue)
             }
+            if micEnabled { try stream.addStreamOutput(sink, type: .microphone, sampleHandlerQueue: mediaQueue) }
         } catch {
             lastError = TF("采集流启动失败：%@", error.localizedDescription)
             cleanup()
@@ -667,38 +658,35 @@ final class RecorderService: ObservableObject {
             return
         }
 
-        stream.startCapture { [weak self] error in
-            Task { @MainActor in
-                guard let self else { return }
-                if let error {
-                    Debug.log("recorder: startCapture failed \(error)")
-                    self.lastError = error.localizedDescription
-                    self.stop()
-                    return
-                }
-                Debug.log("recorder: started \(source.kind.rawValue) \(conf.width)x\(conf.height) pip=\(self.pipCamera)")
-                self.isRecording = true
-                self.isPaused = false
-                self.accumulated = 0
-                self.segmentStart = Date()
-                self.startTicker()
-                self.preventSleep(true)
-                self.statusNote = nil
-                // 覆盖层与控制条都放到录制所在的那块屏上
-                RecorderBar.targetScreen = self.targetScreen
-                KeystrokeOverlayService.shared.targetScreen = self.targetScreen
-                RecorderBar.shared.show()
-                if micEnabled { self.startMicCapture() }
-                if self.pipCamera { CameraBubble.shared.show(on: self.targetScreen) }
-                if self.highlightClicks { ClickHighlightService.shared.start() }
-                if self.showKeystrokes { KeystrokeOverlayService.shared.start() }
-            }
+        do {
+            try await stream.startCapture()
+        } catch {
+            lastError = error.localizedDescription
+            stop()
+            return
         }
+        guard self.stream === stream, !finishing, !isStopping else { return }
+        Debug.log("recorder: started \(source.kind.rawValue) \(conf.width)x\(conf.height) pip=\(pipCamera)")
+        isRecording = true
+        isPaused = false
+        accumulated = 0
+        segmentStart = Date()
+        startTicker()
+        preventSleep(true)
+        statusNote = nil
+        // 覆盖层与控制条都放到录制所在的那块屏上
+        RecorderBar.targetScreen = targetScreen
+        KeystrokeOverlayService.shared.targetScreen = targetScreen
+        RecorderBar.shared.show()
+        if pipCamera { CameraBubble.shared.show(on: targetScreen) }
+        if highlightClicks { ClickHighlightService.shared.start() }
+        if showKeystrokes { KeystrokeOverlayService.shared.start() }
     }
 
     /// 停止；discard = 直接删掉这段（Recordly 的垃圾桶）
     func stop(discard: Bool = false) {
-        guard writer != nil || stream != nil else { return }
+        guard !isStopping, writer != nil || stream != nil else { return }
+        isStopping = true
         discardRequested = discard
         isRecording = false
         isPaused = false
@@ -709,7 +697,6 @@ final class RecorderService: ObservableObject {
         if !pipCamera { CameraBubble.shared.hide() }
         statusNote = discard ? T("正在丢弃…") : T("正在保存…")
 
-        stopMicCapture()
         ClickHighlightService.shared.stop()
         KeystrokeOverlayService.shared.stop()
         stream?.stopCapture { [weak self] _ in
@@ -741,6 +728,7 @@ final class RecorderService: ObservableObject {
         } else {
             Debug.log("recorder: stream stopped")
         }
+        if !isStopping { stop(); return }
         finishWriters()
     }
 
@@ -750,12 +738,14 @@ final class RecorderService: ObservableObject {
         guard let writer else { cleanup(); return }
         let url = movieURL
         let discard = discardRequested
+        let expectsMicrophone = micInput != nil
         // markAsFinished / finishWriting 与采样追加同在 mediaQueue，避免跨线程竞争；
         // 先断开采样源，保证 markAsFinished 之后不再有任何 append
         mediaQueue.async { [weak self] in
             if let stream = self?.stream, let sink = self?.sink {
                 try? stream.removeStreamOutput(sink, type: .screen)
                 try? stream.removeStreamOutput(sink, type: .audio)
+                try? stream.removeStreamOutput(sink, type: .microphone)
             }
             self?.videoInput?.markAsFinished()
             self?.audioInput?.markAsFinished()
@@ -763,7 +753,28 @@ final class RecorderService: ObservableObject {
             writer.finishWriting { [weak self] in
                 Task { @MainActor in
                     guard let self else { return }
+                    let microphoneSamples = self.appendedMicFrames
+                    self.lastMicrophoneSamples = microphoneSamples
+                    if writer.status == .completed, !discard, let url {
+                        do {
+                            self.statusNote = T("正在合成录屏声音…")
+                            try await RecordingAudioMixer.mixIfNeeded(at: url)
+                        } catch {
+                            self.lastError = TF("录像已保留，但声音合成失败：%@", error.localizedDescription)
+                            self.lastMovieURL = url
+                            self.statusNote = self.lastError
+                            self.cleanup()
+                            return
+                        }
+                    }
                     self.cleanup()
+                    if expectsMicrophone, microphoneSamples == 0, !discard {
+                        self.lastError = T("未收到麦克风数据，请检查默认输入设备和麦克风权限")
+                        self.lastMovieURL = url
+                        self.statusNote = self.lastError
+                        NotificationService.shared.notifyRecordingFailed(reason: self.lastError!)
+                        return
+                    }
                     if writer.status == .completed {
                         if discard, let url {
                             try? FileManager.default.removeItem(at: url)
@@ -885,6 +896,7 @@ final class RecorderService: ObservableObject {
         if let stream, let sink {
             try? stream.removeStreamOutput(sink, type: .screen)
             try? stream.removeStreamOutput(sink, type: .audio)
+                try? stream.removeStreamOutput(sink, type: .microphone)
         }
         stream = nil
         sink = nil
@@ -895,7 +907,9 @@ final class RecorderService: ObservableObject {
         movieURL = nil
         discardRequested = false
         finishing = false
+        isStopping = false
         appendedVideoFrames = 0
+        appendedMicFrames = 0
         loggedWriterFailure = false
         sessionStarted = false
         mediaQueue.async { [weak self] in self?.pauseTimeline = RecorderPauseTimeline() }
@@ -911,6 +925,7 @@ final class RecorderService: ObservableObject {
         // 首个视频帧到达时才建会话：把它当作时间轴零点，
         // 否则 PTS 带着开机时长，成片时长会离谱
         if !sessionStarted {
+            Debug.log("recorder: video origin=\(CMTimeGetSeconds(source))")
             writer.startSession(atSourceTime: source)
             sessionStarted = true
         }
@@ -955,44 +970,19 @@ final class RecorderService: ObservableObject {
         guard CMSampleBufferDataIsReady(sampleBuffer), writer.status == .writing else { return }
         guard micInput.isReadyForMoreMediaData else { return }
         let source = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if appendedMicFrames == 0, let format = CMSampleBufferGetFormatDescription(sampleBuffer),
+           let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format) {
+            Debug.log("recorder: microphone origin=\(CMTimeGetSeconds(source)) format=\(asbd.pointee)")
+        }
         guard let mapped = pauseTimeline.outputTime(for: source) else { return }
-        if mapped == source {
-            micInput.append(sampleBuffer)
-        } else if let retimed = RecorderPauseTimeline.retimed(sampleBuffer, at: mapped) {
-            micInput.append(retimed)
+        let buffer = mapped == source ? sampleBuffer : RecorderPauseTimeline.retimed(sampleBuffer, at: mapped)
+        guard let buffer else { return }
+        if micInput.append(buffer) {
+            appendedMicFrames += CMSampleBufferGetNumSamples(buffer)
+        } else {
+            let message = writer.error?.localizedDescription ?? T("麦克风音轨写入失败")
+            Task { @MainActor [weak self] in self?.lastError = message; self?.stop() }
         }
-    }
-
-    // MARK: - 麦克风采集（进同一个 mp4）
-
-    private func startMicCapture() {
-        guard micInput != nil, let device = AVCaptureDevice.default(for: .audio) else { return }
-        let output = AVCaptureAudioDataOutput()
-        let sink = RecorderMicSink { [weak self] buffer in
-            // 麦克风缓冲统一转投 mediaQueue，与其它轨道的写入串行化
-            self?.mediaQueue.async { self?.appendMic(buffer) }
-        }
-        output.setSampleBufferDelegate(sink, queue: micQueue)
-        micSink = sink
-
-        let session = AVCaptureSession()
-        session.sessionPreset = .high
-        do {
-            let deviceInput = try AVCaptureDeviceInput(device: device)
-            if session.canAddInput(deviceInput) { session.addInput(deviceInput) }
-            if session.canAddOutput(output) { session.addOutput(output) }
-        } catch {
-            micSink = nil
-            return
-        }
-        micSession = session
-        session.startRunning()
-    }
-
-    private func stopMicCapture() {
-        micSession?.stopRunning()
-        micSession = nil
-        micSink = nil
     }
 
     // MARK: - 计时 / 休眠
@@ -1046,13 +1036,16 @@ final class RecorderService: ObservableObject {
 private final class RecorderStreamSink: NSObject, SCStreamOutput, SCStreamDelegate {
     let onVideo: (CMSampleBuffer) -> Void
     let onAudio: (CMSampleBuffer) -> Void
+    let onMicrophone: (CMSampleBuffer) -> Void
     let onStopped: (Error?) -> Void
 
     init(onVideo: @escaping (CMSampleBuffer) -> Void,
          onAudio: @escaping (CMSampleBuffer) -> Void,
+         onMicrophone: @escaping (CMSampleBuffer) -> Void,
          onStopped: @escaping (Error?) -> Void) {
         self.onVideo = onVideo
         self.onAudio = onAudio
+        self.onMicrophone = onMicrophone
         self.onStopped = onStopped
     }
 
@@ -1060,25 +1053,12 @@ private final class RecorderStreamSink: NSObject, SCStreamOutput, SCStreamDelega
         switch outputType {
         case .screen: onVideo(sampleBuffer)
         case .audio: onAudio(sampleBuffer)
+        case .microphone: onMicrophone(sampleBuffer)
         @unknown default: break
         }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         onStopped(error)
-    }
-}
-
-// MARK: - 麦克风回调
-
-private final class RecorderMicSink: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
-    let onBuffer: (CMSampleBuffer) -> Void
-
-    init(onBuffer: @escaping (CMSampleBuffer) -> Void) {
-        self.onBuffer = onBuffer
-    }
-
-    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        onBuffer(sampleBuffer)
     }
 }

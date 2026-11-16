@@ -78,6 +78,7 @@ struct WallpaperView: View {
                         libraryContent
                     case .rules:
                         WallpaperRulePanel(service: service, library: library, state: state)
+                        WallpaperPlaybackPanel(service: service, state: state)
                     case .displays:
                         WallpaperDisplayPanel(service: service, library: library, state: state)
                     }
@@ -136,6 +137,10 @@ struct WallpaperView: View {
 
             Spacer(minLength: 8)
 
+            if service.config.enabled {
+                playbackPill
+            }
+
             if service.config.rule.kind == .random, let text = service.nextRotateText, service.config.enabled {
                 Button {
                     service.rotateNow()
@@ -170,6 +175,34 @@ struct WallpaperView: View {
         .padding(.trailing, 16)
         .padding(.top, 14)
         .padding(.bottom, 10)
+    }
+
+    /// 顶栏的播放状态胶囊：正在播放时是「暂停」，停下来时写清原因，点一下切换手动暂停
+    private var playbackPill: some View {
+        let reason = service.globalPauseReason ?? service.pauseReasons.values.first
+        let paused = service.isManuallyPaused || reason != nil
+        let symbol = service.isManuallyPaused ? "play.fill" : (reason?.symbol ?? "pause.fill")
+        let title = service.isManuallyPaused ? T("继续") : (reason?.title ?? T("暂停"))
+        return Button {
+            let wasPaused = service.isManuallyPaused
+            service.toggleManualPause()
+            state.showToast(
+                wasPaused ? T("壁纸继续播放") : T("壁纸已暂停"),
+                symbol: wasPaused ? "play.fill" : "pause.fill"
+            )
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: symbol).font(.system(size: 8, weight: .bold))
+                Text(title).font(.system(size: 9, weight: .medium)).lineLimit(1)
+            }
+            .foregroundStyle(paused ? AnyShapeStyle(AuroraTheme.warn) : AnyShapeStyle(.secondary))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(paused ? AuroraTheme.warn.opacity(0.12) : Color.primary.opacity(0.06)))
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .help(service.isManuallyPaused ? T("恢复播放壁纸") : T("暂时停住壁纸画面"))
     }
 
     private var tabBar: some View {

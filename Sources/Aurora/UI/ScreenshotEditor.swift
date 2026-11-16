@@ -66,7 +66,7 @@ enum AnnotationTool: String, CaseIterable, Identifiable {
         case .filledRect: return "rectangle.fill"
         case .ellipse: return "circle"
         case .highlighter: return "highlighter"
-        case .blur: return "blur"
+        case .blur: return "drop.halffull"
         case .mosaic: return "squareshape.split.3x3"
         case .spotlight: return "circle.lefthalf.filled"
         case .counter: return "1.circle"
@@ -291,6 +291,7 @@ struct ScreenshotEditorView: View {
                     }
                     .buttonStyle(.plain)
                     .help(candidate.title)
+                    .accessibilityLabel(candidate.title)
                 }
 
             Divider().frame(height: 18)

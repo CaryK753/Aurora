@@ -40,6 +40,10 @@ struct ContextMenuItem: Identifiable, Equatable {
 final class ContextMenuService: ObservableObject {
     @Published private(set) var items: [ContextMenuItem] = []
     @Published private(set) var isScanning = false
+    @Published private(set) var lastError: String?
+    @Published private(set) var applyingIDs: Set<String> = []
+    private var extensionStates: [String: Bool] = [:]
+    private var electionGeneration = 0
     @Published private(set) var lastApplied = Date.distantPast
 
     private var finderActive: [String: Bool] = [:]
@@ -61,7 +65,20 @@ final class ContextMenuService: ObservableObject {
         rebuildList()
 
         if foundBundles.isEmpty {
-            scanBundles()
+            if !isScanning { scanBundles() }
+        } else {
+            refreshExtensionStates()
+        }
+    }
+
+    private func refreshExtensionStates() {
+        let generation = electionGeneration
+        Task {
+            let query = await CommandRunner.run("/usr/bin/pluginkit", ["-m", "-A", "-D", "-p", "com.apple.FinderSync"])
+            guard generation == electionGeneration, applyingIDs.isEmpty else { return }
+            guard query.ok else { return }
+            extensionStates = FinderElection.parse(query.output)
+            rebuildList()
         }
     }
 
@@ -99,7 +116,7 @@ final class ContextMenuService: ObservableObject {
             case .finderExtension:
                 if !result.contains(where: { $0.id == bundleID }) {
                     result.append(
-                        ContextMenuItem(id: bundleID, title: info.name, provider: T("Finder 扩展"), kind: .finderExtension, isEnabled: true, writable: true)
+                        ContextMenuItem(id: bundleID, title: info.name, provider: T("Finder 扩展"), kind: .finderExtension, isEnabled: extensionStates[bundleID] ?? false, writable: true)
                     )
                 }
             case .service:
@@ -184,6 +201,7 @@ final class ContextMenuService: ObservableObject {
 
     private func scanBundles() {
         isScanning = true
+        let generation = electionGeneration
         let roots = [
             "/Applications",
             "/System/Applications",
@@ -230,6 +248,11 @@ final class ContextMenuService: ObservableObject {
                     visited += 1
                     if visited > 12_000 { break }
                     let path = url.path
+                    if url.pathExtension == "app" {
+                        let plugins = url.appendingPathComponent("Contents/PlugIns")
+                        let entries = (try? fileManager.contentsOfDirectory(at: plugins, includingPropertiesForKeys: nil)) ?? []
+                        for entry in entries where entry.pathExtension == "appex" { inspect(entry) }
+                    }
                     if path.contains(".app/Contents/PlugIns") || path.hasSuffix(".appex") {
                         if path.hasSuffix(".appex") { inspect(url) }
                     }
@@ -251,9 +274,12 @@ final class ContextMenuService: ObservableObject {
             }
 
             let snapshot = found
+            let query = CommandRunner.runSync("/usr/bin/pluginkit", ["-m", "-A", "-D", "-p", "com.apple.FinderSync"])
+            let states = FinderElection.parse(query.output)
             Task { @MainActor in
                 guard let self else { return }
                 self.foundBundles = snapshot
+                if self.electionGeneration == generation { self.extensionStates = states }
                 self.isScanning = false
                 self.rebuildList()
             }
@@ -263,57 +289,89 @@ final class ContextMenuService: ObservableObject {
     // MARK: - 写入
 
     func setEnabled(_ enabled: Bool, for id: String) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
-        let item = items[index]
-        items[index].isEnabled = enabled
-
-        switch item.kind {
-        case .quickAction:
-            finderActive[id] = enabled
-            CFPreferencesSetAppValue("FinderActive" as CFString, finderActive as CFDictionary, prefsDomain)
-            CFPreferencesAppSynchronize(prefsDomain)
-
-        case .service:
-            var entry = serviceStatus[id] ?? [:]
+        guard let item = items.first(where: { $0.id == id }), item.writable,
+              !applyingIDs.contains(id) else { return }
+        lastError = nil
+        if item.kind == .finderExtension {
+            electionGeneration += 1
+            applyingIDs.insert(id)
+            Task {
+                defer { applyingIDs.remove(id) }
+                let ok = await runPluginkit(argument: enabled ? "use" : "ignore", identifier: id)
+                guard ok else { return }
+                extensionStates[id] = enabled
+                rebuildList()
+                lastApplied = Date()
+                scheduleFinderRefresh()
+            }
+            return
+        }
+        let key = item.kind == .quickAction ? "FinderActive" : "NSServicesStatus"
+        let previous = CFPreferencesCopyAppValue(key as CFString, prefsDomain)
+        if item.kind == .quickAction {
+            var updated = finderActive
+            updated[id] = enabled
+            CFPreferencesSetAppValue(key as CFString, updated as CFDictionary, prefsDomain)
+        } else {
+            var updated = serviceStatus
+            var entry = updated[id] ?? [:]
             entry["enabled_context_menu"] = enabled ? 1 : 0
             entry["enabled_services_menu"] = enabled ? 1 : 0
-            serviceStatus[id] = entry
-            CFPreferencesSetAppValue("NSServicesStatus" as CFString, serviceStatus as CFDictionary, prefsDomain)
-            CFPreferencesAppSynchronize(prefsDomain)
-
-        case .finderExtension:
-            let argument = enabled ? "use" : "ignore"
-            runPluginkit(argument: argument, identifier: id)
+            updated[id] = entry
+            CFPreferencesSetAppValue(key as CFString, updated as CFDictionary, prefsDomain)
         }
-
+        let synced = CFPreferencesAppSynchronize(prefsDomain)
+        let stored = CFPreferencesCopyAppValue(key as CFString, prefsDomain)
+        let actual: Bool?
+        if item.kind == .quickAction {
+            actual = (stored as? [String: Bool])?[id]
+        } else {
+            actual = ((stored as? [String: [String: Any]])?[id]?["enabled_context_menu"] as? NSNumber)?.boolValue
+        }
+        guard synced, actual == enabled else {
+            CFPreferencesSetAppValue(key as CFString, previous, prefsDomain)
+            CFPreferencesAppSynchronize(prefsDomain)
+            lastError = T("菜单设置未保存，请在系统设置中重试")
+            reload()
+            return
+        }
+        reload()
         lastApplied = Date()
         scheduleFinderRefresh()
     }
 
-    private func runPluginkit(argument: String, identifier: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
-        process.arguments = ["-e", argument, "-i", identifier]
-        try? process.run()
-        process.waitUntilExit()
+    private func runPluginkit(argument: String, identifier: String) async -> Bool {
+        let result = await CommandRunner.run("/usr/bin/pluginkit", ["-e", argument, "-i", identifier])
+        guard result.ok else {
+            lastError = T("扩展设置失败，请在系统设置中重试")
+            return false
+        }
+        let query = await CommandRunner.run("/usr/bin/pluginkit", ["-m", "-A", "-D", "-i", identifier])
+        guard query.ok, FinderElection.parse(query.output)[identifier] == (argument == "use") else {
+            lastError = T("系统未确认扩展状态，请在系统设置中检查")
+            return false
+        }
+        return true
     }
 
     private func scheduleFinderRefresh() {
         pendingFinderRestart?.invalidate()
-        pendingFinderRestart = Timer.scheduledTimer(withTimeInterval: 0.9, repeats: false) { _ in
-            Self.restartFinder()
+        pendingFinderRestart = Timer.scheduledTimer(withTimeInterval: 0.9, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.refreshFinderNow() }
         }
     }
 
-    static func restartFinder() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        process.arguments = ["Finder"]
-        try? process.run()
-    }
+    @discardableResult
+    static func restartFinder() -> Bool { DesktopService.restartFinder() }
 
-    func refreshFinderNow() {
-        Self.restartFinder()
+    @discardableResult
+    func refreshFinderNow() -> Bool {
+        lastError = nil
+        guard Self.restartFinder() else {
+            lastError = T("未能重新启动访达，请手动重试")
+            return false
+        }
+        return true
     }
 
     /// 供配置导入使用：启用 RClick 的 Finder 扩展
@@ -324,8 +382,11 @@ final class ContextMenuService: ObservableObject {
             if !item.isEnabled { setEnabled(true, for: item.id) }
             return
         }
-        runPluginkit(argument: "use", identifier: "cn.wflixu.RClick.FinderSyncExt")
-        lastApplied = Date()
-        scheduleFinderRefresh()
+        Task {
+            if await runPluginkit(argument: "use", identifier: "cn.wflixu.RClick.FinderSyncExt") {
+                lastApplied = Date()
+                scheduleFinderRefresh()
+            }
+        }
     }
 }

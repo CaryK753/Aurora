@@ -34,6 +34,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 固定的开关由面板右上角的按钮控制，这里只负责把窗口形态交给 PanelController
         state.onSetPinned = { [weak self] pinned in self?.panelController.setPinned(pinned) }
         setupStatusItem()
+        // 输入法增强：指示器 / 自动切换 / 自定义短语 / 健康监测
+        state.input.start()
+        state.snippets.start()
+        state.imeHealth.start()
         MacroRunner.startObservingApplications()
         MacroRunner.dismissPanel = { [weak self] in self?.panelController.hide(reason: "macro") }
         MacroRunner.onError = { [weak self] message in

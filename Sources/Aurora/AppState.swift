@@ -148,6 +148,9 @@ final class AppState: ObservableObject {
     let logitech = LogitechDeviceService()
     let trackpad = TrackpadService()
     let keyboard = KeyboardService()
+    let input = InputMethodService()
+    let snippets = SnippetService()
+    let imeHealth = IMEHealthService()
     let hid = HIDDeviceService()
     let devices = DeviceService()
     let screenTest = ScreenTestService.shared
@@ -207,6 +210,9 @@ final class AppState: ObservableObject {
             self.energy.setModuleEnabled(!disabled.contains("energy"))
             self.appAudio.setModuleEnabled(!disabled.contains("audio"))
             self.keyboard.setModuleEnabled(!disabled.contains("keyboard"))
+            self.input.setModuleEnabled(!disabled.contains("input"))
+            self.snippets.setModuleEnabled(!disabled.contains("input"))
+            self.imeHealth.setModuleEnabled(!disabled.contains("input"))
         }
         languageObserver = NotificationCenter.default.addObserver(
             forName: .auroraLanguageChanged,
@@ -264,6 +270,15 @@ final class AppState: ObservableObject {
             self?.showToast(message, symbol: "battery.25percent")
         }
         keyboard.onToast = { [weak self] message, symbol in
+            self?.showToast(message, symbol: symbol)
+        }
+        input.onToast = { [weak self] message, symbol in
+            self?.showToast(message, symbol: symbol)
+        }
+        snippets.onToast = { [weak self] message, symbol in
+            self?.showToast(message, symbol: symbol)
+        }
+        imeHealth.onToast = { [weak self] message, symbol in
             self?.showToast(message, symbol: symbol)
         }
         keyboard.onRequestPermission = { [weak self] in self?.permissions.requestAccessibility() }

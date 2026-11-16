@@ -20,8 +20,13 @@ final class WallpaperService: ObservableObject {
     @Published private(set) var nextRotateAt: Date?
     @Published private(set) var displayTick = 0
     @Published private(set) var isRunning = false
+    /// 每块屏当前停下来的原因（没有条目 = 正在播）
+    @Published private(set) var pauseReasons: [String: WallpaperPauseReason] = [:]
+    @Published private(set) var playbackOptions = WallpaperPlaybackOptions.load()
+    @Published private(set) var isManuallyPaused = false
 
     let library: WallpaperLibrary
+    let playback = WallpaperPlaybackMonitor()
 
     private let renderer = WallpaperRenderer()
     private var timer: Timer?
@@ -30,6 +35,9 @@ final class WallpaperService: ObservableObject {
     private var distributedObservers: [NSObjectProtocol] = []
     private var randomPicks: [String: String] = [:]
     private var poolCache: (signature: String, items: [WallpaperItem], at: Date)?
+    private var playbackSink: AnyCancellable?
+    private var playingState: [String: Bool] = [:]
+    private var lastInputs = WallpaperPlaybackInputs()
 
     init(library: WallpaperLibrary) {
         self.library = library
@@ -47,11 +55,7 @@ final class WallpaperService: ObservableObject {
     }
 
     static func displayKey(for screen: NSScreen) -> String {
-        if let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
-           let uuid = CGDisplayCreateUUIDFromDisplayID(number.uint32Value)?.takeRetainedValue() {
-            return (CFUUIDCreateString(nil, uuid) as String).uppercased()
-        }
-        return screen.localizedName
+        WallpaperDisplay.key(for: screen)
     }
 
     var displays: [DisplayInfo] {
@@ -106,6 +110,7 @@ final class WallpaperService: ObservableObject {
         guard !isRunning else { return }
         isRunning = true
         installObservers()
+        startPlaybackMonitor()
         timer?.invalidate()
         let timer = Timer(timeInterval: 20, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.apply(reason: "tick") }
@@ -127,12 +132,120 @@ final class WallpaperService: ObservableObject {
         centerObservers.removeAll()
         workspaceObservers.removeAll()
         distributedObservers.removeAll()
+        stopPlaybackMonitor()
     }
 
     /// 让桌面回到系统自己的壁纸
     func teardown() {
         renderer.clearAll()
         current = [:]
+        pauseReasons = [:]
+        playingState = [:]
+        stopPlaybackMonitor()
+    }
+
+    // MARK: - 播放策略
+
+    private func startPlaybackMonitor() {
+        playback.start()
+        lastInputs = playback.inputs
+        playbackSink = playback.$inputs
+            .removeDuplicates()
+            .sink { [weak self] inputs in
+                Task { @MainActor in
+                    guard let self else { return }
+                    let woke = (self.lastInputs.displayAsleep && !inputs.displayAsleep)
+                        || (self.lastInputs.systemSleeping && !inputs.systemSleeping)
+                    self.lastInputs = inputs
+                    self.syncPlayback()
+                    if woke { self.renderer.recoverStalledPlayers() }
+                }
+            }
+
+        // 走查：defaults write com.cary.aurora debugWallpaperPause -bool YES 后启动，
+        // 两秒后替用户点一次「暂停」，把策略 → 渲染层的整条链路写进日志。一次性，读完即删。
+        if UserDefaults.standard.bool(forKey: "debugWallpaperPause") {
+            UserDefaults.standard.removeObject(forKey: "debugWallpaperPause")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self else { return }
+                self.toggleManualPause()
+                Debug.log("wallpaper probe: manual=\(self.isManuallyPaused) "
+                          + "reasons=\(self.pauseReasons.values.map(\.rawValue)) "
+                          + "playing=\(self.playingState)")
+            }
+        }
+    }
+
+    private func stopPlaybackMonitor() {
+        playbackSink?.cancel()
+        playbackSink = nil
+        playback.stop()
+        lastInputs = WallpaperPlaybackInputs()
+    }
+
+    /// 按当前条件算出每块屏该播还是该停，变化时才下发到渲染层
+    private func syncPlayback() {
+        guard config.enabled else {
+            if !playingState.isEmpty {
+                playingState = [:]
+                pauseReasons = [:]
+                renderer.setPlaying([:])
+            }
+            return
+        }
+
+        var states: [String: Bool] = [:]
+        var reasons: [String: WallpaperPauseReason] = [:]
+        for screen in NSScreen.screens {
+            let key = WallpaperDisplay.key(for: screen)
+            if let reason = WallpaperPlaybackPolicy.reason(
+                displayKey: key,
+                inputs: playback.inputs,
+                options: playbackOptions,
+                manualPause: isManuallyPaused
+            ) {
+                states[key] = false
+                reasons[key] = reason
+            } else {
+                states[key] = true
+            }
+        }
+
+        if states != playingState {
+            playingState = states
+            renderer.setPlaying(states)
+            if let first = reasons.values.first {
+                Debug.log("wallpaper playback paused=\(reasons.count) reason=\(first.rawValue)")
+            }
+        }
+        if reasons != pauseReasons { pauseReasons = reasons }
+    }
+
+    func toggleManualPause() {
+        isManuallyPaused.toggle()
+        syncPlayback()
+    }
+
+    func setPlaybackOptions(_ options: WallpaperPlaybackOptions) {
+        guard options != playbackOptions else { return }
+        playbackOptions = options
+        options.save()
+        // 关掉「全屏时暂停」这类开关后要立刻恢复画面，不能等下一次轮询
+        playback.recheck()
+        syncPlayback()
+    }
+
+    /// 全局性的暂停原因（不含「被某块屏的全屏应用盖住」）
+    var globalPauseReason: WallpaperPauseReason? {
+        WallpaperPlaybackPolicy.globalReason(
+            inputs: playback.inputs,
+            options: playbackOptions,
+            manualPause: isManuallyPaused
+        ) ?? (pauseReasons.isEmpty ? nil : .fullscreen)
+    }
+
+    func pauseReason(for displayKey: String) -> WallpaperPauseReason? {
+        pauseReasons[displayKey]
     }
 
     private func installObservers() {
@@ -339,6 +452,9 @@ final class WallpaperService: ObservableObject {
             current = resolved
             Debug.log("wallpaper apply reason=\(reason) displays=\(resolved.count)")
         }
+
+        // 新出现的显示器也要立刻拿到「该播还是该停」的结论
+        syncPlayback()
     }
 
     // MARK: - 持久化

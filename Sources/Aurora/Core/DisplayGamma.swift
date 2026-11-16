@@ -52,16 +52,18 @@ final class DisplayGamma {
         if value >= 0.999 {
             // 本来就没压暗时不要反复写 gamma 表，否则会和夜览 / True Tone 抢
             guard (levels[id] ?? 1) < 0.999 else { return true }
+            guard CGSetDisplayTransferByTable(id, table.count, table.red, table.green, table.blue) == .success else { return false }
             levels[id] = 1
-            return CGSetDisplayTransferByTable(id, table.count, table.red, table.green, table.blue) == .success
+            return true
         }
-        levels[id] = value
         // 最低不压到 0，留一点可读性；需要全黑时用 0.02 近似
         let scale = CGGammaValue(max(value, 0.02))
         let red = table.red.prefix(Int(table.count)).map { $0 * scale }
         let green = table.green.prefix(Int(table.count)).map { $0 * scale }
         let blue = table.blue.prefix(Int(table.count)).map { $0 * scale }
-        return CGSetDisplayTransferByTable(id, table.count, red, green, blue) == .success
+        guard CGSetDisplayTransferByTable(id, table.count, red, green, blue) == .success else { return false }
+        levels[id] = value
+        return true
     }
 
     func reset(_ id: CGDirectDisplayID) {
@@ -91,6 +93,7 @@ final class DDCWriter: @unchecked Sendable {
         let channel: DDCChannel
         let codes: [UInt8]
         let value: UInt16
+        let completion: ((Bool) -> Void)?
     }
 
     private let queue = DispatchQueue(label: "aurora.display.ddc.write", qos: .userInitiated)
@@ -100,10 +103,10 @@ final class DDCWriter: @unchecked Sendable {
     private var draining = false
 
     /// 同一个 key（显示器 + 通道）只保留最后一次请求
-    func submit(key: String, channel: DDCChannel, codes: [UInt8], value: UInt16) {
+    func submit(key: String, channel: DDCChannel, codes: [UInt8], value: UInt16, completion: ((Bool) -> Void)? = nil) {
         lock.lock()
         if pending[key] == nil { order.append(key) }
-        pending[key] = Job(channel: channel, codes: codes, value: value)
+        pending[key] = Job(channel: channel, codes: codes, value: value, completion: completion)
         let shouldStart = !draining
         if shouldStart { draining = true }
         lock.unlock()
@@ -125,9 +128,11 @@ final class DDCWriter: @unchecked Sendable {
             pending.removeValue(forKey: key)
             lock.unlock()
 
+            var succeeded = true
             for code in job.codes {
-                _ = job.channel.write(code, value: job.value)
+                succeeded = job.channel.write(code, value: job.value) && succeeded
             }
+            job.completion?(succeeded)
         }
     }
 }

@@ -29,6 +29,19 @@ struct ContextMenuView: View {
             systemCard
             footer
         }
+        .onAppear { service.reload() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            service.reload()
+        }
+        .onChange(of: finder.lastError) { _, error in
+            if let error { state.showToast(error, symbol: "exclamationmark.triangle") }
+        }
+        .onChange(of: service.lastApplied) { _, _ in
+            state.showToast(T("菜单设置已保存，正在刷新访达"), symbol: "checkmark.circle.fill")
+        }
+        .onChange(of: service.lastError) { _, error in
+            if let error { state.showToast(error, symbol: "exclamationmark.triangle") }
+        }
     }
 
     // MARK: - Finder 扩展（真正的自定义右键）
@@ -51,9 +64,10 @@ struct ContextMenuView: View {
                     }
                     Spacer(minLength: 4)
                     Button {
-                        finder.repairRegistration()
-                        finder.restartFinder()
-                        state.showToast(T("已重新登记扩展，正在重启访达"), symbol: "arrow.triangle.2.circlepath")
+                        Task {
+                            guard await finder.repairRegistration(enable: true), finder.restartFinder() else { return }
+                            state.showToast(T("扩展已登记，已请求重新启动访达"), symbol: "arrow.triangle.2.circlepath")
+                        }
                     } label: {
                         Image(systemName: "arrow.triangle.2.circlepath")
                             .font(.system(size: 9, weight: .bold))
@@ -63,6 +77,7 @@ struct ContextMenuView: View {
                     }
                     .buttonStyle(.plain)
                     .help(T("重新向系统登记扩展并重启访达"))
+                    .disabled(finder.isRepairing)
                     statusPill
                 }
 
@@ -85,8 +100,9 @@ struct ContextMenuView: View {
                     .buttonStyle(.plain)
                 } else if !finder.didLoad {
                     Button {
-                        finder.restartFinder()
-                        state.showToast(T("访达已重启，右键试试"), symbol: "checkmark.circle.fill")
+                        if finder.restartFinder() {
+                            state.showToast(T("已请求重新启动访达"), symbol: "checkmark.circle.fill")
+                        }
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "arrow.clockwise")
@@ -323,6 +339,7 @@ struct ContextMenuView: View {
         updated.argument = draftArgument
         updated.symbol = draftSymbol
         finder.update(updated)
+        guard finder.lastError == nil else { return }
         editingID = nil
         state.showToast(T("右键项已更新"), symbol: "checkmark.circle.fill")
     }
@@ -344,6 +361,7 @@ struct ContextMenuView: View {
                 ForEach(FinderAction.Kind.allCases) { kind in
                     Button {
                         finder.add(kind)
+                        guard finder.lastError == nil else { return }
                         state.showToast(TF("已添加：%@", kind.title), symbol: "plus.circle.fill")
                     } label: {
                         Label(kind.title, systemImage: kind.symbol)
@@ -395,8 +413,9 @@ struct ContextMenuView: View {
                         .font(.system(size: 8.5))
                         .foregroundStyle(.tertiary)
                     Button {
-                        service.refreshFinderNow()
-                        state.showToast(T("访达已刷新"), symbol: "checkmark.circle.fill")
+                        if service.refreshFinderNow() {
+                            state.showToast(T("已请求重新启动访达"), symbol: "checkmark.circle.fill")
+                        }
                     } label: {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 8.5, weight: .bold))
@@ -505,13 +524,11 @@ struct ContextMenuView: View {
                     get: { item.isEnabled },
                     set: { newValue in
                         service.setEnabled(newValue, for: item.id)
-                        state.showToast(
-                            "\(item.title) \(newValue ? "已启用" : "已关闭")",
-                            symbol: newValue ? "checkmark.circle.fill" : "minus.circle.fill"
-                        )
+
                     }
                 )
             )
+            .disabled(!item.writable || service.applyingIDs.contains(item.id))
         }
         .padding(.vertical, 4)
     }

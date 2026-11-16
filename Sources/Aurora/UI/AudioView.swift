@@ -179,8 +179,9 @@ struct AudioView: View {
     }
 
     private func appVolumeRow(_ item: AppAudioItem) -> some View {
-        // 用实时值而不是 2 秒前的快照：拖到 0 时喇叭图标立刻变成静音，不会被误读成「卡住了」
+        // 目标音量和实际接管状态分别显示，等待接管时不宣称已经静音。
         let live = perApp.volume(for: item.id)
+        let pending = abs(live - 1) > 0.001 && !item.isControlled
         return HStack(alignment: .center, spacing: 7) {
             appIcon(item)
 
@@ -189,6 +190,10 @@ struct AudioView: View {
                     Text(item.name)
                         .font(.system(size: 10.5, weight: .medium))
                         .lineLimit(1)
+                    if pending {
+                        Text(T("等待音频接管"))
+                            .font(.system(size: 8)).foregroundStyle(AuroraTheme.warn)
+                    }
                     Spacer(minLength: 4)
                     Text(Fmt.percent(live))
                         .font(.system(size: 8.5, weight: .medium, design: .rounded))
@@ -210,7 +215,7 @@ struct AudioView: View {
                     Button {
                         perApp.toggleMute(item.id)
                     } label: {
-                        Image(systemName: live <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        Image(systemName: live <= 0.001 && item.isControlled ? "speaker.slash.fill" : "speaker.wave.2.fill")
                             .font(.system(size: 9))
                             .foregroundStyle(live <= 0.001 ? AnyShapeStyle(AuroraTheme.warn) : AnyShapeStyle(Color.secondary))
                             .frame(width: 16, height: 15)

@@ -91,6 +91,9 @@ struct FinderAction: Identifiable, Codable, Equatable {
 @MainActor
 final class FinderExtensionService: ObservableObject {
     @Published private(set) var actions: [FinderAction] = []
+    @Published private(set) var lastError: String?
+    @Published private(set) var isRepairing = false
+    private var savedActions: [FinderAction] = []
     @Published private(set) var isEnabled: Bool = false
     /// 扩展进程有没有真的被 Finder 拉起（看它自己写的诊断日志）
     @Published private(set) var didLoad: Bool = false
@@ -100,28 +103,31 @@ final class FinderExtensionService: ObservableObject {
     private var executeObserver: NSObjectProtocol?
     private var activationObserver: NSObjectProtocol?
     private let storeURL: URL
+    private let integrationEnabled: Bool
 
     private static let configChannel = Notification.Name("com.cary.aurora.finder.config")
     private static let requestChannel = Notification.Name("com.cary.aurora.finder.request")
     private static let executeChannel = Notification.Name("com.cary.aurora.finder.execute")
 
-    init() {
+    init(storeURL customStoreURL: URL? = nil) {
+        integrationEnabled = customStoreURL == nil
         // 扩展是沙盒进程，只能读自己容器里的文件；主 App 未沙盒，可以直接写进它的容器，
         // 这样即使 Aurora 没在运行，右键菜单也是最新的配置。
-        let container = URL(fileURLWithPath: NSHomeDirectory())
+        let container = customStoreURL?.deletingLastPathComponent() ?? URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Library/Containers/com.cary.aurora.finder/Data/Library/Application Support/Aurora", isDirectory: true)
         try? FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
-        storeURL = container.appendingPathComponent("finder-actions.json")
+        storeURL = customStoreURL ?? container.appendingPathComponent("finder-actions.json")
 
         // 旧版本写在共享目录，迁移一次
         let legacy = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Aurora/finder-actions.json")
-        if !FileManager.default.fileExists(atPath: storeURL.path),
+        if integrationEnabled, !FileManager.default.fileExists(atPath: storeURL.path),
            let data = try? Data(contentsOf: legacy) {
             try? data.write(to: storeURL)
         }
 
         load()
+        guard integrationEnabled else { return }
         refreshEnabled()
 
         requestObserver = DistributedNotificationCenter.default().addObserver(
@@ -155,7 +161,7 @@ final class FinderExtensionService: ObservableObject {
         // 启动后主动补一次注册：系统有时不会自动发现 PlugIns 里的 appex
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             Task { @MainActor in
-                self?.repairRegistration()
+                await self?.repairRegistration()
                 self?.refreshEnabled()
             }
         }
@@ -190,14 +196,16 @@ final class FinderExtensionService: ObservableObject {
     }
 
     /// 让 Finder 重新扫描已启用的扩展（等价于 `killall Finder`，Dock 与桌面会自动恢复）
-    func restartFinder() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        process.arguments = ["Finder"]
-        try? process.run()
+    @discardableResult
+    func restartFinder() -> Bool {
+        guard DesktopService.restartFinder() else {
+            lastError = T("未能重新启动访达，请手动重试")
+            return false
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
             Task { @MainActor in self?.refreshEnabled() }
         }
+        return true
     }
 
     func openExtensionSettings() {
@@ -208,49 +216,47 @@ final class FinderExtensionService: ObservableObject {
 
     /// App 被系统「发现」并把 appex 交给 pkd，有时会滞后甚至漏掉（尤其是用 cp 安装、或构建目录里也有同名包）：
     /// 这里主动跑一次 lsregister + pluginkit，把结果写进 finder-diag.log，既能修也能查。
-    func repairRegistration(log: Bool = true) {
+    @discardableResult
+    func repairRegistration(log: Bool = true, enable: Bool = false) async -> Bool {
+        guard !isRepairing else { return false }
+        isRepairing = true
+        lastError = nil
+        defer { isRepairing = false }
         let appex = Bundle.main.bundlePath + "/Contents/PlugIns/AuroraFinder.appex"
-        var lines: [String] = ["[\(Self.stamp())] repair start, appex exists=\(FileManager.default.fileExists(atPath: appex))"]
-
-        if !activationsEnabled(appex: appex) {
-            lines.append("appex missing on disk — skip")
-            writeDiag(lines, enabled: log)
-            return
+        var lines = ["[\(Self.stamp())] repair start"]
+        guard activationsEnabled(appex: appex) else {
+            lastError = T("应用包中缺少 Finder 扩展，请重新安装完整应用")
+            writeDiag(lines + ["appex missing on disk"], enabled: log)
+            return false
         }
-
         let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-        lines.append("lsregister -f app → " + run(lsregister, ["-f", Bundle.main.bundlePath]))
-        lines.append("lsregister -f appex → " + run(lsregister, ["-f", appex]))
-
-        var listed = queryPlugin()
-        lines.append("pluginkit -m -i (before) → \(listed.isEmpty ? "(none)" : listed)")
-        if listed.isEmpty {
-            // 换过一次签名后 pkd 里可能留着旧记录，先摘掉再登记
-            lines.append("pluginkit -r → " + run("/usr/bin/pluginkit", ["-r", appex]))
+        for path in [Bundle.main.bundlePath, appex] {
+            let result = await CommandRunner.run(lsregister, ["-f", path])
+            lines.append("lsregister: \(result.status) \(result.error)")
         }
-        lines.append("pluginkit -a → " + run("/usr/bin/pluginkit", ["-a", appex]))
-
-        // pkd 是异步的，给它几次机会
-        for attempt in 1...3 {
-            Thread.sleep(forTimeInterval: 0.8)
-            listed = queryPlugin()
-            lines.append("poll #\(attempt) → \(listed.isEmpty ? "(none)" : listed)")
-            if !listed.isEmpty { break }
+        let added = await CommandRunner.run("/usr/bin/pluginkit", ["-a", appex])
+        lines.append("pluginkit add: \(added.status) \(added.error)")
+        var registered = false
+        for _ in 0..<3 {
+            let query = await CommandRunner.run("/usr/bin/pluginkit", ["-m", "-A", "-D", "-i", Self.extensionID])
+            registered = query.ok && query.output.split(separator: "\n").contains { line in
+                line.split(whereSeparator: { $0.isWhitespace }).contains { token in
+                    token.split(separator: "(").first.map(String.init) == Self.extensionID
+                }
+            }
+            if registered { break }
+            try? await Task.sleep(nanoseconds: 800_000_000)
         }
-
-        lines.append("pluginkit -e use → " + run("/usr/bin/pluginkit", ["-e", "use", "-i", Self.extensionID]))
-        lines.append("isExtensionEnabled=\(FIFinderSyncController.isExtensionEnabled)")
-        writeDiag(lines, enabled: log)
+        // 自动登记不覆盖用户主动禁用的选择；只有明确点击修复才请求启用。
+        if registered, enable {
+            let result = await CommandRunner.run("/usr/bin/pluginkit", ["-e", "use", "-i", Self.extensionID])
+            let query = await CommandRunner.run("/usr/bin/pluginkit", ["-m", "-A", "-D", "-i", Self.extensionID])
+            registered = result.ok && query.ok && FinderElection.parse(query.output)[Self.extensionID] == true
+        }
         refreshEnabled()
-    }
-
-    /// 只取 `+  com.cary.aurora.finder(1.0.0)` 这一行，空字符串表示没登记
-    private func queryPlugin() -> String {
-        run("/usr/bin/pluginkit", ["-m", "-i", Self.extensionID])
-            .split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { $0.contains(Self.extensionID) }
-            .joined(separator: " | ")
+        writeDiag(lines + ["confirmed=\(registered), enabled=\(isEnabled)"], enabled: log)
+        if !registered { lastError = T("系统未确认扩展登记，请在系统设置中检查") }
+        return registered
     }
 
     private func activationsEnabled(appex: String) -> Bool {
@@ -259,25 +265,6 @@ final class FinderExtensionService: ObservableObject {
 
     private static func stamp() -> String {
         ISO8601DateFormatter().string(from: Date())
-    }
-
-    private func run(_ path: String, _ args: [String]) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = args
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-        } catch {
-            return "launch failed: \(error.localizedDescription)"
-        }
-        process.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let text = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return "exit=\(process.terminationStatus) \(text.isEmpty ? "(no output)" : text)"
     }
 
     private func writeDiag(_ lines: [String], enabled: Bool) {
@@ -347,19 +334,27 @@ final class FinderExtensionService: ObservableObject {
         let unique = parsed.filter { action in
             seen.insert("\(action.kind.rawValue)|\(action.title)|\(action.argument)").inserted
         }
-        actions = unique.isEmpty ? Self.seed : unique
+        actions = unique
+        savedActions = unique
         if unique.count != parsed.count { save() }
     }
 
     private func save() {
-        guard let data = try? JSONEncoder().encode(actions) else { return }
-        try? data.write(to: storeURL)
-        push()
+        lastError = nil
+        do {
+            let data = try JSONEncoder().encode(actions)
+            try data.write(to: storeURL, options: .atomic)
+            savedActions = actions
+            push()
+        } catch {
+            actions = savedActions
+            lastError = T("右键菜单未保存，请检查文件访问权限后重试")
+        }
     }
 
     /// 把配置推给扩展：轻量、即时，不用重启 Finder
     func push() {
-        guard let data = try? JSONEncoder().encode(actions),
+        guard integrationEnabled, let data = try? JSONEncoder().encode(actions),
               let json = String(data: data, encoding: .utf8) else { return }
         DistributedNotificationCenter.default().postNotificationName(
             Self.configChannel,
