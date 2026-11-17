@@ -55,6 +55,7 @@ final class WhatsNewWindowController: NSObject, NSWindowDelegate {
                 ReleaseNotesStore.markSeen()
                 self?.state?.showWhatsNew = false
                 self?.window.orderOut(nil)
+                self?.state?.presentMainPanel()
             },
             onOpenReleasePage: {
                 NSWorkspace.shared.open(UpdateService.releasesPage)

@@ -252,3 +252,11 @@ git push origin v1.1.0
 [QuickRecorder](https://github.com/lihaoyun6/QuickRecorder) ·
 [Recordly](https://github.com/webadderallorg/Recordly) ·
 [Snapzy](https://github.com/duongductrong/Snapzy)
+
+### 网络：系统代理与订阅
+
+未获得有效 Apple 网络扩展签名授权时，默认使用系统代理。支持 URL 或本地文件导入 Clash / Shadowrocket 基础订阅、节点连接测试、手动或定时更新，以及全局、规则、直连三种出站方式。规则模式支持大陆 IPv4 / IPv6 与 `gov.cn` 直连、自定义规则、DNS、局域网绕过与兜底策略；Surge 导入后续支持。
+
+mihomo 不进入安装包，首次使用代理模式时才单独下载并校验，也可随时删除；直连不依赖内核。正常退出会恢复原代理，恢复备份跨重启保留。Tailscale 组网将在后续版本接入。
+
+支持范围、隐私存储、地址归属说明和验证方式见 [网络模块说明](docs/network-proxy.md)。

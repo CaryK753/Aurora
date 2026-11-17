@@ -13,6 +13,9 @@ final class AppState: ObservableObject {
     @Published var showWelcome = false
     /// 更新后首次启动的「新功能」窗口
     @Published var showWhatsNew = false
+    /// 第一次锁定前的说明
+    @Published var showFileLockNotice = false
+    private var pendingFileLockURLs: [URL] = []
     /// 全局快捷键页（与设置页同层的单层内容页，不是覆盖层）
     @Published var showHotkeys = false
     /// 罗技鼠标设置向导（检测到设备后自动弹出）
@@ -164,6 +167,8 @@ final class AppState: ObservableObject {
     let clipboard = ClipboardService()
     let energy = EnergyService()
     let audio = AudioService()
+    let network = NetworkTunnelService()
+    let systemProxy = SystemProxyService()
     let storage = StorageService()
     let appInventory = AppInventoryService()
     let devCleanup = DevCleanupService()
@@ -232,6 +237,15 @@ final class AppState: ObservableObject {
                 self?.pointer.setPermissionGranted(granted)
                 self?.display.refreshNativeKeys(accessibility: granted)
             }
+
+        finderExt.onLockNotice = { [weak self] urls in
+            self?.presentFileLockNotice(urls)
+        }
+        finderExt.onStatus = { [weak self] text in
+            let symbol = (text.contains("已锁定") || text.contains("已解锁")) ? "lock.fill" : "exclamationmark.triangle"
+            self?.showToast(text, symbol: symbol)
+            NotificationService.shared.post(title: "Aurora", body: text)
+        }
 
         pointer.onNativeButton = { [weak self] button in
             MainActor.assumeIsolated { self?.logitech.handleNativeButton(button) ?? false }
@@ -311,6 +325,26 @@ final class AppState: ObservableObject {
             guard !Task.isCancelled else { return }
             withAnimation(.smooth(duration: 0.25)) { self.toast = nil }
         }
+    }
+
+    func presentFileLockNotice(_ urls: [URL]) {
+        pendingFileLockURLs = urls
+        showFileLockNotice = true
+    }
+
+    func confirmFileLockNotice() {
+        UserDefaults.standard.set(true, forKey: FileLockService.noticeDefaultsKey)
+        let urls = pendingFileLockURLs
+        pendingFileLockURLs = []
+        showFileLockNotice = false
+        FileLockService.toggle(urls) { [weak self] message in
+            self?.finderExt.onStatus?(message)
+        }
+    }
+
+    func dismissFileLockNotice() {
+        pendingFileLockURLs = []
+        showFileLockNotice = false
     }
 
     func select(_ module: AuroraModule) {

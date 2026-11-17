@@ -250,3 +250,9 @@ Interactions and feature sets were inspired by these projects — ideas and conf
 [QuickRecorder](https://github.com/lihaoyun6/QuickRecorder) ·
 [Recordly](https://github.com/webadderallorg/Recordly) ·
 [Snapzy](https://github.com/duongductrong/Snapzy)
+
+### Network: System Proxy and Subscriptions
+
+System Proxy is selected by default when the app lacks valid Apple network-extension signing authorization. Import basic Clash / Shadowrocket subscriptions by URL, choose global, rule, or direct routing, and customize mainland IPv4 / IPv6 bypass, LAN bypass, DNS, rules, and fallback behavior.
+
+Proxy modes require the separately downloaded and verified mihomo engine. Direct mode does not. Normal exit restores previous proxy settings. Tailscale networking is planned for a later release. See [network module notes (Chinese)](docs/network-proxy.md) for compatibility limits and validation.

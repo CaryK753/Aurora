@@ -43,6 +43,7 @@ enum DevPreview {
         case .recorder: RecorderView(state: state)
         case .energy: EnergyView(state: state)
         case .audio: AudioView(state: state)
+        case .network: NetworkView(state: state)
         case .storage: StorageView(state: state)
         case .ai: AIView(state: state)
         case .settings: SettingsView(state: state)

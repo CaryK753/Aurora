@@ -11,19 +11,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panelController: PanelController!
     private var welcomeController: WelcomeWindowController?
     private var whatsNewController: WhatsNewWindowController?
+    private var fileLockNoticeController: FileLockNoticeWindowController?
     private var logitechSetupController: LogitechSetupWindowController?
+    private var workspaceObservers: [NSObjectProtocol] = []
     let state = AppState()
     private lazy var contextMenu: NSMenu = {
         let menu = NSMenu()
-        let overview = NSMenuItem(title: T("打开 Aurora"), action: #selector(openPanel), keyEquivalent: "")
-        overview.target = self
-        menu.addItem(overview)
+        menu.addItem(menuItem(T("打开 Aurora"), #selector(openPanel)))
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: T("退出 Aurora"), action: #selector(quit), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
+        menu.addItem(menuItem(T("总览"), #selector(openOverview)))
+        menu.addItem(menuItem(T("AI用量"), #selector(openAIUsage)))
+        menu.addItem(menuItem(T("网络"), #selector(openNetwork)))
+        menu.addItem(.separator())
+        menu.addItem(menuItem(T("导入设置…"), #selector(openImport)))
+        menu.addItem(menuItem(T("新功能"), #selector(openWhatsNewFromMenu)))
+        menu.addItem(menuItem(T("设置…"), #selector(settingsFromMenu)))
+        menu.addItem(menuItem(T("关于 Aurora"), #selector(aboutFromMenu)))
+        menu.addItem(.separator())
+        menu.addItem(menuItem(T("退出 Aurora"), #selector(quit), keyEquivalent: "q"))
         return menu
     }()
+
+    private func menuItem(_ title: String, _ action: Selector, keyEquivalent: String = "") -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
+        item.target = self
+        return item
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -34,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 固定的开关由面板右上角的按钮控制，这里只负责把窗口形态交给 PanelController
         state.onSetPinned = { [weak self] pinned in self?.panelController.setPinned(pinned) }
         setupStatusItem()
+        observeSystemSleep()
         // 输入法增强：指示器 / 自动切换 / 自定义短语 / 健康监测
         state.input.start()
         state.snippets.start()
@@ -59,6 +73,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         welcomeController = WelcomeWindowController(state: state)
         // 更新后的第一次启动：介绍这一版的新功能（每个版本一次）
         whatsNewController = WhatsNewWindowController(state: state)
+        fileLockNoticeController = FileLockNoticeWindowController(state: state)
+        if UserDefaults.standard.bool(forKey: "debugFileLockNotice") {
+            UserDefaults.standard.removeObject(forKey: "debugFileLockNotice")
+            state.showFileLockNotice = true
+        }
         // 检测到罗技鼠标时（可能早在 AppState 初始化时就登记了）把向导窗口准备好
         logitechSetupController = LogitechSetupWindowController(state: state)
         if !UserDefaults.standard.bool(forKey: "onboarding.completed")
@@ -171,6 +190,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    private func observeSystemSleep() {
+        let center = NSWorkspace.shared.notificationCenter
+        workspaceObservers.append(center.addObserver(forName: NSWorkspace.willSleepNotification,
+                                                       object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.state.logitech.suspendForSystemSleep() }
+        })
+        workspaceObservers.append(center.addObserver(forName: NSWorkspace.didWakeNotification,
+                                                       object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.state.logitech.resumeAfterSystemWake() }
+        })
     }
 
     /// 更新后的第一次启动弹「新功能」；这一版没有说明就静默记下，不打扰
@@ -287,6 +318,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelController.show(relativeTo: statusItem.button)
     }
 
+    @objc func openOverview() { openModule(.overview) }
+    @objc func openAIUsage() { openModule(.ai) }
+    @objc func openNetwork() { openModule(.network) }
+
+    private func openModule(_ module: AuroraModule) {
+        state.select(module)
+        panelController.show(relativeTo: statusItem.button)
+    }
+
+    @objc func openImport() {
+        panelController.show(relativeTo: statusItem.button)
+        state.showImport = true
+    }
+
+    @objc func openWhatsNewFromMenu() { state.openWhatsNew() }
+
     @objc private func quit() {
         state.requestQuit()
     }
@@ -314,7 +361,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Task { @MainActor in
+            do {
+                try await state.systemProxy.restoreForTermination()
+                sender.reply(toApplicationShouldTerminate: true)
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = T("暂时无法退出 Aurora")
+                alert.informativeText = T("请先完成网络操作或恢复原代理配置，避免退出后无法联网。")
+                alert.addButton(withTitle: T("好"))
+                sender.activate(ignoringOtherApps: true)
+                alert.runModal()
+                sender.reply(toApplicationShouldTerminate: false)
+            }
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        let center = NSWorkspace.shared.notificationCenter
+        workspaceObservers.forEach(center.removeObserver)
+        workspaceObservers.removeAll()
         // 拆除按应用音量的 tap，避免退出瞬间把正在播放的声音吞掉
         state.logitech.shutdown()
         state.appAudio.shutdown()

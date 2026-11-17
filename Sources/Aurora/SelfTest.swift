@@ -1220,6 +1220,16 @@ enum SelfTest {
             check("临时目录可写", false, root.path)
         }
 
+        let engine = ProxyRuleEngine.parse("""
+        DOMAIN-SUFFIX,apple.com,DIRECT
+        IP-CIDR,10.0.0.0/8,DIRECT
+        MATCH,PROXY
+        """)
+        check("规则直连后缀", engine.decide(host: "www.apple.com", port: 443) == .direct, "apple")
+        check("规则代理其余", engine.decide(host: "example.com", port: 443) == .proxy, "example")
+        check("规则私网", engine.decide(host: "10.1.2.3", port: 80) == .direct, "10/8")
+        check("坏规则被标出", !ProxyRuleEngine.parse("NOPE,x,PROXY").issues.isEmpty, "NOPE")
+
         return Int32(failures)
     }
 

@@ -51,8 +51,10 @@ final class LogitechWorker: @unchecked Sendable {
     }
 
     func snapshot() -> [LogitechDevice] { sessions.values.map(\.state).sorted { $0.id < $1.id } }
-    func disconnect() {
-        for session in sessions.values { session.restoreButtons() }
+    func disconnect(restoreButtons: Bool = true) {
+        if restoreButtons {
+            for session in sessions.values { session.restoreButtons() }
+        }
         sessions.removeAll()
         for connection in connections { connection.close() }
         connections.removeAll()

@@ -471,6 +471,7 @@ enum L10n {
         return map
             .merging(ModuleTranslations.english) { _, value in value }
             .merging(FeatureTranslations.english) { _, value in value }
+            .merging(NetworkProxyTranslations.english) { _, value in value }
     }()
 }
 

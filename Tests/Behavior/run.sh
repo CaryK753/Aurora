@@ -12,6 +12,7 @@ swiftc -target "$(uname -m)-apple-macos26.0" \
   "$ROOT/Sources/Aurora/Core/RecordingAudioMixer.swift" \
   "$ROOT/Sources/Aurora/Core/FinderElection.swift" \
   "$ROOT/Sources/Aurora/Core/FinderExtensionService.swift" \
+  "$ROOT/Sources/Aurora/Core/FileLockService.swift" \
   "$ROOT/Sources/Aurora/Core/DesktopService.swift" \
   "$ROOT/Sources/Aurora/Core/CommandRunner.swift" \
   "$ROOT/Sources/Aurora/Core/DisplayGamma.swift" \

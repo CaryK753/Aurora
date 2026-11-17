@@ -295,6 +295,31 @@ final class PanelController {
         appMenu.addItem(about)
         appMenu.addItem(.separator())
 
+        let openAurora = NSMenuItem(
+            title: T("打开 Aurora"),
+            action: #selector(AppDelegate.openOverview),
+            keyEquivalent: ""
+        )
+        openAurora.target = NSApp.delegate
+        appMenu.addItem(openAurora)
+
+        let whatsNew = NSMenuItem(
+            title: T("新功能"),
+            action: #selector(AppDelegate.openWhatsNewFromMenu),
+            keyEquivalent: ""
+        )
+        whatsNew.target = NSApp.delegate
+        appMenu.addItem(whatsNew)
+
+        let importItem = NSMenuItem(
+            title: T("导入设置…"),
+            action: #selector(AppDelegate.openImport),
+            keyEquivalent: ""
+        )
+        importItem.target = NSApp.delegate
+        appMenu.addItem(importItem)
+        appMenu.addItem(.separator())
+
         let settings = NSMenuItem(
             title: T("设置…"),
             action: #selector(AppDelegate.settingsFromMenu),

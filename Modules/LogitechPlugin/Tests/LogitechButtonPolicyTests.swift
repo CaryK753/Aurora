@@ -39,6 +39,25 @@ final class LogitechButtonPolicyTests: XCTestCase {
         XCTAssertTrue(service.devices.isEmpty)
         XCTAssertFalse(service.handleNativeButton(3))
     }
+
+    @MainActor
+    func testSystemSleepSuspendsInputUntilDelayedResume() async {
+        let suite = "aurora.logitech.sleep." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let service = LogitechDeviceService(defaults: defaults, autoConnect: false, availabilityProvider: { false })
+        service.suspendForSystemSleep()
+        XCTAssertTrue(service.isSuspendedForSleep)
+        XCTAssertFalse(service.handleNativeButton(3))
+        service.resumeAfterSystemWake(delay: 0.02)
+        service.suspendForSystemSleep()
+        try? await Task.sleep(for: .milliseconds(40))
+        XCTAssertTrue(service.isSuspendedForSleep)
+        service.resumeAfterSystemWake(delay: 0)
+        try? await Task.sleep(for: .milliseconds(20))
+        XCTAssertFalse(service.isSuspendedForSleep)
+        XCTAssertTrue(service.devices.isEmpty)
+    }
     func testSpecialAndReceiverButtonsUseHIDPP() {
         for cid: UInt16 in [0x50, 0x51, 0xC4, 0xD7] {
             XCTAssertNil(LogitechButtonPolicy.nativeButton(cid: cid, transport: "Bluetooth Low Energy"))

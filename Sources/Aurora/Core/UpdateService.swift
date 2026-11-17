@@ -68,8 +68,9 @@ enum UpdateError: LocalizedError {
 
 @MainActor
 final class UpdateService: ObservableObject {
-    /// 发布证书所在的 Team ID。自动更新只接受这个团队签过的包。
-    nonisolated static let expectedTeamID = "6BGNXNX5FT"
+    /// `codesign -dv` 打印的 TeamIdentifier，取证书 OU。
+    /// 本机这张 Apple Development 的名称括号里是 6BGNXNX5FT，OU 实际是 P26UV6YB94。
+    nonisolated static let expectedTeamID = "P26UV6YB94"
     nonisolated static let expectedBundleID = "com.cary.aurora"
     nonisolated static let repository = "CaryK753/Aurora"
     nonisolated static let homepage = URL(string: "https://github.com/CaryK753/Aurora")!

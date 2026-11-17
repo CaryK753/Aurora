@@ -17,6 +17,7 @@ struct FinderAction: Codable {
         case openWithApp
         case runCommand
         case newFile
+        case lockToggle
 
         var fallbackSymbol: String {
             switch self {
@@ -25,6 +26,7 @@ struct FinderAction: Codable {
             case .openWithApp: return "arrow.up.forward.app"
             case .runCommand: return "chevron.left.forwardslash.chevron.right"
             case .newFile: return "doc.badge.plus"
+            case .lockToggle: return "lock.fill"
             }
         }
     }
@@ -74,6 +76,7 @@ final class AuroraFinderExtension: FIFinderSync {
     private var menuActions: [FinderAction] = []
 
     private static let defaults: [FinderAction] = [
+        FinderAction(id: "builtin.lock", title: "锁定/解锁", kind: .lockToggle, argument: "", enabled: true),
         FinderAction(id: "default.copyPath", title: "复制路径", kind: .copyPath, argument: "", enabled: true),
         FinderAction(id: "default.openTerminal", title: "在终端打开", kind: .openTerminal, argument: "", enabled: true),
         FinderAction(id: "default.newFile", title: "新建文本", kind: .newFile, argument: "未命名.txt", enabled: true)
@@ -143,6 +146,10 @@ final class AuroraFinderExtension: FIFinderSync {
         log("menu kind=\(menuKind.rawValue) actions=\(visible.count) source=\(actions.isEmpty ? "defaults" : "config")")
         guard !visible.isEmpty else { return nil }
 
+        let selected = FIFinderSyncController.default().selectedItemURLs() ?? []
+        if visible.contains(where: { $0.kind == .lockToggle }) {
+            noteLockedIcons(selected)
+        }
         let menu = NSMenu(title: "")
         menuActions = []
         for action in visible {
@@ -150,11 +157,18 @@ final class AuroraFinderExtension: FIFinderSync {
             if menuKind == .contextualMenuForContainer || menuKind == .contextualMenuForSidebar {
                 if action.kind != .newFile { continue }
             }
-            let item = NSMenuItem(title: action.title, action: #selector(run(_:)), keyEquivalent: "")
+            var shown = action
+            if action.kind == .lockToggle {
+                let locked = !selected.isEmpty && selected.allSatisfy(Self.isLocked)
+                log("lock items=\(selected.count) locked=\(selected.filter(Self.isLocked).count)")
+                shown.title = locked ? "解锁" : "锁定"
+                shown.symbol = locked ? "lock.open.fill" : "lock.fill"
+            }
+            let item = NSMenuItem(title: shown.title, action: #selector(run(_:)), keyEquivalent: "")
             item.target = self
             item.tag = menuActions.count
             item.representedObject = action.id
-            item.image = action.menuItemImage()
+            item.image = shown.menuItemImage()
             menuActions.append(action)
             menu.addItem(item)
         }
@@ -192,10 +206,32 @@ final class AuroraFinderExtension: FIFinderSync {
             NSPasteboard.general.setString(text, forType: .string)
             log("copied \(targets.count) paths")
 
-        case .openTerminal, .openWithApp, .runCommand, .newFile:
+        case .openTerminal, .openWithApp, .runCommand, .newFile, .lockToggle:
             // 沙盒 appex 里 Process / 跨目录写盘都会被拦，统一交给主 App 执行
             enqueue(action, targets: targets, directory: directory)
         }
+    }
+
+    /// 锁定后的文件以 AURL 开头。文件夹锁完也会变成这种文件。
+    private static func isLocked(_ url: URL) -> Bool {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        return (try? handle.read(upToCount: 4)) == Data("AURL".utf8)
+    }
+
+    /// 把已锁定的路径交给主 App，补上自定义图标。主 App 会再核对文件头。
+    private func noteLockedIcons(_ urls: [URL]) {
+        let locked = urls.filter(Self.isLocked)
+        guard !locked.isEmpty else { return }
+        let url = cacheURL.deletingLastPathComponent().appendingPathComponent("lock-icons.txt")
+        let text = locked.map(\.path).joined(separator: "\n")
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+        DistributedNotificationCenter.default().post(name: Channel.execute, object: nil)
     }
 
     private func requestDirectory() -> URL {

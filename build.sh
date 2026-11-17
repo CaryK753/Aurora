@@ -7,6 +7,7 @@
 #   AURORA_UNIVERSAL 1 = 同时编译 arm64 与 x86_64 并合并为通用二进制
 #   AURORA_INSTALL   1 = 打包后安装到 /Applications（默认 1）
 #   AURORA_SIGN_ID   指定签名证书（默认本机 Apple Development）
+#   AURORA_NE_PROFILE  带 Network Extension 的描述文件。不传时主程序不签这项授权，避免被系统杀掉。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -47,6 +48,7 @@ echo "▸ 组装 .app…"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/$APP_NAME"
+cp "$ROOT/Resources/NetworkThirdPartyNotices.txt" "$APP_DIR/Contents/Resources/NetworkThirdPartyNotices.txt"
 
 cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -91,6 +93,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <string>Aurora 在你开启录屏麦克风时采集声音，音频仅保存到本机录像中。</string>
     <key>NSCameraUsageDescription</key>
     <string>Aurora 在录屏时显示画中画摄像头预览，画面只写进本机的 MP4，不会上传。</string>
+    <key>NSSystemExtensionUsageDescription</key>
+    <string>Aurora 用网络扩展在系统设置的 VPN 列表里提供规则、直连和全局代理。</string>
 </dict>
 </plist>
 PLIST
@@ -178,27 +182,105 @@ cat > "$EXT_DIR/Contents/Info.plist" <<EXTPLIST
 </plist>
 EXTPLIST
 
+echo "▸ 编译网络扩展…"
+TUNNEL_DIR="$APP_DIR/Contents/Library/SystemExtensions/AuroraTunnel.systemextension"
+mkdir -p "$TUNNEL_DIR/Contents/MacOS"
+
+build_tunnel() {  # $1 = 架构，$2 = 输出路径
+  swiftc -O -module-name AuroraTunnel \
+    -target "$1-apple-macos${MIN_MACOS}" \
+    -framework NetworkExtension -framework Network \
+    "$ROOT/Sources/AuroraTunnel/main.swift" \
+    "$ROOT/Sources/AuroraTunnel/TunnelProvider.swift" \
+    "$ROOT/Sources/AuroraTunnel/TCPRelay.swift" \
+    "$ROOT/Sources/Aurora/Core/ProxyRuleEngine.swift" \
+    -o "$2"
+}
+
+if [[ "${AURORA_UNIVERSAL:-0}" == "1" ]]; then
+  TMP_TUNNEL="$(mktemp -d)"
+  build_tunnel arm64 "$TMP_TUNNEL/arm64"
+  build_tunnel x86_64 "$TMP_TUNNEL/x86_64"
+  lipo -create -output "$TUNNEL_DIR/Contents/MacOS/AuroraTunnel" "$TMP_TUNNEL/arm64" "$TMP_TUNNEL/x86_64"
+  rm -rf "$TMP_TUNNEL"
+else
+  build_tunnel "$(uname -m)" "$TUNNEL_DIR/Contents/MacOS/AuroraTunnel"
+fi
+
+cat > "$TUNNEL_DIR/Contents/Info.plist" <<TUNNELPLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleDisplayName</key>
+    <string>Aurora</string>
+    <key>CFBundleExecutable</key>
+    <string>AuroraTunnel</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.cary.aurora.tunnel</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>AuroraTunnel</string>
+    <key>CFBundlePackageType</key>
+    <string>SYSX</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${VERSION}</string>
+    <key>CFBundleVersion</key>
+    <string>${BUILD_NUMBER}</string>
+    <key>CFBundleSupportedPlatforms</key>
+    <array><string>MacOSX</string></array>
+    <key>LSMinimumSystemVersion</key>
+    <string>${MIN_MACOS}</string>
+    <key>NetworkExtension</key>
+    <dict>
+        <key>NEMachServiceName</key>
+        <string>com.cary.aurora.tunnel</string>
+        <key>NEProviderClasses</key>
+        <dict>
+            <key>com.apple.networkextension.app-proxy</key>
+            <string>AuroraTunnelProvider</string>
+        </dict>
+    </dict>
+</dict>
+</plist>
+TUNNELPLIST
+
 echo "▸ 签名…"
 # 用固定证书签名：TCC（辅助功能/屏幕录制/完全磁盘访问）按签名记录授权，
 # ad-hoc 每次重建 cdhash 都变，会导致「已经在系统设置里勾选但仍然未授权」。
 IDENTITY="${AURORA_SIGN_ID:-Apple Development: caryk1208@outlook.com (6BGNXNX5FT)}"
+APP_ENTITLEMENTS="$ROOT/Resources/Aurora.entitlements"
+if [[ -n "${AURORA_NE_PROFILE:-}" && -f "${AURORA_NE_PROFILE}" ]]; then
+  cp "${AURORA_NE_PROFILE}" "$APP_DIR/Contents/embedded.provisionprofile"
+  cp "${AURORA_NE_PROFILE}" "$TUNNEL_DIR/Contents/embedded.provisionprofile"
+  APP_ENTITLEMENTS="$ROOT/Resources/AuroraWithNetwork.entitlements"
+  echo "  使用 Network Extension 描述文件"
+fi
 if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$IDENTITY"; then
-  # 扩展必须单独签名，再签外层 App。
+  # 内层扩展先签，再签外层 App。
   # macOS 26 的 pkd 只接收沙盒化的 appex（不沙盒时 pluginkit -a 静默失败、-m 查不到），
   # 所以这里必须带 app-sandbox；沙盒里不能直接写盘/起 shell，落盘类动作委托主 App 执行。
+  codesign --force --options runtime --timestamp=none \
+    --entitlements "$ROOT/Resources/AuroraTunnel.entitlements" \
+    --sign "$IDENTITY" "$TUNNEL_DIR" 2>&1 | tail -1
   codesign --force --options runtime --timestamp=none \
     --entitlements "$ROOT/Resources/AuroraFinder.entitlements" \
     --sign "$IDENTITY" "$EXT_DIR" 2>&1 | tail -1
   codesign --force --options runtime --timestamp=none \
-    --entitlements "$ROOT/Resources/Aurora.entitlements" \
+    --entitlements "$APP_ENTITLEMENTS" \
     --sign "$IDENTITY" "$APP_DIR" 2>&1 | tail -2
   echo "  已用固定证书签名：$IDENTITY"
 else
   # CI / 没有证书的机器：ad-hoc 签名，功能可用，但 TCC 授权在每次重建后需要重新勾选
   codesign --force --sign - --timestamp=none \
+    --entitlements "$ROOT/Resources/AuroraTunnel.entitlements" "$TUNNEL_DIR"
+  codesign --force --sign - --timestamp=none \
     --entitlements "$ROOT/Resources/AuroraFinder.entitlements" "$EXT_DIR"
   codesign --force --sign - --timestamp=none \
-    --entitlements "$ROOT/Resources/Aurora.entitlements" "$APP_DIR"
+    --entitlements "$APP_ENTITLEMENTS" "$APP_DIR"
   echo "  ⚠️ 未找到固定证书，退回 ad-hoc（权限授权在重建后会失效）"
 fi
 

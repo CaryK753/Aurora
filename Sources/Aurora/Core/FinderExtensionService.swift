@@ -10,7 +10,7 @@ import FinderSync
 
 struct FinderAction: Identifiable, Codable, Equatable {
     enum Kind: String, Codable, CaseIterable, Identifiable {
-        case copyPath, openTerminal, openWithApp, runCommand, newFile
+        case copyPath, openTerminal, openWithApp, runCommand, newFile, lockToggle
 
         var id: String { rawValue }
 
@@ -21,6 +21,7 @@ struct FinderAction: Identifiable, Codable, Equatable {
             case .openWithApp: return T("用指定 App 打开")
             case .runCommand: return T("运行命令")
             case .newFile: return T("新建文件")
+            case .lockToggle: return T("锁定/解锁")
             }
         }
 
@@ -31,6 +32,7 @@ struct FinderAction: Identifiable, Codable, Equatable {
             case .openWithApp: return "arrow.up.forward.app"
             case .runCommand: return "chevron.left.forwardslash.chevron.right"
             case .newFile: return "doc.badge.plus"
+            case .lockToggle: return "lock.fill"
             }
         }
 
@@ -42,6 +44,7 @@ struct FinderAction: Identifiable, Codable, Equatable {
             case .openWithApp: return T("用指定的 App 打开选中项")
             case .runCommand: return T("对选中项执行 shell 命令")
             case .newFile: return T("在当前文件夹新建文件")
+            case .lockToggle: return T("加密选中的文件或文件夹，解锁时验证密码或 Touch ID")
             }
         }
 
@@ -52,6 +55,7 @@ struct FinderAction: Identifiable, Codable, Equatable {
             case .openWithApp: return T("App 路径")
             case .runCommand: return T("shell 命令")
             case .newFile: return T("文件名，例如 未命名.md")
+            case .lockToggle: return nil
             }
         }
     }
@@ -84,7 +88,8 @@ struct FinderAction: Identifiable, Codable, Equatable {
         "arrow.up.forward.app", "link", "clipboard", "archivebox",
         "photo.on.rectangle", "music.note", "video.fill", "globe",
         "mail", "message", "folder", "externaldrive",
-        "wand.and.stars", "tag", "square.and.arrow.up.on.square", "tray.full"
+        "wand.and.stars", "tag", "square.and.arrow.up.on.square", "tray.full",
+        "lock.fill", "lock.open.fill"
     ]
 }
 
@@ -336,7 +341,15 @@ final class FinderExtensionService: ObservableObject {
         }
         actions = unique
         savedActions = unique
-        if unique.count != parsed.count { save() }
+        var changed = unique.count != parsed.count
+        // 合法空配置代表用户明确删除了全部菜单，不能借迁移把内置项强行加回来。
+        if !actions.isEmpty, !actions.contains(where: { $0.kind == .lockToggle }) {
+            var builtin = FinderAction.make(.lockToggle)
+            builtin.id = "builtin.lock"
+            actions.insert(builtin, at: 0)
+            changed = true
+        }
+        if changed { save() }
     }
 
     private func save() {
@@ -372,6 +385,7 @@ final class FinderExtensionService: ObservableObject {
 
     /// 扩展把请求写成文件，这里统一消费；通知只是「尽快看一下」的提示
     private func processPendingRequests() {
+        refreshLockIcons()
         let manager = FileManager.default
         guard let files = try? manager.contentsOfDirectory(
             at: requestDirectory,
@@ -460,11 +474,39 @@ final class FinderExtensionService: ObservableObject {
 
         case .copyPath:
             break
+
+        case .lockToggle:
+            let urls = selection.compactMap { FinderRequestGuard.existingItem($0) }
+            if FileLockService.needsNotice(urls), let onLockNotice {
+                onLockNotice(urls)
+                return
+            }
+            FileLockService.toggle(urls) { [weak self] message in
+                self?.onStatus?(message)
+            }
         }
     }
 
+    /// 首次锁定前弹出说明。只在确实要加密新内容时走这里。
+    var onLockNotice: (([URL]) -> Void)?
     /// 首次启用时给三个最常用的动作，避免空白页
+    var onStatus: ((String) -> Void)?
+
+    /// 扩展只能判断文件头，图标由未沙盒的主 App 来设。路径不可信，设之前会再核对 AURL。
+    private func refreshLockIcons() {
+        let url = storeURL.deletingLastPathComponent().appendingPathComponent("lock-icons.txt")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        try? FileManager.default.removeItem(at: url)
+        let urls = text.split(separator: "\n").map { URL(fileURLWithPath: String($0)) }
+        FileLockService.applyLockedIcons(urls)
+    }
+
     private static let seed: [FinderAction] = [
+        {
+            var builtin = FinderAction.make(.lockToggle)
+            builtin.id = "builtin.lock"
+            return builtin
+        }(),
         .make(.copyPath, title: T("复制路径")),
         .make(.openTerminal, title: T("在终端打开")),
         .make(.newFile, title: T("新建文本"), argument: "未命名.txt")

@@ -13,6 +13,7 @@ public final class LogitechDeviceService: ObservableObject {
     @Published public private(set) var defaultProfiles: [String: UUID] = [:]
     @Published public private(set) var isBusy = false
     @Published public private(set) var isEnabled: Bool = false
+    @Published public private(set) var isSuspendedForSleep = false
     @Published public var selectedID: String? {
         didSet {
             guard selectedID != oldValue else { return }
@@ -69,7 +70,7 @@ public final class LogitechDeviceService: ObservableObject {
         if autoConnect {
             timer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
                 Task { @MainActor in
-                    guard let self else { return }
+                    guard let self, !self.isSuspendedForSleep else { return }
                     self.updateAvailability()
                     guard self.isEnabled, self.moduleEnabled, !self.isBusy else { return }
                     if self.isAvailable {
@@ -196,7 +197,7 @@ public final class LogitechDeviceService: ObservableObject {
 
     /// 原生事件在 session tap 处理，优先于普通全局映射，吞掉配对的按下和抬起。
     public func handleNativeButton(_ button: Int) -> Bool {
-        guard isEnabled, moduleEnabled else { return false }
+        guard isEnabled, moduleEnabled, !isSuspendedForSleep else { return false }
         for device in devices {
             guard let control = device.buttons.first(where: {
                 LogitechButtonPolicy.nativeButton(cid: $0.id, transport: device.transport) == button
@@ -232,7 +233,7 @@ public final class LogitechDeviceService: ObservableObject {
         if enabled && isEnabled { connect() } else { disconnect() }
     }
     public func connect() {
-        guard isEnabled, moduleEnabled, !isBusy else { return }
+        guard isEnabled, moduleEnabled, !isSuspendedForSleep, !isBusy else { return }
         generation += 1; let token = generation
         isBusy = true; message = nil; owned.removeAll(); autoApplied.removeAll()
         let worker = worker
@@ -257,6 +258,32 @@ public final class LogitechDeviceService: ObservableObject {
     private func disconnect() {
         generation += 1; devices = []; owned.removeAll(); isBusy = false; activeProfile = nil; autoApplied.removeAll()
         let worker = worker; worker.queue.async { worker.disconnect() }
+    }
+    /// 睡眠前只关闭 HID 通道，不向鼠标发送恢复或配置指令，避免蓝牙设备反向唤醒电脑。
+    public func suspendForSystemSleep() {
+        if isSuspendedForSleep {
+            // 取消上一轮唤醒安排，保证再次睡眠后不会被旧延迟任务重新连接。
+            generation += 1
+            return
+        }
+        isSuspendedForSleep = true
+        generation += 1
+        devices = []; owned.removeAll(); isBusy = false; activeProfile = nil; autoApplied.removeAll()
+        let worker = worker
+        worker.queue.async { worker.disconnect(restoreButtons: false) }
+    }
+
+    /// 系统唤醒稳定后再探测设备，避免刚恢复时反复切换连接状态。
+    public func resumeAfterSystemWake(delay: TimeInterval = 4) {
+        guard isSuspendedForSleep else { return }
+        generation += 1
+        let token = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, token == self.generation else { return }
+            self.isSuspendedForSleep = false
+            self.updateAvailability()
+            if self.isEnabled && self.moduleEnabled && self.isAvailable { self.connect() }
+        }
     }
     public func reset() {
         disconnect()
@@ -379,7 +406,7 @@ public final class LogitechDeviceService: ObservableObject {
         success: @escaping () -> Void = {},
         failure: ((String) -> Void)? = nil
     ) {
-        guard isEnabled, moduleEnabled, !isBusy else { failure?(message ?? ""); return }
+        guard isEnabled, moduleEnabled, !isSuspendedForSleep, !isBusy else { failure?(message ?? ""); return }
         isBusy = true; message = nil
         let worker = worker; let token = generation
         worker.queue.async { [weak self] in

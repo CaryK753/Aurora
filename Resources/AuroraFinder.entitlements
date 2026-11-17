@@ -6,5 +6,10 @@
     <true/>
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
+    <!-- 右键菜单要读文件头判断「锁定 / 解锁」。沙盒默认读不到用户选中的文件，只给只读。 -->
+    <key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+    <array>
+        <string>/</string>
+    </array>
 </dict>
 </plist>

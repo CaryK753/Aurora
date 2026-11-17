@@ -188,6 +188,15 @@ if CommandLine.arguments.contains("--permission-probe") {
 // Swift 包的 main 入口：以 accessory 模式常驻菜单栏
 var auroraDelegate: AppDelegate?
 
+if CommandLine.arguments.contains("--file-lock-test") {
+    if let error = FileLockService.selfTest() {
+        fputs(error + "\n", stderr)
+        exit(1)
+    }
+    print("file lock ok")
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--update-script") {
     // 开发用：打印替换脚本。路径和团队标识由调用方作为参数传入，不写进脚本正文。
     print(UpdateService.installScript())

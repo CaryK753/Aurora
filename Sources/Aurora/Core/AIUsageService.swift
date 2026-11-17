@@ -6,6 +6,7 @@
 //  · Claude Code  ~/.claude/projects/**/*.jsonl        → message.usage
 //  · opencode     ~/.local/share/opencode/opencode.db  → message.data.tokens（JSON1 聚合）
 //  · WorkBuddy    ~/.workbuddy/workbuddy.db            → session_usage
+//  · Cursor       ~/.cursor/projects/**/agent-transcripts/*.jsonl → 本地 Agent 会话（当前日志不含 token 数）
 //  · Antigravity  ~/.gemini/antigravity                → 加密库，只能检测安装
 //  · DeepSeek     ~/Library/Application Support/@deepseek-ai/dsh-desktop → 无用量文件
 //  · 桌面客户端   ChatGPT / Claude.app                 → 无本地用量
@@ -93,6 +94,7 @@ final class AIUsageService: ObservableObject {
                 Self.scanClaude(),
                 Self.scanOpenCode(),
                 Self.scanWorkBuddy(),
+                CursorUsageScanner.scan(),
                 Self.scanAntigravity(),
                 Self.scanDeepSeek(),
                 Self.scanDesktopApp(
