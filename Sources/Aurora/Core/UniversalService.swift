@@ -397,7 +397,7 @@ final class UniversalService: ObservableObject {
     }
 
     /// codesign -dv / -d -r- 的合并文本。有证书身份就拒绝，临时签名和未签名可以继续。
-    static func refusalForSignature(_ text: String) -> String? {
+    nonisolated static func refusalForSignature(_ text: String) -> String? {
         let lower = text.lowercased()
         if lower.contains("authority=") { return T("带开发者标识，重新签名后会失效") }
         if lower.contains("certificate leaf") || lower.contains("certificate 1") {

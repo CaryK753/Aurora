@@ -706,7 +706,7 @@ final class UpdateService: ObservableObject {
 }
 
 /// 单纯用来把下载进度送回主线程
-private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+private final class ProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let onProgress: @Sendable (Double) -> Void
 
     init(onProgress: @escaping @Sendable (Double) -> Void) {
