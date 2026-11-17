@@ -1160,6 +1160,57 @@ enum SelfTest {
         return writer.status == .completed
     }
 
+    /// 不碰系统的纯逻辑：校验、残留匹配、构建产物、请求路径。
+    static func securityInvariants() -> Int32 {
+        var failures = 0
+        func check(_ name: String, _ condition: Bool, _ detail: String) {
+            print(condition ? "✓ \(name)：\(detail)" : "✗ \(name)：\(detail)")
+            if !condition { failures += 1 }
+        }
+
+        let script = UpdateService.installScript()
+        check("更新脚本不拼接路径", script.contains("APP=\"$1\"") && script.contains("TEAM=\"$4\"") && !script.contains("APP=\"\\("), "参数传入")
+        check("校验和能解析", UpdateSecurity.parseSHA256("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  Aurora.zip\n") != nil, "64 位十六进制")
+        check("校验和拒绝短串", UpdateSecurity.parseSHA256("abcd  Aurora.zip") == nil, "过短")
+        check("下载主机", UpdateSecurity.allowed(URL(string: "https://github.com/CaryK753/Aurora/releases/download/v1/Aurora.zip")), "github.com")
+        check("拒绝其它主机", !UpdateSecurity.allowed(URL(string: "https://example.com/Aurora.zip")), "example.com")
+        check("版本号去掉注入字符", UpdateSecurity.safeVersion("1.2.0\";rm") == "1.2.0rm", UpdateSecurity.safeVersion("1.2.0\";rm"))
+
+        check("开发者签名拒绝瘦身", UniversalService.refusalForSignature("Authority=Developer ID Application: Example (TEAMID)\n") != nil, "Authority")
+        check("临时签名允许瘦身", UniversalService.refusalForSignature("Signature=adhoc\nTeamIdentifier=not set\n") == nil, "adhoc")
+        check("本机架构", MachOBinary.hostArchitecture == "arm64" || MachOBinary.hostArchitecture == "x86_64", MachOBinary.hostArchitecture)
+
+        let bundleID = "com.example.demo"
+        check("bundle id 精确匹配", LeftoverMatcher.bundleMatch(candidate: "com.example.demo", bundleID: bundleID), "同名")
+        check("bundle id 带后缀", LeftoverMatcher.bundleMatch(candidate: "com.example.demo.helper.plist", bundleID: bundleID), "helper")
+        check("短 id 不匹配", !LeftoverMatcher.bundleMatch(candidate: "com.apple.mail", bundleID: "mail"), "mail")
+        check("子串不匹配", !LeftoverMatcher.bundleMatch(candidate: "notcom.example.demo", bundleID: bundleID), "前缀粘连")
+        check("公司前缀不扫全家桶", !LeftoverMatcher.bundleMatch(candidate: "com.microsoft.Outlook", bundleID: "com.microsoft"), "一段 id")
+        check("显示名 Code 不匹配", LeftoverMatcher.kind(candidate: "Code", bundleID: bundleID, displayName: "Code", allowsName: true) == nil, "过短")
+        check("显示名 Microsoft 不匹配", LeftoverMatcher.kind(candidate: "Microsoft", bundleID: "com.example.other", displayName: "Microsoft", allowsName: true) == nil, "拒绝名单")
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        check("登录项目录敏感", FinderRequestGuard.isSensitive(home + "/Library/LaunchAgents"), "LaunchAgents")
+        check("普通目录不敏感", !FinderRequestGuard.isSensitive(home + "/Documents"), "Documents")
+
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("aurora-sec-\(UUID().uuidString)", isDirectory: true)
+        let cargo = root.appendingPathComponent("proj/target", isDirectory: true)
+        let decoy = root.appendingPathComponent("docs/target", isDirectory: true)
+        try? FileManager.default.createDirectory(at: cargo, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: true)
+        try? Data("".utf8).write(to: root.appendingPathComponent("proj/Cargo.toml"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        check("Cargo target 算产物", DevCleanupService.isBuildArtifact(cargo.path), cargo.path)
+        check("普通 target 不算", !DevCleanupService.isBuildArtifact(decoy.path), decoy.path)
+        let expectedDir = URL(fileURLWithPath: root.path).resolvingSymlinksInPath().standardizedFileURL.path
+        if let safe = FinderRequestGuard.safeDirectory(root.path) {
+            check("临时目录可写", safe == expectedDir, safe)
+        } else {
+            check("临时目录可写", false, root.path)
+        }
+
+        return Int32(failures)
+    }
+
     /// 通用二进制：造一个假的「通用 App」，走一遍扫描 → lipo → 重签 → 校验
     static func universalThin() -> Int32 {
         let fm = FileManager.default
@@ -1182,10 +1233,23 @@ enum SelfTest {
             "CFBundleExecutable": "AuroraThinTest",
             "CFBundleIdentifier": "com.cary.aurora.thintest",
             "CFBundleName": "AuroraThinTest",
-            "CFBundlePackageType": "APPL"
+            "CFBundlePackageType": "APPL",
+            "CFBundleVersion": "1",
+            "CFBundleShortVersionString": "1.0"
         ]
         (plist as NSDictionary).write(to: bundle.appendingPathComponent("Contents/Info.plist"), atomically: true)
         defer { try? fm.removeItem(at: bundle) }
+
+        // 素材来自已签名的 Chrome。先改成临时签名，才落在允许瘦身的范围内。
+        let signed = CommandRunner.runSync(
+            "/usr/bin/codesign",
+            ["--force", "--sign", "-", "--timestamp=none", bundle.path],
+            timeout: 180
+        )
+        guard signed.ok else {
+            print("✗ 无法把测试应用签成临时签名：\(signed.error)")
+            return 1
+        }
 
         let binary = macOS.appendingPathComponent("AuroraThinTest").path
         guard let before = MachOBinary.slices(at: binary)?.map(\.architecture).sorted() else {
@@ -1225,14 +1289,29 @@ enum SelfTest {
             return 1
         }
 
+        let host = MachOBinary.hostArchitecture
         let after = MachOBinary.slices(at: binary)?.map(\.architecture).sorted() ?? []
         let verify = CommandRunner.runSync("/usr/bin/codesign", ["--verify", bundle.path], timeout: 30)
-        print("瘦身后架构：\(after) 签名校验=\(verify.ok ? "通过" : "失败")")
-        let single = after == ["arm64"] && verify.ok
+        print("瘦身后架构：\(after) 签名校验=\(verify.ok ? "通过" : "失败") 本机=\(host)")
+        let single = after == [host] && verify.ok
 
         // 再来一遍，走「勾选 + 批量」的路径。
         // 只勾测试应用本身：批量接口会照着 selection 直接动手，绝不能把真实 App 选进来
-        try? fm.copyItem(atPath: source, toPath: macOS.appendingPathComponent("AuroraThinTest").path)
+        let binaryURL = macOS.appendingPathComponent("AuroraThinTest")
+        try? fm.removeItem(at: binaryURL)
+        guard (try? fm.copyItem(atPath: source, toPath: binaryURL.path)) != nil else {
+            print("✗ 无法恢复测试二进制")
+            return 1
+        }
+        let resigned = CommandRunner.runSync(
+            "/usr/bin/codesign",
+            ["--force", "--sign", "-", "--timestamp=none", bundle.path],
+            timeout: 180
+        )
+        guard resigned.ok else {
+            print("✗ 批量前重新签名失败")
+            return 1
+        }
         var batchThinned = -1
         var batchSelected = -1
         var batchOnlyTestApp = false
@@ -1252,7 +1331,7 @@ enum SelfTest {
         let batchArch = MachOBinary.slices(at: binary)?.map(\.architecture).sorted() ?? []
         print("批量：勾选 \(batchSelected) 项（只有测试应用：\(batchOnlyTestApp ? "是" : "否")），瘦身 \(batchThinned) 项，剩余架构 \(batchArch)")
 
-        let ok = single && batchOnlyTestApp && batchThinned == 1 && batchArch == ["arm64"]
+        let ok = single && batchOnlyTestApp && batchThinned == 1 && batchArch == [host]
         print(ok ? "✓ 通用二进制瘦身链路可用（单个 + 全选批量）" : "✗ 瘦身结果不符合预期")
         return ok ? 0 : 1
     }
@@ -1501,6 +1580,7 @@ enum SelfTest {
 
         print("Aurora 自检 · \(ProcessInfo.processInfo.operatingSystemVersionString)")
         print("---------------------------------------------")
+        failures += securityInvariants()
 
         // 显示器
         let display = DisplayService()

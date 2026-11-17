@@ -2,7 +2,7 @@
 //  Aurora — 应用管理：列出已装应用、估体积、找残留、卸载到废纸篓
 //
 //  思路参考 Pearcleaner / PureMac 的做法，但代码自己写：
-//  · 残留只按 bundle id 与「完全同名的目录」匹配，宁可漏也不误删
+//  · 残留按 bundle id 的路径边界匹配。显示名只在缓存类目录里作参考，且默认不勾选。
 //  · 卸载 = 应用本体 + 勾选的残留一起进废纸篓，随时可以放回
 //  · Apple 自带应用（com.apple.*）与系统目录一律拒绝
 
@@ -79,51 +79,46 @@ final class AppInventoryService: ObservableObject {
         }.value
     }
 
-    private nonisolated static let leftoverDirectories: [(String, String)] = [
-        ("Library/Caches", "缓存"),
-        ("Library/Preferences", "偏好"),
-        ("Library/Application Support", "支持文件"),
-        ("Library/Saved Application State", "窗口状态"),
-        ("Library/HTTPStorages", "网络缓存"),
-        ("Library/WebKit", "网页数据"),
-        ("Library/Logs", "日志"),
-        ("Library/LaunchAgents", "登录项"),
-        ("Library/Containers", "沙盒容器"),
-        ("Library/Group Containers", "共享容器"),
-        ("Library/Application Scripts", "脚本")
+    private nonisolated static let leftoverDirectories: [(String, String, Bool)] = [
+        ("Library/Caches", "缓存", true),
+        ("Library/Preferences", "偏好", false),
+        ("Library/Application Support", "支持文件", true),
+        ("Library/Saved Application State", "窗口状态", true),
+        ("Library/HTTPStorages", "网络缓存", true),
+        ("Library/WebKit", "网页数据", true),
+        ("Library/Logs", "日志", true),
+        ("Library/LaunchAgents", "登录项", false),
+        ("Library/Containers", "沙盒容器", false),
+        ("Library/Group Containers", "共享容器", false),
+        ("Library/Application Scripts", "脚本", false)
     ]
 
     private nonisolated static func findLeftovers(bundleID: String, name: String, home: URL) -> [AppLeftover] {
         let fm = FileManager.default
         var found: [AppLeftover] = []
-        for (relative, label) in leftoverDirectories {
+        for (relative, label, allowsName) in leftoverDirectories {
             let directory = home.appendingPathComponent(relative)
             guard let entries = try? fm.contentsOfDirectory(at: directory,
                                                             includingPropertiesForKeys: nil,
                                                             options: [.skipsHiddenFiles]) else { continue }
-            for entry in entries where matches(entry.lastPathComponent, bundleID: bundleID, name: name) {
-                // 目录里再按 bundle id 细分时，命中直接收；否则只收同名项
+            for entry in entries {
+                guard let kind = LeftoverMatcher.kind(
+                    candidate: entry.lastPathComponent,
+                    bundleID: bundleID,
+                    displayName: name,
+                    allowsName: allowsName
+                ) else { continue }
                 found.append(AppLeftover(
                     id: entry.path,
                     path: entry.path,
                     category: label,
-                    bytes: size(of: entry.path)
+                    bytes: size(of: entry.path),
+                    // 只按 bundle id 命中的默认勾上。同名目录要用户自己点，避免 Code / Google 这类名字带走别的应用的数据。
+                    selected: kind == .bundle
                 ))
             }
         }
         return found.sorted { $0.bytes > $1.bytes }
-    }
-
-    private nonisolated static func matches(_ candidate: String, bundleID: String, name: String) -> Bool {
-        let lower = candidate.lowercased()
-        if !bundleID.isEmpty, lower.contains(bundleID.lowercased()) { return true }
-        let normalized = name.lowercased().replacingOccurrences(of: " ", with: "")
-        guard !normalized.isEmpty else { return false }
-        let candidateNormalized = lower.replacingOccurrences(of: " ", with: "")
-        // 同名目录只认「完全一致」或「名字 + 扩展名」，避免 "Notes" 命中一堆东西
-        if candidateNormalized == normalized { return true }
-        let base = (candidateNormalized as NSString).deletingPathExtension
-        return base == normalized
     }
 
     // MARK: - 卸载
@@ -231,4 +226,54 @@ final class AppInventoryService: ObservableObject {
               let kilobytes = Int64(last.split(separator: "\t").first ?? "") else { return 0 }
         return kilobytes * 1024
     }
+}
+
+enum LeftoverMatchKind: Equatable {
+    case bundle
+    case name
+}
+
+/// 残留文件名怎么对上一个应用。bundle id 要按路径组件对齐，不能用子串。
+enum LeftoverMatcher {
+    /// 至少 `com.company.app` 这种三段名字，避免 `mail`、`com.microsoft` 扫到一串无关目录。
+    static func kind(candidate: String, bundleID: String, displayName: String, allowsName: Bool) -> LeftoverMatchKind? {
+        if bundleMatch(candidate: candidate, bundleID: bundleID) { return .bundle }
+        if allowsName, nameMatch(candidate: candidate, displayName: displayName) { return .name }
+        return nil
+    }
+
+    static func bundleMatch(candidate: String, bundleID: String) -> Bool {
+        let id = bundleID.lowercased()
+        guard id.split(separator: ".").count >= 3 else { return false }
+        let base = stem(candidate)
+        if base == id { return true }
+        if base.hasPrefix(id + ".") || base.hasPrefix(id + "-") { return true }
+        let group = "group." + id
+        if base == group || base.hasPrefix(group + ".") { return true }
+        return false
+    }
+
+    static func nameMatch(candidate: String, displayName: String) -> Bool {
+        let normalized = normalize(displayName)
+        guard normalized.count >= 8, !deniedNames.contains(normalized) else { return false }
+        return normalize(stem(candidate)) == normalized
+    }
+
+    private static func stem(_ candidate: String) -> String {
+        let lower = candidate.lowercased()
+        if lower.hasSuffix(".plist") { return String(lower.dropLast(".plist".count)) }
+        return lower
+    }
+
+    private static func normalize(_ text: String) -> String {
+        text.lowercased().filter { !$0.isWhitespace }
+    }
+
+    /// 这些名字会撞上别的应用整份资料（配置、登录状态、缓存）。
+    private static let deniedNames: Set<String> = [
+        "google", "microsoft", "mozilla", "firefox", "chrome", "chromium", "slack", "docker",
+        "adobe", "dropbox", "spotify", "zoom", "notion", "discord", "jetbrains", "android",
+        "python", "office", "onedrive", "wechat", "telegram", "whatsapp", "figma", "electron",
+        "github", "cursor", "obsidian", "steam", "visualstudiocode", "vscode"
+    ]
 }

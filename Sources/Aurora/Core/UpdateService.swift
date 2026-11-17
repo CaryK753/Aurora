@@ -7,6 +7,7 @@
 
 import AppKit
 import Combine
+import CryptoKit
 
 /// 远端 release，只保留 Aurora 用得到的字段
 struct AuroraRelease: Equatable {
@@ -17,6 +18,8 @@ struct AuroraRelease: Equatable {
     var asset: URL?
     var assetName: String?
     var page: URL
+    /// 与 zip 一起发布的 SHA256 清单。没有这份清单就不自动安装。
+    var checksum: URL? = nil
 }
 
 enum UpdatePhase: Equatable {
@@ -42,6 +45,9 @@ enum UpdateError: LocalizedError {
     case decode
     case noAsset
     case unpack
+    case checksum
+    case signature
+    case untrusted
 
     var errorDescription: String? {
         switch self {
@@ -53,12 +59,18 @@ enum UpdateError: LocalizedError {
         case .decode: return T("返回内容无法解析")
         case .noAsset: return T("这个版本没有可下载的安装包")
         case .unpack: return T("安装包解压失败")
+        case .checksum: return T("安装包校验失败，已取消更新")
+        case .signature: return T("安装包签名与 Aurora 不符，已取消更新")
+        case .untrusted: return T("这个版本没有可校验的安装包")
         }
     }
 }
 
 @MainActor
 final class UpdateService: ObservableObject {
+    /// 发布证书所在的 Team ID。自动更新只接受这个团队签过的包。
+    nonisolated static let expectedTeamID = "6BGNXNX5FT"
+    nonisolated static let expectedBundleID = "com.cary.aurora"
     nonisolated static let repository = "CaryK753/Aurora"
     nonisolated static let homepage = URL(string: "https://github.com/CaryK753/Aurora")!
     nonisolated static let releasesPage = URL(string: "https://github.com/CaryK753/Aurora/releases")!
@@ -188,16 +200,14 @@ final class UpdateService: ObservableObject {
             phase = .ready(release)
             return
         }
+        guard let checksumURL = release.checksum else { throw UpdateError.untrusted }
+        guard UpdateSecurity.allowed(asset), UpdateSecurity.allowed(checksumURL) else { throw UpdateError.untrusted }
         phase = .downloading(0)
 
-        let directory = Self.updatesDirectory.appendingPathComponent(release.version, isDirectory: true)
+        let directory = Self.updatesDirectory.appendingPathComponent(UpdateSecurity.safeVersion(release.version), isDirectory: true)
         let manager = FileManager.default
         try? manager.removeItem(at: directory)
         try manager.createDirectory(at: directory, withIntermediateDirectories: true)
-
-        var request = URLRequest(url: asset)
-        request.setValue("Aurora-macOS", forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = 60
 
         let delegate = ProgressDelegate { progress in
             Task { @MainActor [weak self] in
@@ -205,14 +215,42 @@ final class UpdateService: ObservableObject {
                 self.phase = .downloading(progress)
             }
         }
+
+        var request = URLRequest(url: asset)
+        request.setValue("Aurora-macOS", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 60
         let (temp, response) = try await URLSession.shared.download(for: request, delegate: delegate)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              UpdateSecurity.allowed(response.url) else {
             throw UpdateError.server((response as? HTTPURLResponse)?.statusCode ?? 0)
         }
 
-        let archive = directory.appendingPathComponent(release.assetName ?? "Aurora.zip")
+        // 资源名来自发布页，只留最后一段文件名，避免 `../` 把 zip 写到更新目录外面。
+        let assetFile = ((release.assetName ?? "Aurora.zip") as NSString).lastPathComponent
+        guard !assetFile.isEmpty, assetFile != ".", assetFile != "..",
+              assetFile.lowercased().hasSuffix(".zip"),
+              !assetFile.lowercased().hasSuffix(".zip.sha256") else {
+            try? manager.removeItem(at: temp)
+            try? manager.removeItem(at: directory)
+            throw UpdateError.untrusted
+        }
+        let archive = directory.appendingPathComponent(assetFile)
         try? manager.removeItem(at: archive)
         try manager.moveItem(at: temp, to: archive)
+
+        var sumRequest = URLRequest(url: checksumURL)
+        sumRequest.setValue("Aurora-macOS", forHTTPHeaderField: "User-Agent")
+        sumRequest.timeoutInterval = 20
+        let (sumTemp, sumResponse) = try await URLSession.shared.download(for: sumRequest, delegate: delegate)
+        let sumData = try? Data(contentsOf: sumTemp)
+        let expected = sumData.flatMap { String(data: $0, encoding: .utf8) }.flatMap(UpdateSecurity.parseSHA256)
+        let actual = try? UpdateSecurity.sha256Hex(of: archive)
+        guard let sumHTTP = sumResponse as? HTTPURLResponse, sumHTTP.statusCode == 200,
+              UpdateSecurity.allowed(sumResponse.url),
+              let expected, actual == expected else {
+            try? manager.removeItem(at: directory)
+            throw UpdateError.checksum
+        }
 
         let unpacked = directory.appendingPathComponent("unpacked", isDirectory: true)
         try? manager.removeItem(at: unpacked)
@@ -220,10 +258,12 @@ final class UpdateService: ObservableObject {
         try Self.unzip(archive, to: unpacked)
 
         guard let app = Self.findApp(in: unpacked) else { throw UpdateError.unpack }
+        guard Self.acceptedBuild(app) else {
+            try? manager.removeItem(at: directory)
+            stagedApp = nil
+            throw UpdateError.signature
+        }
         stagedApp = app
-
-        // 去掉隔离标记，否则替换后首次启动会被 Gatekeeper 拦住
-        _ = Self.shell("/usr/bin/xattr", ["-dr", "com.apple.quarantine", app.path])
 
         phase = .ready(release)
         if !silent, declinedVersion != release.version {
@@ -287,8 +327,13 @@ final class UpdateService: ObservableObject {
             return
         }
 
+        guard Self.acceptedBuild(staged) else {
+            phase = .failed(UpdateError.signature.localizedDescription)
+            return
+        }
+
         phase = .installing
-        let script = Self.installScript(target: target, staged: staged)
+        let script = Self.installScript()
         let scriptURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("aurora-update-\(UUID().uuidString).sh")
         do {
@@ -301,7 +346,13 @@ final class UpdateService: ObservableObject {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = [scriptURL.path]
+        process.arguments = [
+            scriptURL.path,
+            target.path,
+            staged.path,
+            String(ProcessInfo.processInfo.processIdentifier),
+            Self.expectedTeamID
+        ]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do {
@@ -317,45 +368,94 @@ final class UpdateService: ObservableObject {
         }
     }
 
-    /// 等 Aurora 退出 → 备份旧包 → ditto 新包 → 清隔离属性 → 重新打开
-    nonisolated static func installScript(target: URL, staged: URL, pid: Int32? = nil) -> String {
-        let app = target.path
-        let src = staged.path
-        let pid = pid ?? ProcessInfo.processInfo.processIdentifier
+    /// 等 Aurora 退出 → 再验一次签名和 Team ID → 备份旧包 → ditto 新包 → 重新打开。
+    /// 路径只从参数读，不拼进脚本，避免安装包文件名变成 shell。
+    nonisolated static func installScript() -> String {
+        let bundleID = expectedBundleID
         return """
         #!/bin/sh
+        set -eu
         LOG=/tmp/aurora-update.log
         exec >>"$LOG" 2>&1
-        echo "=== $(date) update \(app) <- \(src) pid=\(pid)"
-        APP="\(app)"
-        SRC="\(src)"
-        PID=\(pid)
+        echo "=== $(date) update"
+        APP="$1"
+        SRC="$2"
+        PID="$3"
+        TEAM="$4"
+        finish() {
+          if [ -n "$APP" ] && [ -d "$APP" ]; then
+            open "$APP" || true
+          fi
+        }
+        trap finish EXIT
         i=0
-        while kill -0 "$PID" 2>/dev/null && [ $i -lt 120 ]; do
+        while kill -0 "$PID" 2>/dev/null && [ "$i" -lt 120 ]; do
           sleep 0.5
           i=$((i+1))
         done
         # 等 FinderSync 扩展也退出，避免替换时 appex 还映射着旧文件
-        pkill -x AuroraFinder 2>/dev/null
+        pkill -x AuroraFinder 2>/dev/null || true
         sleep 0.4
-        if [ -d "$SRC" ]; then
-          rm -rf "$APP.aurora-old"
-          if mv "$APP" "$APP.aurora-old" 2>/dev/null; then
-            if ditto "$SRC" "$APP"; then
-              xattr -dr com.apple.quarantine "$APP" 2>/dev/null
+        if [ ! -d "$SRC" ]; then
+          echo "missing source"
+          exit 1
+        fi
+        /usr/bin/codesign --verify --deep --strict "$SRC"
+        BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SRC/Contents/Info.plist")
+        if [ "$BID" != "\(bundleID)" ]; then
+          echo "unexpected bundle id $BID"
+          exit 1
+        fi
+        ACTUAL=$(/usr/bin/codesign -dv "$SRC" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2; exit}')
+        if [ "$ACTUAL" != "$TEAM" ]; then
+          echo "unexpected team $ACTUAL"
+          exit 1
+        fi
+        xattr -dr com.apple.quarantine "$SRC" 2>/dev/null || true
+        rm -rf "$APP.aurora-old"
+        if mv "$APP" "$APP.aurora-old" 2>/dev/null; then
+          if ditto "$SRC" "$APP"; then
+            xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
+            if /usr/bin/codesign --verify --deep --strict "$APP"; then
               rm -rf "$APP.aurora-old"
               echo "replaced ok"
             else
-              echo "copy failed, rolling back"
+              echo "verify failed, rolling back"
               rm -rf "$APP"
               mv "$APP.aurora-old" "$APP"
             fi
           else
-            echo "cannot move old app (permission)"
+            echo "copy failed, rolling back"
+            rm -rf "$APP"
+            mv "$APP.aurora-old" "$APP"
           fi
+        else
+          echo "cannot move old app (permission)"
         fi
-        open "$APP"
         """
+    }
+
+    /// 解压后的包必须是 Aurora，并且由发布团队签名。隔离属性留到替换脚本里再清。
+    nonisolated static func acceptedBuild(_ app: URL) -> Bool {
+        guard bundleIdentifier(of: app) == expectedBundleID else { return false }
+        guard teamIdentifier(of: app) == expectedTeamID else { return false }
+        return CommandRunner.runSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path], timeout: 60).ok
+    }
+
+    nonisolated static func bundleIdentifier(of app: URL) -> String? {
+        let info = NSDictionary(contentsOf: app.appendingPathComponent("Contents/Info.plist")) as? [String: Any]
+        return info?["CFBundleIdentifier"] as? String
+    }
+
+    nonisolated static func teamIdentifier(of app: URL) -> String? {
+        let result = CommandRunner.runSync("/usr/bin/codesign", ["-dv", "--verbose=4", app.path], timeout: 30)
+        let text = result.output + "\n" + result.error
+        for line in text.split(separator: "\n") where line.hasPrefix("TeamIdentifier=") {
+            let value = String(line.dropFirst("TeamIdentifier=".count)).trimmingCharacters(in: .whitespaces)
+            if value.isEmpty || value.lowercased() == "not set" { return nil }
+            return value
+        }
+        return nil
     }
 
     // MARK: - 远端
@@ -393,22 +493,19 @@ final class UpdateService: ObservableObject {
         let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
         guard !version.isEmpty else { throw UpdateError.decode }
 
-        var assetURL: URL?
-        var assetName: String?
+        var assets: [(name: String, url: URL)] = []
         for case let asset as [String: Any] in (json["assets"] as? [Any] ?? []) {
             guard let name = asset["name"] as? String,
                   let raw = asset["browser_download_url"] as? String,
-                  let url = URL(string: raw) else { continue }
-            let lower = name.lowercased()
-            if lower.hasSuffix(".zip") {
-                assetURL = url
-                assetName = name
-                break
-            }
-            if lower.hasSuffix(".dmg"), assetURL == nil {
-                assetURL = url
-                assetName = name
-            }
+                  let url = URL(string: raw),
+                  UpdateSecurity.allowed(url) else { continue }
+            assets.append((name, url))
+        }
+        let zip = assets.first { $0.name.lowercased().hasSuffix(".zip") }
+        let assetURL = zip?.url
+        let assetName = zip?.name
+        let checksumURL = zip.flatMap { item in
+            assets.first { $0.name == item.name + ".sha256" }?.url
         }
 
         let page = (json["html_url"] as? String).flatMap(URL.init(string:)) ?? releasesPage
@@ -422,7 +519,8 @@ final class UpdateService: ObservableObject {
             publishedAt: published,
             asset: assetURL,
             assetName: assetName,
-            page: page
+            page: page,
+            checksum: checksumURL
         )
     }
 
@@ -448,6 +546,7 @@ final class UpdateService: ObservableObject {
 
         var assetURL: URL?
         var assetName: String?
+        var checksumURL: URL?
         if let assetsURL = URL(string: "https://github.com/\(repository)/releases/expanded_assets/\(tag)") {
             var assetsRequest = URLRequest(url: assetsURL)
             assetsRequest.setValue("Aurora-macOS", forHTTPHeaderField: "User-Agent")
@@ -455,17 +554,14 @@ final class UpdateService: ObservableObject {
             if let (data, assetsResponse) = try? await URLSession.shared.data(for: assetsRequest),
                let assetsHTTP = assetsResponse as? HTTPURLResponse, assetsHTTP.statusCode == 200,
                let html = String(data: data, encoding: .utf8) {
-                for link in Self.downloadLinks(in: html) {
-                    let lower = link.lowercased()
-                    if lower.hasSuffix(".zip") {
-                        assetURL = URL(string: link)
-                        assetName = (link as NSString).lastPathComponent
-                        break
-                    }
-                    if lower.hasSuffix(".dmg"), assetURL == nil {
-                        assetURL = URL(string: link)
-                        assetName = (link as NSString).lastPathComponent
-                    }
+                let links = Self.downloadLinks(in: html).compactMap { raw -> URL? in
+                    guard let url = URL(string: raw), UpdateSecurity.allowed(url) else { return nil }
+                    return url
+                }
+                if let zip = links.first(where: { $0.path.lowercased().hasSuffix(".zip") }) {
+                    assetURL = zip
+                    assetName = zip.lastPathComponent
+                    checksumURL = links.first { $0.lastPathComponent == zip.lastPathComponent + ".sha256" }
                 }
             }
         }
@@ -480,7 +576,8 @@ final class UpdateService: ObservableObject {
             publishedAt: nil,
             asset: assetURL,
             assetName: assetName,
-            page: URL(string: "https://github.com/\(repository)/releases/tag/\(tag)") ?? releasesPage
+            page: URL(string: "https://github.com/\(repository)/releases/tag/\(tag)") ?? releasesPage,
+            checksum: checksumURL
         )
     }
 
@@ -594,20 +691,6 @@ final class UpdateService: ObservableObject {
         return base.appendingPathComponent("Aurora/Updates", isDirectory: true)
     }
 
-    @discardableResult
-    private nonisolated static func shell(_ path: String, _ arguments: [String]) -> Int32 {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = arguments
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus
-        } catch {
-            return -1
-        }
-    }
-
     private nonisolated static func formattedSize(_ app: URL) -> String {
         guard let enumerator = FileManager.default.enumerator(
             at: app,
@@ -623,7 +706,7 @@ final class UpdateService: ObservableObject {
 }
 
 /// 单纯用来把下载进度送回主线程
-private final class ProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private let onProgress: @Sendable (Double) -> Void
 
     init(onProgress: @escaping @Sendable (Double) -> Void) {
@@ -639,5 +722,55 @@ private final class ProgressDelegate: NSObject, URLSessionTaskDelegate, @uncheck
     ) {
         guard totalBytesExpectedToWrite > 0 else { return }
         onProgress(min(1, Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)))
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard UpdateSecurity.allowed(request.url) else {
+            task.cancel()
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+}
+
+enum UpdateSecurity {
+    static func allowed(_ url: URL?) -> Bool {
+        guard let url, url.scheme == "https", let host = url.host?.lowercased() else { return false }
+        if host == "github.com" || host == "api.github.com" { return true }
+        return host == "githubusercontent.com" || host.hasSuffix(".githubusercontent.com")
+    }
+
+    static func safeVersion(_ version: String) -> String {
+        let cleaned = version.filter { $0.isLetter || $0.isNumber || $0 == "." || $0 == "_" || $0 == "-" }
+        if cleaned.isEmpty { return "unknown" }
+        return String(cleaned.prefix(64))
+    }
+
+    /// `shasum -a 256` 的第一列，64 位十六进制。
+    static func parseSHA256(_ text: String) -> String? {
+        guard let line = text.split(whereSeparator: \.isNewline).first else { return nil }
+        guard let token = line.split(whereSeparator: \.isWhitespace).first else { return nil }
+        let hex = String(token).lowercased()
+        guard hex.count == 64, hex.allSatisfy(\.isHexDigit) else { return nil }
+        return hex
+    }
+
+    static func sha256Hex(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk = try handle.read(upToCount: 1024 * 1024) ?? Data()
+            if chunk.isEmpty { break }
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 }

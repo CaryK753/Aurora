@@ -2,6 +2,26 @@ import AppKit
 import LogitechPlugin
 import SwiftUI
 
+// 这些参数会以 Aurora 的签名去点按界面、录屏录音、改登录项或写显示器。
+// 正式包里直接退出：调用方就算能启动这个可执行文件，也借不到已经授给 Aurora 的隐私权限。
+#if !AURORA_DEV_COMMANDS
+do {
+    let devOnly: Set<String> = [
+        "--ax-dump", "--ax-click", "--ax-press", "--ax-select", "--ax-check",
+        "--record-test", "--record-mic-test", "--record-pip-test", "--camera-test",
+        "--login-on", "--login-off", "--display-ddc-write-test", "--action-demo",
+        "--audio-tap-test", "--audio-mute-test", "--audio-service-test",
+        "--audio-default-app-test", "--audio-default-listener-test",
+        "--audio-default-chain-test", "--audio-default-test",
+        "--logitech-verify"
+    ]
+    if CommandLine.arguments.contains(where: devOnly.contains) {
+        fputs("这个诊断命令只在开发构建里可用。\n", stderr)
+        exit(1)
+    }
+}
+#endif
+
 if CommandLine.arguments.contains("--logitech-diagnostics") || CommandLine.arguments.contains("--logitech-verify") {
     if CommandLine.arguments.contains("--logitech-verify"),
        NSRunningApplication.runningApplications(withBundleIdentifier: "com.cary.aurora").contains(where: { $0.processIdentifier != getpid() }) {
@@ -168,20 +188,9 @@ if CommandLine.arguments.contains("--permission-probe") {
 // Swift 包的 main 入口：以 accessory 模式常驻菜单栏
 var auroraDelegate: AppDelegate?
 
-if let index = CommandLine.arguments.firstIndex(of: "--update-script") {
-    // 开发用：打印替换脚本，便于在临时目录里验证，不碰真实安装
-    let args = CommandLine.arguments
-    guard index + 3 < args.count else {
-        print("用法：Aurora --update-script <target.app> <staged.app> <pid>")
-        exit(1)
-    }
-    let pid = Int32(args[index + 3]) ?? 1
-    let script = UpdateService.installScript(
-        target: URL(fileURLWithPath: args[index + 1]),
-        staged: URL(fileURLWithPath: args[index + 2]),
-        pid: pid
-    )
-    print(script)
+if CommandLine.arguments.contains("--update-script") {
+    // 开发用：打印替换脚本。路径和团队标识由调用方作为参数传入，不写进脚本正文。
+    print(UpdateService.installScript())
     exit(0)
 }
 

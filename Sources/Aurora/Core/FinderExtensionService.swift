@@ -387,45 +387,51 @@ final class FinderExtensionService: ObservableObject {
         }
     }
 
-    /// 扩展跑在沙盒里，起终端 / 写文件 / 跑命令都交给主 App
+    /// 扩展跑在沙盒里，起终端 / 写文件 / 跑命令都交给主 App。
+    /// 请求文件和分布式通知都不可信：命令和类型只认内存里用户保存过、并且开着的那一条。
     private func performDelegated(_ info: [AnyHashable: Any]) {
-        let id = info["id"] as? String ?? ""
-        let rawKind = info["kind"] as? String ?? ""
-        let action = actions.first(where: { $0.id == id })
-            ?? actions.first(where: { $0.kind.rawValue == rawKind })
-        let kind = rawKind.isEmpty ? (action?.kind.rawValue ?? "") : rawKind
-        let argument = (info["argument"] as? String) ?? action?.argument ?? ""
-        let directory = info["directory"] as? String ?? NSHomeDirectory()
+        guard let id = info["id"] as? String,
+              let action = actions.first(where: { $0.id == id && $0.enabled }) else {
+            Debug.log("finder: ignored request with no saved enabled action")
+            return
+        }
+        if let rawKind = info["kind"] as? String, !rawKind.isEmpty, rawKind != action.kind.rawValue {
+            Debug.log("finder: ignored request whose kind does not match the saved action")
+            return
+        }
+        let argument = action.argument
+        let directory = info["directory"] as? String ?? ""
         let selection = (info["selection"] as? String ?? "")
             .split(separator: "\n")
             .map(String.init)
             .filter { !$0.isEmpty }
 
-        Debug.log("finder perform kind=\(kind) dir=\(directory) sel=\(selection.count)")
+        Debug.log("finder perform kind=\(action.kind.rawValue) dir=\(directory) sel=\(selection.count)")
 
-        switch kind {
-        case "runCommand":
-            guard !argument.isEmpty else { return }
+        switch action.kind {
+        case .runCommand:
+            guard !argument.isEmpty, let folder = FinderRequestGuard.safeDirectory(directory) else { return }
             var env = ProcessInfo.processInfo.environment
             env["AURORA_SELECTION"] = selection.joined(separator: "\n")
-            env["AURORA_DIRECTORY"] = directory
+            env["AURORA_DIRECTORY"] = folder
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/sh")
             process.arguments = ["-c", argument]
             process.environment = env
-            process.currentDirectoryURL = URL(fileURLWithPath: directory, isDirectory: true)
+            process.currentDirectoryURL = URL(fileURLWithPath: folder, isDirectory: true)
             try? process.run()
 
-        case "newFile":
+        case .newFile:
             let name = argument.isEmpty ? "未命名.txt" : argument
-            guard name != ".", name != "..", !name.contains("/"), !name.contains("\0") else { return }
-            var target = URL(fileURLWithPath: directory).appendingPathComponent(name)
+            guard let folder = FinderRequestGuard.safeDirectory(directory),
+                  FinderRequestGuard.safeFileName(name) else { return }
+            var target = URL(fileURLWithPath: folder).appendingPathComponent(name)
             var index = 2
             while FileManager.default.fileExists(atPath: target.path) {
                 let ext = (name as NSString).pathExtension
                 let base = (name as NSString).deletingPathExtension
                 let suffix = ext.isEmpty ? "" : ".\(ext)"
-                target = URL(fileURLWithPath: directory).appendingPathComponent("\(base) \(index)\(suffix)")
+                target = URL(fileURLWithPath: folder).appendingPathComponent("\(base) \(index)\(suffix)")
                 index += 1
             }
             if FileManager.default.createFile(atPath: target.path, contents: Data()) {
@@ -433,27 +439,26 @@ final class FinderExtensionService: ObservableObject {
                 NSWorkspace.shared.activateFileViewerSelecting([target])
             }
 
-        case "openTerminal":
-            // 选中文件夹就打开它，否则打开当前目录
-            let folder = selection.first ?? directory
-            var isDirectory: ObjCBool = false
-            let path = FileManager.default.fileExists(atPath: folder, isDirectory: &isDirectory) && isDirectory.boolValue
-                ? folder
-                : directory
+        case .openTerminal:
+            let folder = selection.first.flatMap { FinderRequestGuard.safeDirectory($0) }
+                ?? FinderRequestGuard.safeDirectory(directory)
+            guard let folder else { return }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            process.arguments = ["-a", "Terminal", path]
+            process.arguments = ["-a", "Terminal", folder]
             try? process.run()
 
-        case "openWithApp":
-            guard !argument.isEmpty else { return }
-            let app = URL(fileURLWithPath: argument)
-            let urls = selection.isEmpty
-                ? [URL(fileURLWithPath: directory)]
-                : selection.map { URL(fileURLWithPath: $0) }
-            NSWorkspace.shared.open(urls, withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+        case .openWithApp:
+            guard argument.hasPrefix("/"), argument.hasSuffix(".app"),
+                  FileManager.default.fileExists(atPath: argument) else { return }
+            let urls = selection.compactMap { FinderRequestGuard.existingItem($0) }
+            let targets = urls.isEmpty
+                ? [FinderRequestGuard.safeDirectory(directory)].compactMap { $0 }.map { URL(fileURLWithPath: $0) }
+                : urls
+            guard !targets.isEmpty else { return }
+            NSWorkspace.shared.open(targets, withApplicationAt: URL(fileURLWithPath: argument), configuration: NSWorkspace.OpenConfiguration())
 
-        default:
+        case .copyPath:
             break
         }
     }
@@ -466,4 +471,51 @@ final class FinderExtensionService: ObservableObject {
     ]
 
     var enabledCount: Int { actions.filter(\.enabled).count }
+}
+
+/// 右键请求里的路径来自任意本地进程，不能拿去写登录项或系统目录。
+enum FinderRequestGuard {
+    static func safeFileName(_ name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed == name else { return false }
+        if trimmed == "." || trimmed == ".." { return false }
+        if trimmed.contains("/") || trimmed.contains("\0") { return false }
+        return true
+    }
+
+    /// 解析符号链接后的真实目录；敏感位置返回 nil。
+    static func safeDirectory(_ raw: String) -> String? {
+        guard raw.hasPrefix("/"), !raw.contains("\0"), !raw.contains("\n") else { return nil }
+        var isDirectory: ObjCBool = false
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: raw, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
+        let resolved = URL(fileURLWithPath: raw).resolvingSymlinksInPath().standardizedFileURL.path
+        guard !isSensitive(resolved) else { return nil }
+        return resolved
+    }
+
+    static func existingItem(_ raw: String) -> URL? {
+        guard raw.hasPrefix("/"), !raw.contains("\0"), !raw.contains("\n") else { return nil }
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: raw) else { return nil }
+        let resolved = URL(fileURLWithPath: raw).resolvingSymlinksInPath().standardizedFileURL
+        guard !isSensitive(resolved.path) else { return nil }
+        return resolved
+    }
+
+    /// 登录项、偏好设置和扩展自己的请求目录。普通项目目录不在这里。
+    static func isSensitive(_ path: String) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let prefixes = [
+            "/Library/LaunchAgents",
+            "/Library/LaunchDaemons",
+            "/Library/PrivilegedHelperTools",
+            "/Library/StartupItems",
+            home + "/Library/LaunchAgents",
+            home + "/Library/LaunchDaemons",
+            home + "/Library/Preferences",
+            home + "/Library/Containers/com.cary.aurora.finder/Data/Library/Application Support/Aurora"
+        ]
+        return prefixes.contains { path == $0 || path.hasPrefix($0 + "/") }
+    }
 }

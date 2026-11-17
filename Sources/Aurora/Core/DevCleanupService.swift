@@ -157,6 +157,7 @@ final class DevCleanupService: ObservableObject {
             guard result.ok else { continue }
             for line in result.output.split(separator: "\n") {
                 let path = String(line)
+                guard isBuildArtifact(path) else { continue }
                 guard let size = try? FileManager.default.attributesOfItem(atPath: path) else { continue }
                 _ = size
                 let bytes = StorageService.measurePath(path)
@@ -172,6 +173,31 @@ final class DevCleanupService: ObservableObject {
             }
         }
         return Array(found.sorted { $0.bytes > $1.bytes }.prefix(24))
+    }
+
+    /// `target` / `.build` / `Pods` / `.next` 只有旁边能对上工程文件时才算构建产物。
+    /// 文档目录里一个恰好叫 target 的文件夹不该被列出来。
+    static func isBuildArtifact(_ path: String) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        let parent = url.deletingLastPathComponent()
+        let manager = FileManager.default
+        func has(_ name: String) -> Bool {
+            manager.fileExists(atPath: parent.appendingPathComponent(name).path)
+        }
+        switch url.lastPathComponent {
+        case "node_modules":
+            return true
+        case "target":
+            return has("Cargo.toml")
+        case ".build":
+            return has("Package.swift")
+        case "Pods":
+            return has("Podfile")
+        case ".next":
+            return has("package.json") || has("next.config.js") || has("next.config.mjs") || has("next.config.ts")
+        default:
+            return false
+        }
     }
 
     private static func catalog(home: URL) -> [DevCategory] {

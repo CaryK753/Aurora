@@ -89,9 +89,9 @@ final class AuroraFinderExtension: FIFinderSync {
             forName: Channel.config,
             object: nil,
             queue: .main
-        ) { [weak self] note in
-            guard let json = note.userInfo?["json"] as? String else { return }
-            self?.apply(json: json)
+        ) { [weak self] _ in
+            // 通知正文任何进程都能伪造，只把它当作「主 App 已经写好配置文件」的信号。
+            self?.loadCache()
         }
 
         // 冷启动时向主 App 要一次最新配置
@@ -116,19 +116,6 @@ final class AuroraFinderExtension: FIFinderSync {
               let parsed = try? JSONDecoder().decode([FinderAction].self, from: data) else { return }
         actions = parsed
         hasConfiguration = true
-    }
-
-    private func apply(json: String) {
-        guard let data = json.data(using: .utf8),
-              let parsed = try? JSONDecoder().decode([FinderAction].self, from: data) else { return }
-        actions = parsed
-        hasConfiguration = true
-        // 沙盒下写不进共享目录时忽略失败，下次仍靠通知刷新
-        try? FileManager.default.createDirectory(
-            at: cacheURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try? data.write(to: cacheURL)
     }
 
     /// 诊断日志：扩展被 Finder 加载后会往这里写一行，方便确认「到底是没启用还是没加载」

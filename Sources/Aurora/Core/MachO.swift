@@ -49,12 +49,22 @@ enum MachOBinary {
         return nil
     }
 
-    /// 用不上的那一份有多大：当前机器是 arm64，所以 Intel 那一份算可回收
+    /// 当前进程实际在跑的架构。通用二进制里每个切片各自编译，运行到的那一片就是本机。
+    static var hostArchitecture: String {
+        #if arch(arm64)
+        arm64
+        #elseif arch(x86_64)
+        x86_64
+        #else
+        arm64
+        #endif
+    }
+
+    /// 本机用不到的那几份有多大。Intel Mac 上回收的是 arm64，Apple Silicon 上回收的是 x86_64。
     static func wasted(in path: String) -> Int64 {
         guard let slices = slices(at: path),
-              slices.contains(where: { $0.architecture == arm64 }),
-              let intel = slices.first(where: { $0.architecture == x86_64 }) else { return 0 }
-        return intel.bytes
+              slices.contains(where: { $0.architecture == hostArchitecture }) else { return 0 }
+        return slices.filter { $0.architecture != hostArchitecture }.reduce(Int64(0)) { $0 + $1.bytes }
     }
 
     /// 这份文件同时带了 arm64 和 x86_64 吗

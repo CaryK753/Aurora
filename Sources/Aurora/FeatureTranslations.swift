@@ -388,6 +388,13 @@ enum FeatureTranslations {
         "这段录像没有视频轨道": "This recording has no video track",
         "系统不支持当前的导出方式": "The current export method is not supported",
         "瘦身后可能需要重新登录": "You may need to sign in again after thinning",
+        "不能瘦身 Aurora 自己，否则会丢掉当前签名和系统权限": "Aurora will not thin itself — that would drop its signature and system permissions",
+        "%@ 会去掉这台 Mac 用不到的架构（约 %@）。只处理本来就是临时签名的应用，并在完成后重新签名。这个操作不能撤销。": "%@ will drop the architecture this Mac does not run (about %@). Only ad-hoc signed apps are changed, and they are ad-hoc signed again afterwards. This cannot be undone.",
+        "会去掉这台 Mac 用不到的架构（约 %@）。只处理本来就是临时签名的应用。这个操作不能撤销；正在运行的应用会跳过。": "This drops the architecture this Mac does not run (about %@). Only ad-hoc signed apps are changed. It cannot be undone; running apps are skipped.",
+        "同时带 Intel 与 Apple Silicon 两份的 App。Aurora 只去掉这台 Mac 用不到的那一份，而且只动临时签名的应用，避免弄坏钥匙串和系统权限。": "Apps that ship both Intel and Apple Silicon. Aurora removes only the slice this Mac does not run, and only when the app is already ad-hoc signed, so keychain items and system permissions stay intact.",
+        "安装包校验失败，已取消更新": "The update archive failed its integrity check and was not installed",
+        "安装包签名与 Aurora 不符，已取消更新": "The update is not signed as Aurora and was not installed",
+        "这个版本没有可校验的安装包": "This release has no verifiable archive",
         // 存储：通用二进制 / 应用管理 / 开发环境
         "应用管理": "Apps",
         "%@ 会去掉 Intel 那一份（约 %@），并改用 ad-hoc 签名。这个操作不能撤销，之后如有异常需要重新安装。": "%@ will drop the Intel slice (about %@) and switch to an ad-hoc signature. This cannot be undone; if something breaks you will need to reinstall.",
