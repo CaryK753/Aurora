@@ -28,6 +28,8 @@
 | 资源 | `host_processor_info`、`host_statistics64`、`getifaddrs`、IOPS、`proc_pid_rusage`；GPU 读 `IOAccelerator.PerformanceStatistics`；磁盘读写取 `IOBlockStorageDriver.Statistics` 差分；电池健度与循环读 `AppleSmartBattery` 注册表；进程网络用 `nettop -x -L 1` 采样 |
 | 外部设备 | `system_profiler SPBluetoothDataType / SPUSBDataType -json`，iPhone / iPad 型号走 `xcrun devicectl list devices` 并缓存 5 分钟 |
 | 更新 | GitHub Release API → 版本比较 → 下载 zip → `ditto` 解包 → 询问 → shell 脚本等本进程退出后替换并重启 |
+| 网络 | 两种实现共用一套订阅与规则：`NetworkProxyKit` 解析订阅 / 生成 mihomo 配置 / 维护内核清单，`SystemProxyService` 负责系统配置事务与生命周期；有 NE 授权时改走 `AuroraTunnel`（`NETransparentProxyProvider` + TCP relay） |
+| 文件锁 | `FileLockService`：AES-GCM 1MB 分块流式加解密，密钥 `SecItem` 存登录钥匙串，`LAContext` 验证身份；锁后文件头写 `AURL`、文件夹打成 `AURD` 归档，解锁还原目录树 |
 
 ## 进程列表怎么取数
 
@@ -71,9 +73,25 @@ gh secret set AURORA_CERT_PASSWORD --body '<密码>'
 - 日志：`~/Library/Containers/com.cary.aurora.finder/Data/Library/Application Support/Aurora/finder-ext.log`；主 App 的登记结果在 `~/Library/Application Support/Aurora/finder-diag.log`。
 - 系统设置里的位置是「通用 › 登录项与扩展 › 文件提供程序」，也可以切到「按应用」查找 Aurora；叫「Finder」的那栏是快速操作。
 
+## 网络代理
+
+- **两条实现路线**：没有 Apple 网络扩展授权（`NetworkSigningCapability` 同时校验证书信任与 `com.apple.developer.networking.networkextension`）就只走系统代理；有授权且构建时传了 `AURORA_NE_PROFILE` 才打 `AuroraTunnel.systemextension`。没有授权却把 entitlement 签进主程序，系统会直接杀掉进程。
+- **内核不随包**：`ProxyEngineRelease` 固定 `v1.19.34` 与两个架构的 SHA-256，`ProxyEngineInstaller` 下载 → 校验 → 解压 → 跑一次 `-v` 确认可执行 → 原子替换。直连模式完全不碰内核。
+- **应用前验证链**：`ProxyEngineRuntime.start` 轮询进程存活 → `ProxyLocalProbe` 用 `lsof` 核对 `127.0.0.1:<port>` 属于该 pid → SOCKS greeting → `fetch generate_204`。全过才 `SystemProxyPreferences.apply`。
+- **系统配置事务**：`SCPreferences` 按服务路径写 `/NetworkServices/<id>/Proxies`，写前把 original / applied 一起存进 `UserDefaults`（重启也能恢复）。`restore()` 会先比对当前值是否仍等于 applied，外部改过就抛错而不是覆盖。
+- **生命周期**：`applicationShouldTerminate` 返回 `.terminateLater`，先 `restoreForTermination()`；内核意外退出由 `onUnexpectedExit` 触发恢复。规则模式的大陆地址库是 APNIC 数据转成的 `ipcidr` rule-provider（文件形式，7 天缓存）。
+
+## 文件锁
+
+- 只加密内容，不改权限位：权限位挡不住文件主人，把明文挪走才是真保护。
+- 1 MB 分块、每块独立 AEAD（AAD 带块序号与类型），大文件不会一次性读进内存；超过 8 GB 直接拒绝。
+- 密钥不用带 `userPresence` 的数据保护钥匙串（需要 `keychain-access-groups` 描述文件，当前签名拿不到，`SecItem` 会返回 -34018），改用登录钥匙串 + `LAContext` 自行验证；菜单栏应用是 accessory，弹系统验证前要临时切成 `.regular`，否则窗口不出现。
+- 先写同目录临时密文再 `swap`（备份 → 替换 → 失败回滚），避免中途失败留下半个文件；文件夹先打成归档再整体加密。
+- 锁后图标由未沙盒的主 App 设置（扩展只能读文件头，改不了自定义图标），路径来自扩展写的 `lock-icons.txt`，主 App 会重新校验。
+
 ## i18n
 
-中文原文作为 key，英文查表（`Localization.swift` 与 `ModuleTranslations.swift`）。系统语言为英文时默认英文，可以在「设置 › 语言」即时切换。插值文案统一走 `TF("格式化串", 参数)`。
+中文原文作为 key，英文查表（`Localization.swift` 汇总 `ModuleTranslations.swift` / `FeatureTranslations.swift` / `NetworkProxyTranslations.swift`）。系统语言为英文时默认英文，可以在「设置 › 语言」即时切换。插值文案统一走 `TF("格式化串", 参数)`。
 
 > 词条是用字典字面量声明的，重复 key 会让应用在启动时直接崩溃（`Dictionary literal contains duplicate keys`），加词条后务必去重。
 
@@ -89,4 +107,7 @@ gh secret set AURORA_CERT_PASSWORD --body '<密码>'
 - **外接屏亮度**：需要显示器支持 DDC/CI。
 - **键盘类型**：写入 `/Library/Preferences` 需要管理员密码，且要重连键盘或重新登录才生效。
 - **自定义右键菜单**：扩展必须沙盒化，因此落盘与 shell 动作要委托主 App，主 App 没运行时会自动拉起。
+- **系统代理**：只影响遵循系统代理设置的应用，不接管 UDP 与系统 DNS（不改 macOS DNS），内核固定监听 `127.0.0.1`、不开 TUN。
+- **网络扩展**：必须带 `app-proxy-provider-systemextension` 描述文件（要开发者计划），这一版只接管 TCP；Tailscale 组网未实现，界面不提供占位按钮。
+- **文件锁**：钥匙串条目丢失或换机即不可恢复；用原 App 打开密文后保存会毁掉密文；8 GB 上限。
 - 同时开启 Mos / LinearMouse 会产生叠加效果，建议只保留一个滚轮接管。
