@@ -1176,8 +1176,20 @@ enum SelfTest {
         check("拒绝其它主机", !UpdateSecurity.allowed(URL(string: "https://example.com/Aurora.zip")), "example.com")
         check("版本号去掉注入字符", UpdateSecurity.safeVersion("1.2.0\";rm") == "1.2.0rm", UpdateSecurity.safeVersion("1.2.0\";rm"))
 
-        check("开发者签名拒绝瘦身", UniversalService.refusalForSignature("Authority=Developer ID Application: Example (TEAMID)\n") != nil, "Authority")
-        check("临时签名允许瘦身", UniversalService.refusalForSignature("Signature=adhoc\nTeamIdentifier=not set\n") == nil, "adhoc")
+        let slices = [
+            MachOSlice(architecture: "arm64", bytes: 5),
+            MachOSlice(architecture: "arm64e", bytes: 7),
+            MachOSlice(architecture: "x86_64", bytes: 4)
+        ]
+        let removed = MachOBinary.removableArchitectures(in: slices)
+        if MachOBinary.hostArchitecture == "arm64" {
+            check("Apple Silicon 只去掉 Intel", removed == ["x86_64"], removed.joined(separator: ","))
+        } else {
+            check("Intel 去掉 ARM", Set(removed) == ["arm64", "arm64e"], removed.joined(separator: ","))
+        }
+        check("没有本机架构时不删", MachOBinary.removableArchitectures(in: [
+            MachOSlice(architecture: MachOBinary.hostArchitecture == "arm64" ? "x86_64" : "arm64", bytes: 1)
+        ]).isEmpty, "空")
         check("本机架构", MachOBinary.hostArchitecture == "arm64" || MachOBinary.hostArchitecture == "x86_64", MachOBinary.hostArchitecture)
 
         let bundleID = "com.example.demo"
@@ -1240,7 +1252,7 @@ enum SelfTest {
         (plist as NSDictionary).write(to: bundle.appendingPathComponent("Contents/Info.plist"), atomically: true)
         defer { try? fm.removeItem(at: bundle) }
 
-        // 素材来自已签名的 Chrome。先改成临时签名，才落在允许瘦身的范围内。
+        // 素材来自已签名的 Chrome。先签成临时签名，瘦身之后 cdhash 必须还是这一份，不能被重新签名换掉。
         let signed = CommandRunner.runSync(
             "/usr/bin/codesign",
             ["--force", "--sign", "-", "--timestamp=none", bundle.path],
@@ -1256,7 +1268,21 @@ enum SelfTest {
             print("✗ 读不到测试应用的架构")
             return 1
         }
-        print("瘦身前架构：\(before)")
+        func cdhash(of path: String) -> String? {
+            let result = CommandRunner.runSync("/usr/bin/codesign", ["-dv", path], timeout: 30)
+            let text = result.output + "\n" + result.error
+            for line in text.split(separator: "\n") where line.hasPrefix("CDHash=") {
+                let value = String(line.dropFirst("CDHash=".count)).trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty { return value }
+            }
+            return nil
+        }
+        guard let hashBefore = cdhash(of: binary) else {
+            print("✗ 读不到瘦身前的 cdhash")
+            return 1
+        }
+        let kept = before.filter { MachOBinary.keptArchitectures.contains($0) }.sorted()
+        print("瘦身前架构：\(before) 应留下 \(kept)")
 
         let service = UniversalService()
         var scanned: UniversalApp?
@@ -1289,11 +1315,11 @@ enum SelfTest {
             return 1
         }
 
-        let host = MachOBinary.hostArchitecture
         let after = MachOBinary.slices(at: binary)?.map(\.architecture).sorted() ?? []
-        let verify = CommandRunner.runSync("/usr/bin/codesign", ["--verify", bundle.path], timeout: 30)
-        print("瘦身后架构：\(after) 签名校验=\(verify.ok ? "通过" : "失败") 本机=\(host)")
-        let single = after == [host] && verify.ok
+        let verify = CommandRunner.runSync("/usr/bin/codesign", ["--verify", "--strict", bundle.path], timeout: 30)
+        let hashAfter = cdhash(of: binary)
+        print("瘦身后架构：\(after) 签名校验=\(verify.ok ? "通过" : "失败") cdhash=\(hashAfter == hashBefore ? "未变" : "变了")")
+        let single = after == kept && verify.ok && hashAfter == hashBefore
 
         // 再来一遍，走「勾选 + 批量」的路径。
         // 只勾测试应用本身：批量接口会照着 selection 直接动手，绝不能把真实 App 选进来
@@ -1331,7 +1357,7 @@ enum SelfTest {
         let batchArch = MachOBinary.slices(at: binary)?.map(\.architecture).sorted() ?? []
         print("批量：勾选 \(batchSelected) 项（只有测试应用：\(batchOnlyTestApp ? "是" : "否")），瘦身 \(batchThinned) 项，剩余架构 \(batchArch)")
 
-        let ok = single && batchOnlyTestApp && batchThinned == 1 && batchArch == [host]
+        let ok = single && batchOnlyTestApp && batchThinned == 1 && batchArch == kept
         print(ok ? "✓ 通用二进制瘦身链路可用（单个 + 全选批量）" : "✗ 瘦身结果不符合预期")
         return ok ? 0 : 1
     }

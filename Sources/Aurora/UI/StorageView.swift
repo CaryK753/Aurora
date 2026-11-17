@@ -70,7 +70,7 @@ struct StorageView: View {
             }
             Button(T("取消"), role: .cancel) { pendingThin = nil }
         } message: { app in
-            Text(TF("%@ 会去掉这台 Mac 用不到的架构（约 %@）。只处理本来就是临时签名的应用，并在完成后重新签名。这个操作不能撤销。",
+            Text(TF("%@ 会去掉这台 Mac 用不到的架构（约 %@）。原来的签名留在剩下的那一份里，不会重新签名。校验失败会自动还原。这个操作不能撤销。",
                     app.name, Fmt.bytes(UInt64(app.wasted))))
         }
         .confirmationDialog(TF("瘦身选中的 %d 个应用？", universal.selection.count),
@@ -80,7 +80,7 @@ struct StorageView: View {
             }
             Button(T("取消"), role: .cancel) {}
         } message: {
-            Text(TF("会去掉这台 Mac 用不到的架构（约 %@）。只处理本来就是临时签名的应用。这个操作不能撤销；正在运行的应用会跳过。",
+            Text(TF("会去掉这台 Mac 用不到的架构（约 %@）。原来的签名留着，不会重新签名。校验失败会还原；正在运行的应用会跳过。",
                     Fmt.bytes(UInt64(universal.selectedBytes))))
         }
         .confirmationDialog(T(service.selection.contains("trash") ? "清空选中的项目？" : "把选中的内容移到废纸篓？"),
@@ -407,7 +407,7 @@ struct StorageView: View {
                             .monospacedDigit()
                     }
                 }
-                Text(T("同时带 Intel 与 Apple Silicon 两份的 App。Aurora 只去掉这台 Mac 用不到的那一份，而且只动临时签名的应用，避免弄坏钥匙串和系统权限。"))
+                Text(T("同时带 Intel 与 Apple Silicon 两份的 App。Aurora 只去掉这台 Mac 用不到的那一份，原来的开发者签名留在剩下的代码上。"))
                     .font(.system(size: 8.5))
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)

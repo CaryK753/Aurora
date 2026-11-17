@@ -33,8 +33,9 @@ enum MachOBinary {
                 let base = index * 20
                 // fat_arch: cputype, cpusubtype, offset, size, align（都是大端 4 字节）
                 let cpu = readBigEndian(table, at: base)
+                let subtype = readBigEndian(table, at: base + 4)
                 let bytes = Int64(readBigEndian(table, at: base + 12))
-                result.append(MachOSlice(architecture: name(for: cpu), bytes: bytes))
+                result.append(MachOSlice(architecture: name(for: cpu, subtype: subtype), bytes: bytes))
             }
             return result
         }
@@ -42,9 +43,11 @@ enum MachOBinary {
         // 瘦二进制：只有一份，字段按本机字节序（小端）
         if magic == 0xFEED_FACF || magic == 0xFEED_FACE {
             let cpu = head.subdata(in: 4..<8).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+            let subtypeData = try? handle.read(upToCount: 4)
+            let subtype = subtypeData?.count == 4 ? readLittleEndian(subtypeData ?? Data(), at: 0) : 0
             let attributes = try? FileManager.default.attributesOfItem(atPath: path)
             let bytes = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
-            return [MachOSlice(architecture: name(for: cpu), bytes: bytes)]
+            return [MachOSlice(architecture: name(for: cpu, subtype: subtype), bytes: bytes)]
         }
         return nil
     }
@@ -60,28 +63,53 @@ enum MachOBinary {
         #endif
     }
 
-    /// 本机用不到的那几份有多大。Intel Mac 上回收的是 arm64，Apple Silicon 上回收的是 x86_64。
-    static func wasted(in path: String) -> Int64 {
-        guard let slices = slices(at: path),
-              slices.contains(where: { $0.architecture == hostArchitecture }) else { return 0 }
-        return slices.filter { $0.architecture != hostArchitecture }.reduce(Int64(0)) { $0 + $1.bytes }
+    /// 这台 Mac 要留下来的架构。Apple Silicon 同时留 arm64 和 arm64e，只拿掉 Intel。
+    static var keptArchitectures: Set<String> {
+        #if arch(arm64)
+        ["arm64", "arm64e", "arm64_32"]
+        #elseif arch(x86_64)
+        ["x86_64"]
+        #else
+        [hostArchitecture]
+        #endif
     }
 
-    /// 这份文件同时带了 arm64 和 x86_64 吗
+    /// 可以从这份文件里拿掉、而且拿掉后本机还能跑的架构。没有本机架构时返回空，避免把唯一能跑的那份删掉。
+    static func removableArchitectures(in slices: [MachOSlice]) -> [String] {
+        let present = Set(slices.map(\.architecture))
+        guard !present.isDisjoint(with: keptArchitectures) else { return [] }
+        return present.subtracting(keptArchitectures).sorted()
+    }
+
+    /// 本机用不到的那几份有多大。Apple Silicon 上不把 arm64e 算进去。
+    static func wasted(in path: String) -> Int64 {
+        guard let slices = slices(at: path) else { return 0 }
+        let remove = removableArchitectures(in: slices)
+        guard !remove.isEmpty else { return 0 }
+        return slices.filter { remove.contains($0.architecture) }.reduce(Int64(0)) { $0 + $1.bytes }
+    }
+
+    /// 这份文件里有没有本机用不到、可以拿掉的架构
     static func isUniversal(_ path: String) -> Bool {
         guard let slices = slices(at: path) else { return false }
-        return slices.contains { $0.architecture == arm64 } && slices.contains { $0.architecture == x86_64 }
+        return !removableArchitectures(in: slices).isEmpty
     }
 
-    private static func name(for cpu: UInt32) -> String {
+    private static func name(for cpu: UInt32, subtype: UInt32) -> String {
+        let sub = subtype & 0x00FF_FFFF
         switch cpu {
-        case 0x0100_000C: return arm64
+        case 0x0100_000C: return sub == 2 ? "arm64e" : arm64
         case 0x0200_000C: return "arm64_32"
         case 0x0100_0007: return x86_64
         case 0x0000_0007: return "i386"
         case 0x0000_000C: return "arm"
         default: return String(format: "cpu_%08x", cpu)
         }
+    }
+
+    private static func readLittleEndian(_ data: Data, at offset: Int) -> UInt32 {
+        guard offset + 4 <= data.count else { return 0 }
+        return data.subdata(in: offset..<(offset + 4)).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
     }
 
     private static func readBigEndian(_ data: Data, at offset: Int) -> UInt32 {

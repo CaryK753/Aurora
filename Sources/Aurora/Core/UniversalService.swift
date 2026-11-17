@@ -1,8 +1,8 @@
 //  UniversalService.swift
 //  Aurora — 通用二进制：找出同时带 Intel 与 Apple Silicon 两份的 App
 //
-//  只去掉本机用不到的那一份。lipo 会破坏签名，所以带开发者或 App Store 身份的应用直接跳过：
-//  ad-hoc 重签会换掉 cdhash，钥匙串、辅助功能和公证一起失效。本来就是临时签名的才允许重签。
+//  只去掉本机用不到的那一份，不重新签名。每一份架构自己带着原来的证书，
+//  lipo 留下的那一份 cdhash 不变，钥匙串和公证还认它。校验失败就整包还原。
 
 import AppKit
 import Combine
@@ -192,8 +192,7 @@ final class UniversalService: ObservableObject {
         guard fm.isExecutableFile(atPath: codesign) else { return .failure(T("找不到 codesign")) }
         guard fm.isExecutableFile(atPath: lipo) else { return .failure(T("找不到 lipo")) }
 
-        // 1) 先把原二进制留一份：任何一步失败都能原样换回去。
-        //    entitlements 必须在 lipo 之前抽出来，改完签名就读不到了。
+        // 1) 先把原二进制和资源封条留一份。后面不重签，失败时必须原样换回去。
         let backupRoot = fm.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Aurora/Thinned", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -215,11 +214,7 @@ final class UniversalService: ObservableObject {
         if hadSignature, (try? fm.copyItem(at: codeSignature, to: signatureBackup)) == nil {
             return .failure(TF("无法备份 %@", "CodeSignature"))
         }
-        let bundleEntitlements = temporaryEntitlements(for: app.path, codesign: codesign)
-        let runtime = signatureText(of: app.path).contains("flags=0x10000(runtime)")
-        defer {
-            if let bundleEntitlements { try? fm.removeItem(atPath: bundleEntitlements) }
-        }
+        let signedBefore = verifies(app.path, codesign: codesign)
 
         func undo() {
             restore(backups)
@@ -228,11 +223,21 @@ final class UniversalService: ObservableObject {
             try? fm.copyItem(at: signatureBackup, to: codeSignature)
         }
 
-        // 2) 只留本机架构。Intel 上留 x86_64，Apple Silicon 上留 arm64。
-        let host = MachOBinary.hostArchitecture
+        // 2) 抽出本机要留的架构。Apple Silicon 同时留 arm64 和 arm64e。不重新签名。
+        var changed = 0
         for binary in app.binaries {
+            guard let slices = MachOBinary.slices(at: binary) else { continue }
+            var seen: Set<String> = []
+            let keep = slices.map(\.architecture).filter { architecture in
+                guard MachOBinary.keptArchitectures.contains(architecture), seen.insert(architecture).inserted else { return false }
+                return true
+            }
+            guard !keep.isEmpty, keep.count < slices.count else { continue }
             let staged = binary + ".aurora-thin"
-            let result = CommandRunner.runSync(lipo, ["-thin", host, "-output", staged, binary], timeout: 120)
+            var arguments = [binary]
+            for architecture in keep { arguments += ["-extract", architecture] }
+            arguments += ["-output", staged]
+            let result = CommandRunner.runSync(lipo, arguments, timeout: 120)
             guard result.ok, fm.fileExists(atPath: staged) else {
                 try? fm.removeItem(atPath: staged)
                 undo()
@@ -244,40 +249,23 @@ final class UniversalService: ObservableObject {
                 undo()
                 return .failure(TF("替换 %@ 失败", (binary as NSString).lastPathComponent))
             }
+            changed += 1
         }
-
-        // 3) 从内到外重新 ad-hoc。不用 --deep，避免把没改过的 appex / XPC 一起签坏。
-        for binary in app.binaries {
-            let sign = CommandRunner.runSync(codesign, signArguments(runtime: runtime, entitlements: nil, path: binary), timeout: 180)
-            if !sign.ok {
-                undo()
-                return .failure(TF("重新签名失败：%@", sign.error.split(separator: "\n").last.map(String.init) ?? "codesign 报错"))
-            }
-        }
-        let bundleSign = CommandRunner.runSync(
-            codesign,
-            signArguments(runtime: runtime, entitlements: bundleEntitlements, path: app.path),
-            timeout: 180
-        )
-        if !bundleSign.ok {
+        guard changed > 0 else {
             undo()
-            return .failure(TF("重新签名失败：%@", bundleSign.error.split(separator: "\n").last.map(String.init) ?? "codesign 报错"))
+            return .failure(T("没有可去掉的架构"))
         }
 
-        let verify = CommandRunner.runSync(codesign, ["--verify", "--strict", app.path], timeout: 120)
-        if !verify.ok {
+        // 3) 原来能通过签名校验的，瘦完也必须能通过。过不了就还原，不另签一份。
+        if signedBefore && !verifies(app.path, codesign: codesign) {
             undo()
             return .failure(T("签名校验没通过，已还原"))
         }
         return .success
     }
 
-    private nonisolated static func signArguments(runtime: Bool, entitlements: String?, path: String) -> [String] {
-        var arguments = ["--force", "--sign", "-", "--timestamp=none"]
-        if runtime { arguments += ["--options", "runtime"] }
-        if let entitlements { arguments += ["--entitlements", entitlements] }
-        arguments.append(path)
-        return arguments
+    private nonisolated static func verifies(_ path: String, codesign: String) -> Bool {
+        CommandRunner.runSync(codesign, ["--verify", "--strict", path], timeout: 120).ok
     }
 
     private nonisolated static func restore(_ backups: [(original: String, copy: String)]) {
@@ -286,19 +274,6 @@ final class UniversalService: ObservableObject {
             try? fm.removeItem(atPath: pair.original)
             try? fm.copyItem(atPath: pair.copy, toPath: pair.original)
         }
-    }
-
-    private nonisolated static func temporaryEntitlements(for path: String, codesign: String) -> String? {
-        let result = CommandRunner.runSync(codesign, ["-d", "--entitlements", ":-", path], timeout: 30)
-        let text = result.output.isEmpty ? result.error : result.output
-        // codesign 会在 plist 前面加一行 Executable=。整段写进去的话，后面 --entitlements 不认。
-        let start = text.range(of: "<?xml") ?? text.range(of: "<plist")
-        guard let start, let end = text.range(of: "</plist>") else { return nil }
-        let plist = String(text[start.lowerBound..<end.upperBound])
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("aurora-entitlements-\(UUID().uuidString).plist")
-        guard (try? plist.write(to: url, atomically: true, encoding: .utf8)) != nil else { return nil }
-        return url.path
     }
 
     // MARK: - 扫描
@@ -366,62 +341,12 @@ final class UniversalService: ObservableObject {
         )
     }
 
-    /// App Store、沙盒、带开发者身份的应用重签后钥匙串和 TCC 都会坏，一律不碰。
-    /// Aurora 自己也不碰：ad-hoc 会把固定证书换成临时签名，升级后又要重新授权。
+    /// 只跳过 Aurora 自己。已签名的应用可以瘦：lipo 不动留下那一份的证书，校验失败会还原。
     private nonisolated static func blockReason(for bundle: URL) -> String? {
-        let fm = FileManager.default
         if let info = NSDictionary(contentsOf: bundle.appendingPathComponent("Contents/Info.plist")) as? [String: Any],
            (info["CFBundleIdentifier"] as? String) == "com.cary.aurora" {
-            return T("不能瘦身 Aurora 自己，否则会丢掉当前签名和系统权限")
-        }
-        if fm.fileExists(atPath: bundle.appendingPathComponent("Contents/_MASReceipt/receipt").path) {
-            return T("App Store 应用，签名受保护")
-        }
-        guard fm.isExecutableFile(atPath: "/usr/bin/codesign") else { return T("找不到 codesign") }
-        let rights = entitlements(of: bundle)
-        if rights.contains("com.apple.security.app-sandbox") {
-            return T("沙盒应用，重新签名后会失去权限")
-        }
-        if rights.contains("com.apple.application-identifier")
-            || rights.contains("keychain-access-groups")
-            || rights.contains("com.apple.developer.team-identifier") {
-            return T("带开发者标识，重新签名后会失效")
-        }
-        let signature = signatureText(of: bundle.path)
-        if let reason = refusalForSignature(signature) { return reason }
-        if let executable = (NSDictionary(contentsOf: bundle.appendingPathComponent("Contents/Info.plist")) as? [String: Any])?["CFBundleExecutable"] as? String {
-            let binary = bundle.appendingPathComponent("Contents/MacOS/\(executable)").path
-            if let reason = refusalForSignature(signatureText(of: binary)) { return reason }
+            return T("不能瘦身 Aurora 自己")
         }
         return nil
-    }
-
-    /// codesign -dv / -d -r- 的合并文本。有证书身份就拒绝，临时签名和未签名可以继续。
-    nonisolated static func refusalForSignature(_ text: String) -> String? {
-        let lower = text.lowercased()
-        if lower.contains("authority=") { return T("带开发者标识，重新签名后会失效") }
-        if lower.contains("certificate leaf") || lower.contains("certificate 1") {
-            return T("带开发者标识，重新签名后会失效")
-        }
-        for line in text.split(separator: "\n") where line.lowercased().hasPrefix("teamidentifier=") {
-            let team = line.split(separator: "=", maxSplits: 1).last.map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
-            if !team.isEmpty, team.lowercased() != "not set" {
-                return T("带开发者标识，重新签名后会失效")
-            }
-        }
-        return nil
-    }
-
-    private nonisolated static func entitlements(of bundle: URL) -> String {
-        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/codesign") else { return "" }
-        let result = CommandRunner.runSync("/usr/bin/codesign", ["-d", "--entitlements", ":-", bundle.path], timeout: 20)
-        return result.output.isEmpty ? result.error : result.output
-    }
-
-    private nonisolated static func signatureText(of path: String) -> String {
-        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/codesign") else { return "" }
-        let details = CommandRunner.runSync("/usr/bin/codesign", ["-dv", "--verbose=4", path], timeout: 20)
-        let requirement = CommandRunner.runSync("/usr/bin/codesign", ["-d", "-r-", path], timeout: 20)
-        return [details.output, details.error, requirement.output, requirement.error].joined(separator: "\n")
     }
 }
