@@ -177,7 +177,7 @@ final class DevCleanupService: ObservableObject {
 
     /// `target` / `.build` / `Pods` / `.next` 只有旁边能对上工程文件时才算构建产物。
     /// 文档目录里一个恰好叫 target 的文件夹不该被列出来。
-    static func isBuildArtifact(_ path: String) -> Bool {
+    nonisolated static func isBuildArtifact(_ path: String) -> Bool {
         let url = URL(fileURLWithPath: path)
         let parent = url.deletingLastPathComponent()
         let manager = FileManager.default

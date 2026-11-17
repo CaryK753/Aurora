@@ -1606,7 +1606,7 @@ enum SelfTest {
 
         print("Aurora 自检 · \(ProcessInfo.processInfo.operatingSystemVersionString)")
         print("---------------------------------------------")
-        failures += securityInvariants()
+        failures += Int(securityInvariants())
 
         // 显示器
         let display = DisplayService()
