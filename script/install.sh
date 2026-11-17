@@ -11,7 +11,7 @@ cleanup() {
   if rm -rf "$STAGING" 2>/dev/null; then return 0; fi
   local dest="$HOME/.Trash/aurora-install-$(date +%s)-$$"
   if mv "$STAGING" "$dest" 2>/dev/null; then
-    echo "  （旧版本副本已移到废纸篓：$dest）"
+    echo "  （旧版本副本已移到废纸篓：${dest}）"
   else
     echo "  ⚠️ 临时目录未清理：$STAGING"
   fi
