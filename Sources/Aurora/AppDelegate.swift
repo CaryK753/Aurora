@@ -391,6 +391,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 收掉壁纸窗口，把桌面还给系统壁纸
         state.wallpaper.teardown()
         WallpaperPreview.dismiss()
+        // 自己拉起的 tailscaled 跟着退出；官方 App 的 daemon 不归我们管
+        state.tailscale.stopDaemon()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }

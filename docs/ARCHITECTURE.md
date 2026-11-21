@@ -80,6 +80,9 @@ gh secret set AURORA_CERT_PASSWORD --body '<密码>'
 - **应用前验证链**：`ProxyEngineRuntime.start` 轮询进程存活 → `ProxyLocalProbe` 用 `lsof` 核对 `127.0.0.1:<port>` 属于该 pid → SOCKS greeting → `fetch generate_204`。全过才 `SystemProxyPreferences.apply`。
 - **系统配置事务**：`SCPreferences` 按服务路径写 `/NetworkServices/<id>/Proxies`，写前把 original / applied 一起存进 `UserDefaults`（重启也能恢复）。`restore()` 会先比对当前值是否仍等于 applied，外部改过就抛错而不是覆盖。
 - **生命周期**：`applicationShouldTerminate` 返回 `.terminateLater`，先 `restoreForTermination()`；内核意外退出由 `onUnexpectedExit` 触发恢复。规则模式的大陆地址库是 APNIC 数据转成的 `ipcidr` rule-provider（文件形式，7 天缓存）。
+- **配置生成**：`ProxyRulePlanner` 是规则顺序的唯一来源，内核配置与「规则测试」共用它；策略组按 `groupType` 生成 select / url-test / fallback，订阅里的伪节点不进组。多份订阅在 `ProxyProfile.subscriptions` 里各自保存，`subscription` 是读写当前那份的兼容入口。
+- **仪表盘**：`ProxyConfiguration` 写 `external-controller-unix`（`Network/controller.sock`，目录 0700，不需要 secret），`ProxyControllerClient` 用 POSIX socket 手写 HTTP/1.1——一次性请求读到 EOF，`/traffic` 与 `/logs` 保持连接按 SSE 行推送；`ProxyLineBuffer` 负责半行拼接，`ProxyMetricsService` 只在面板可见且代理运行时轮询 `/connections` 与 `/proxies`。
+- **Tailscale**：`TailscaleStatusParser` 解析 `tailscale status --json`（官方 App 与自带 daemon 同一结构）；有官方 App 时只调 CLI，没有则用 `tailscaled --tun=userspace-networking --socks5-server` 拉起独立实例，把 SOCKS 端口作为 `TAILSCALE` 代理写进配置，规则里 `ts.net` 与用户域名指向它。
 
 ## 文件锁
 
@@ -107,7 +110,9 @@ gh secret set AURORA_CERT_PASSWORD --body '<密码>'
 - **外接屏亮度**：需要显示器支持 DDC/CI。
 - **键盘类型**：写入 `/Library/Preferences` 需要管理员密码，且要重连键盘或重新登录才生效。
 - **自定义右键菜单**：扩展必须沙盒化，因此落盘与 shell 动作要委托主 App，主 App 没运行时会自动拉起。
-- **系统代理**：只影响遵循系统代理设置的应用，不接管 UDP 与系统 DNS（不改 macOS DNS），内核固定监听 `127.0.0.1`、不开 TUN。
+- **系统代理**：只影响遵循系统代理设置的应用，不接管 UDP 与系统 DNS（不改 macOS DNS），内核固定监听 `127.0.0.1`、不开 TUN；控制口走 Unix socket，不暴露 TCP。
+- **规则测试**：本地近似——IP 规则要解析、规则集内容在文件里、进程规则要真实进程，这三类明确标注为无法判断。
+- **Tailscale**：只做出站，不做 TUN；userspace 实例不能给局域网其他设备当出口，也不支持子网路由下发。
 - **网络扩展**：必须带 `app-proxy-provider-systemextension` 描述文件（要开发者计划），这一版只接管 TCP；Tailscale 组网未实现，界面不提供占位按钮。
 - **文件锁**：钥匙串条目丢失或换机即不可恢复；用原 App 打开密文后保存会毁掉密文；8 GB 上限。
 - 同时开启 Mos / LinearMouse 会产生叠加效果，建议只保留一个滚轮接管。

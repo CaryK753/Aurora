@@ -169,6 +169,7 @@ final class AppState: ObservableObject {
     let audio = AudioService()
     let network = NetworkTunnelService()
     let systemProxy = SystemProxyService()
+    let tailscale = TailscaleService()
     let storage = StorageService()
     let appInventory = AppInventoryService()
     let devCleanup = DevCleanupService()
@@ -198,6 +199,9 @@ final class AppState: ObservableObject {
         settings = SettingsService(persistPreferences: !preview)
         wallpapers = WallpaperLibrary(scanSystem: !preview)
         wallpaper = WallpaperService(library: wallpapers)
+        // 系统代理的组网出站取自 Tailscale；没有可用的 userspace daemon 时它返回 nil，
+        // 配置里就不会出现 TAILSCALE 这个代理，避免内核校验失败。
+        systemProxy.tailscaleOutletPort = { [weak self] in self?.tailscale.outletPort }
         if !preview {
             hardwareSink = trackpad.$hasHardware.removeDuplicates().sink { [weak self] available in
                 guard let self, !UserDefaults.standard.bool(forKey: "settings.trackpadUserChoice") else { return }
