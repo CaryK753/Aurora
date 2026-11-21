@@ -50,11 +50,13 @@ final class SystemProxyService: ObservableObject {
 
     init() {
         let url = Self.directory.appendingPathComponent("profile.json")
+        var loaded = false
         if FileManager.default.fileExists(atPath: url.path) {
-            do { profile = try ProxyProfileStorage.load(from: url) }
+            do { profile = try ProxyProfileStorage.load(from: url); loaded = true }
             catch { profile = ProxyProfile(); self.error = T("本地订阅配置读取失败，请重新导入") }
         } else { profile = ProxyProfile() }
-        normalizeSelection(save: true)
+        // 读失败时不要顺手把空配置写回去，否则用户的订阅就真没了。
+        normalizeSelection(save: loaded)
         engineInstalled = FileManager.default.isExecutableFile(atPath: executable.path)
         mainlandUpdatedAt = Self.modificationDate(mainlandURL)
         if hasBackup { status = T("检测到上次保留的代理配置，请先恢复原配置") }
