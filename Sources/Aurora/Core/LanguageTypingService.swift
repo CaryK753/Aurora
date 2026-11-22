@@ -71,7 +71,8 @@ final class LanguageTypingService: ObservableObject {
     }
 
     var chordBook: ChordBook {
-        snapshot?.chords.isEmpty == false ? snapshot!.chords : .builtIn(for: language)
+        if let snapshot, !snapshot.chords.isEmpty { return snapshot.chords }
+        return .builtIn(for: language)
     }
 
     var currentProgress: LanguageProgress {

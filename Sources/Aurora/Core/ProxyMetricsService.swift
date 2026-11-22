@@ -169,6 +169,8 @@ final class ProxyMetricsService: ObservableObject {
             let map = try ProxyControllerPayload.proxies(data)
             proxies = map
             group = map[ProxyConfiguration.groupName]
+            failures = 0
+            error = nil
         } catch {
             register(failure: error, fallback: T("无法读取策略组"))
         }
