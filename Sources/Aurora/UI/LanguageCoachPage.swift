@@ -18,10 +18,26 @@ struct LanguageCoachPage: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
+        // 键位图与速查只吃值，不观察 service：练习时每敲一个字符都不会重排 52 个键。
+        let weak = service.weakCharacters
+        let language = service.language
+        return VStack(spacing: 12) {
             languageCard
-            KeyboardMapCard(service: service)
-            ChordSheetCard(service: service, state: state)
+            KeyboardMapCard(snapshot: service.snapshot,
+                            notes: service.notes,
+                            special: Set(language.specialCharacters),
+                            weak: weak,
+                            loading: service.loading,
+                            layoutTitle: language.layoutTitle)
+                .equatable()
+            ChordSheetCard(characters: language.specialCharacters,
+                           book: service.chordBook,
+                           weak: weak) { character in
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(character, forType: .string)
+                state.showToast(TF("已复制 %@", character), symbol: "doc.on.clipboard")
+            }
+            .equatable()
             DrillCard(service: service)
             if !service.weakList.isEmpty {
                 WeakCard(service: service)
@@ -107,8 +123,14 @@ struct LanguageCoachPage: View {
 
 // MARK: - 键位图
 
-private struct KeyboardMapCard: View {
-    @ObservedObject var service: LanguageTypingService
+private struct KeyboardMapCard: View, Equatable {
+    var snapshot: LayoutSnapshot?
+    var notes: [LayoutNote]
+    var special: Set<String>
+    var weak: Set<String>
+    var loading: Bool
+    var layoutTitle: String
+
     @Environment(\.auroraContentWidth) private var contentWidth
     /// 卡片实际内宽。auroraContentWidth 在窗口首帧可能是默认值，直接用会把键盘撑出面板。
     @State private var measured: CGFloat = 0
@@ -121,18 +143,24 @@ private struct KeyboardMapCard: View {
 
     private var keyHeight: CGFloat { unit * 1.2 }
 
+    /// 只比较数据：@State 的测量值不参与（它变了说明宽度变了，body 自己会重跑）。
+    static func == (lhs: KeyboardMapCard, rhs: KeyboardMapCard) -> Bool {
+        lhs.snapshot == rhs.snapshot && lhs.notes == rhs.notes && lhs.special == rhs.special
+            && lhs.weak == rhs.weak && lhs.loading == rhs.loading && lhs.layoutTitle == rhs.layoutTitle
+    }
+
     var body: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 6) {
                     SectionLabel(text: T("键位图"), symbol: "keyboard")
-                    if let snapshot = service.snapshot {
-                        Text(snapshot.isFallback ? T("内置表") : service.language.layoutTitle)
+                    if let snapshot {
+                        Text(snapshot.isFallback ? T("内置表") : layoutTitle)
                             .font(.system(size: 8.5, design: .monospaced))
                             .foregroundStyle(.tertiary)
                     }
                     Spacer()
-                    if service.loading { ProgressView().controlSize(.mini) }
+                    if loading { ProgressView().controlSize(.mini) }
                     Text(T("小字是英文键盘上的原字符"))
                         .font(.system(size: 8.5))
                         .foregroundStyle(.tertiary)
@@ -169,17 +197,16 @@ private struct KeyboardMapCard: View {
 
     /// 先讲互换与换位，再讲多出来的字符；多出来的字符里优先这门语言要练的那些。
     private var orderedNotes: [LayoutNote] {
-        let special = Set(service.language.specialCharacters)
-        let swapped = service.notes.filter { $0.kind == .swapped }
-        let moved = service.notes.filter { $0.kind == .replaced }
-        let added = service.notes.filter { $0.kind == .added }
+        let swapped = notes.filter { $0.kind == .swapped }
+        let moved = notes.filter { $0.kind == .replaced }
+        let added = notes.filter { $0.kind == .added }
         return swapped + moved + added.filter { special.contains($0.character) }
             + added.filter { !special.contains($0.character) }
     }
 
     private var footer: some View {
         Group {
-            if service.notes.isEmpty {
+            if notes.isEmpty {
                 Text(T("这门语言与英文键盘的字母位置一致，只需要记特殊字符。"))
                     .font(.system(size: 9))
                     .foregroundStyle(.tertiary)
@@ -191,14 +218,14 @@ private struct KeyboardMapCard: View {
     }
 
     private func keycap(_ key: PhysicalKey) -> some View {
-        let output = service.snapshot?.output(key.code)
+        let output = snapshot?.output(key.code)
         let reference = PhysicalKeyboard.reference[key.code]
         let base = output?.base ?? ""
         // 德语 ^、´ 这类死键：布局里有这个键但不直接出字符，用 ◌ 标出来。
         let deadKey = output != nil && base.isEmpty
         let changed = deadKey || (!base.isEmpty && base != reference?.base)
-        let weak = !base.isEmpty && service.weakCharacters.contains(base)
-        let tint = weak ? AuroraTheme.danger : (changed ? AuroraTheme.accent : Color.secondary)
+        let isWeak = !base.isEmpty && weak.contains(base)
+        let tint = isWeak ? AuroraTheme.danger : (changed ? AuroraTheme.accent : Color.secondary)
 
         return VStack(spacing: 0) {
             HStack(spacing: 1) {
@@ -235,7 +262,7 @@ private struct KeyboardMapCard: View {
         }
         .overlay {
             RoundedRectangle(cornerRadius: 5.5, style: .continuous)
-                .strokeBorder(weak ? AuroraTheme.danger.opacity(0.45) : Color.primary.opacity(0.05), lineWidth: 0.7)
+                .strokeBorder(isWeak ? AuroraTheme.danger.opacity(0.45) : Color.primary.opacity(0.05), lineWidth: 0.7)
         }
         .help(deadKey ? T("死键") + " · \(key.name)" : (base.isEmpty ? key.name : "\(base) · \(key.name)"))
     }
@@ -290,9 +317,16 @@ private struct FlowNotes: View {
 
 // MARK: - 特殊字符速查
 
-private struct ChordSheetCard: View {
-    @ObservedObject var service: LanguageTypingService
-    @ObservedObject var state: AppState
+private struct ChordSheetCard: View, Equatable {
+    var characters: [String]
+    var book: ChordBook
+    var weak: Set<String>
+    var onCopy: (String) -> Void
+
+    /// 闭包不参与比较：数据一样就不重建这 13 个胶囊。
+    static func == (lhs: ChordSheetCard, rhs: ChordSheetCard) -> Bool {
+        lhs.characters == rhs.characters && lhs.book == rhs.book && lhs.weak == rhs.weak
+    }
 
     private let columns = [GridItem(.adaptive(minimum: 92), spacing: 6)]
 
@@ -307,7 +341,7 @@ private struct ChordSheetCard: View {
                         .foregroundStyle(.tertiary)
                 }
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
-                    ForEach(service.language.specialCharacters, id: \.self) { character in
+                    ForEach(characters, id: \.self) { character in
                         chip(character)
                     }
                 }
@@ -322,17 +356,15 @@ private struct ChordSheetCard: View {
     }
 
     private func chip(_ character: String) -> some View {
-        let chord = service.chordBook.chord(for: character)
-        let weak = service.weakCharacters.contains(character)
+        let chord = book.chord(for: character)
+        let isWeak = weak.contains(character)
         return Button {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(character, forType: .string)
-            state.showToast(TF("已复制 %@", character), symbol: "doc.on.clipboard")
+            onCopy(character)
         } label: {
             HStack(spacing: 6) {
                 Text(character)
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
-                    .foregroundStyle(weak ? AnyShapeStyle(AuroraTheme.danger) : AnyShapeStyle(Color.primary))
+                    .foregroundStyle(isWeak ? AnyShapeStyle(AuroraTheme.danger) : AnyShapeStyle(Color.primary))
                     .frame(width: 20)
                 VStack(alignment: .leading, spacing: 1) {
                     // 不用等宽：⇧ 在 9pt 等宽里会糊成一个小圈。
@@ -357,7 +389,7 @@ private struct ChordSheetCard: View {
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(weak ? AuroraTheme.danger.opacity(0.35) : Color.clear, lineWidth: 0.7)
+                    .strokeBorder(isWeak ? AuroraTheme.danger.opacity(0.35) : Color.clear, lineWidth: 0.7)
             }
         }
         .buttonStyle(.plain)

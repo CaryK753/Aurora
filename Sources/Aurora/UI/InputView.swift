@@ -34,8 +34,11 @@ struct InputView: View {
             AnyView(healthCard),
         ].compactMap { $0 })
         .onAppear {
-            service.refreshSources()
-            health.sample()
+            // 首帧之后再刷新：这两个动作都会发一次 @Published，页面刚出现就重排会很卡。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                service.refreshSources()
+                health.sample()
+            }
         }
     }
 

@@ -17,20 +17,37 @@ enum KeyboardLayoutProbe {
     /// 探测只在主线程按需跑一次，这把锁是最后一道保险。
     private static let lock = NSLock()
 
+    /// 每门语言只探一次：读布局本身只要 1–3 ms，但冷启动第一次枚举输入源要 60 ms 以上。
+    /// 缓存也就顺带让「再进一次页面」完全不触发重新排版。
+    private static var cache: [String: LayoutSnapshot] = [:]
+    /// ABC 布局的组合键表对所有语言都一样，只算一次。
+    private static var latinChords: ChordBook?
+
     /// 读一门语言：键位表 + 组合键表。读不到布局时退回内置表并标记 isFallback。
     static func snapshot(for language: TypingLanguage) -> LayoutSnapshot {
         lock.lock()
         defer { lock.unlock() }
+        if let cached = cache[language.layoutID] { return cached }
+
         let keys = readKeys(layoutID: language.layoutID)
-        let english = readKeys(layoutID: primaryLatinLayoutID)
-        let chords = chordBook(from: english)
-        return LayoutSnapshot(
+        let chords = latinChordBook()
+        let snapshot = LayoutSnapshot(
             layoutID: language.layoutID,
             languageID: language.id,
             keys: keys,
             chords: chords.isEmpty ? .builtIn(for: language) : chords,
             isFallback: keys.isEmpty
         )
+        // 读不到布局时不要缓存，下次进来还能重试（比如用户刚在系统设置里装上）。
+        if !keys.isEmpty { cache[language.layoutID] = snapshot }
+        return snapshot
+    }
+
+    private static func latinChordBook() -> ChordBook {
+        if let latinChords { return latinChords }
+        let book = chordBook(from: readKeys(layoutID: primaryLatinLayoutID))
+        if !book.isEmpty { latinChords = book }
+        return book
     }
 
     // MARK: - 布局数据

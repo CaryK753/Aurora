@@ -45,6 +45,8 @@ final class LanguageTypingService: ObservableObject {
     private var probeTask: Task<Void, Never>?
     /// 切语言时旧探测可能还在排队，用序号丢掉过期结果。
     private var probeGeneration = 0
+    /// 这门语言的键位与说明（按 layoutID 存），再进页面时直接用，不再触发重排。
+    private var snappedLayout: [String: (LayoutSnapshot, [LayoutNote])] = [:]
     private var advanceTask: Task<Void, Never>?
     private var syncingText = false
     private var absorbed = false
@@ -56,7 +58,7 @@ final class LanguageTypingService: ObservableObject {
         hintEnabled = ud.object(forKey: Keys.hint) as? Bool ?? true
         engine = DrillEngine(language: TypingLanguage.language(id: id) ?? .german)
         progress = Self.decode(ud.data(forKey: Keys.progress)) ?? [:]
-        loadLayout()
+        preloadLayout()
     }
 
     deinit {
@@ -123,7 +125,7 @@ final class LanguageTypingService: ObservableObject {
 
     func setVisible(_ value: Bool) {
         visible = value
-        if value { loadLayout() }
+        if value { loadLayoutIfNeeded() }
     }
 
     func select(_ id: String) {
@@ -137,30 +139,52 @@ final class LanguageTypingService: ObservableObject {
         syncingText = false
         lastMistake = nil
         absorbed = false
-        snapshot = nil
-        loading = true
-        loadLayout()
+        loadLayoutIfNeeded()
     }
 
-    /// 读系统布局要跑几千次 UCKeyTranslate（几十毫秒）。TIS 不能在后台并发调用，
-    /// 所以留在主线程做一次，再用让出主线程的方式避免面板出现明显停顿。
-    private func loadLayout() {
+    /// 切语言时同步取：探针有缓存，命中时一次赋值就把页面画完，
+    /// 不再「先画空壳、200 ms 后再重排一次」。
+    private func loadLayoutIfNeeded() {
+        probeTask?.cancel()
+        let language = self.language
+        if let cached = snappedLayout[language.layoutID] {
+            apply(cached.0, cached.1)
+            return
+        }
+        // 冷路径（这门语言第一次进来）：读一次系统布局，1–3 ms，仍在主线程（TIS 要求）。
+        let snapshot = KeyboardLayoutProbe.snapshot(for: language)
+        let noteList = LayoutComparison.notes(LayoutComparison.compare(target: snapshot.keys))
+        if !snapshot.isFallback { snappedLayout[language.layoutID] = (snapshot, noteList) }
+        apply(snapshot, noteList)
+    }
+
+    /// 启动时预热当前语言：探针第一次枚举输入源要几十毫秒，别留给页面首帧。
+    private func preloadLayout() {
         probeTask?.cancel()
         probeGeneration += 1
         let generation = probeGeneration
         let language = self.language
-        loading = true
+        loading = snappedLayout[language.layoutID] == nil
         probeTask = Task { [weak self] in
             await Task.yield()
             guard !Task.isCancelled else { return }
             let snapshot = KeyboardLayoutProbe.snapshot(for: language)
+            let noteList = LayoutComparison.notes(LayoutComparison.compare(target: snapshot.keys))
             guard !Task.isCancelled, let self, self.probeGeneration == generation else { return }
-            self.snapshot = snapshot
-            self.notes = LayoutComparison.notes(
-                LayoutComparison.compare(target: snapshot.keys)
-            )
-            self.loading = false
+            if !snapshot.isFallback { self.snappedLayout[language.layoutID] = (snapshot, noteList) }
+            // 页面没开着就不要发 @Published：启动时那一次发布会让整个面板重排一遍。
+            guard self.visible, self.selectedID == language.id else {
+                self.loading = false
+                return
+            }
+            self.apply(snapshot, noteList)
         }
+    }
+
+    private func apply(_ snapshot: LayoutSnapshot, _ noteList: [LayoutNote]) {
+        self.snapshot = snapshot
+        self.notes = noteList
+        self.loading = false
     }
 
     // MARK: - 练习
