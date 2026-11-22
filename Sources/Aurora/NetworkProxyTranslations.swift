@@ -301,7 +301,11 @@ enum NetworkProxyTranslations {
         "主机，例如 127.0.0.1": "Host, e.g. 127.0.0.1",
         "检测中": "Detecting",
         "正在检测 Tailscale…": "Looking for Tailscale…",
-        "本地订阅配置读取失败，请重新导入": "Could not read the local proxy profile. Import it again.",
         "运行中改模式需先恢复原代理": "Restore the previous proxy before changing the mode.",
+        "代理内核没有响应，请恢复原代理后重新应用": "The engine is not responding. Restore the previous proxy, then apply again.",
+        "内核不在运行，系统代理目前指向一个不通的本地端口。": "The engine is not running, so system proxy settings currently point at a dead local port.",
+        "系统代理已写入，内核未运行": "Proxy settings applied, engine not running",
+        "内核可能已退出。先恢复原代理，再重新应用即可。": "The engine probably exited. Restore the previous proxy, then apply again.",
+        "刷新命中次数": "Refresh hit counts",
     ]
 }

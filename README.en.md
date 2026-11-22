@@ -42,7 +42,7 @@ Dynamic wallpaper renders on the desktop layer (above Finder's wallpaper, below 
 | **Pointer** | Every attached mouse, plus a live pointer probe; cursor speed and acceleration, wheel speed and acceleration, **smooth scrolling**, **separate reversal for mouse and trackpad**, Shift-to-horizontal, modifier inversion; **button capture mapping** — hit Capture, press a single button like Mos, then pick an action; the panel pins itself while capturing so no shortcut can close it. **Logitech mice** stay under control: DPI, SmartShift / ratchet, wheel mode, special buttons, per-device profiles with a default, and a setup wizard when a device appears. Bluetooth mice are disconnected before the Mac sleeps so they cannot wake it by accident |
 | **Trackpad** | Tracking speed, tap to click, two-finger secondary click, natural scrolling, zoom/rotate, swipe between pages, three-finger drag — written straight to system preferences |
 | **Keyboard** | Lists every keyboard (built-in / USB / Bluetooth, battery, VID:PID); ANSI / ISO / JIS keyboard type; a **key test** window that highlights physical keys and decodes ⌃⌥⇧⌘ combinations; **clean mode** swallows all key input; repeat delay/rate and F1–F12 function-key priority |
-| **Input methods** (Beta) | Input source switching and caret indicators, per-app and per-site rules, Shift switching, custom snippets with system text-replacement import, and input-process health monitoring |
+| **Input methods** (Beta) | Input source switching and caret indicators, per-app and per-site rules, Shift switching, custom snippets with system text-replacement import, and input-process health monitoring; **language keyboard** (German / French / Spanish) with key maps, a character cheat sheet and mistake-tracked drills |
 | **Menu** | A **real custom Finder context menu** built on a FinderSync extension: copy path, open in Terminal, open with app, run command, create file, **lock / unlock** — add, edit, reorder, toggle individually, effective immediately. Also manages Quick Actions, Services and Finder extensions |
 | **Desktop** | Show or hide desktop icons, hide files and extensions, restart Finder. **Dynamic wallpaper**: looping video / GIF (with head-tail trimming), four auto rules — one fixed, follow Light/Dark appearance (soft cross-fade), time-of-day schedule, shuffle; four built-in **procedural dynamic scenes** (Aurora / Waves / Glow / Sunset — no disk space, recolorable); drag-and-drop library with type filters, full-screen preview, five fill modes (fill / fit / stretch / center / tile), per-display settings; bundled Apple wallpapers (including aerial videos the system has downloaded), an online sources section (Unsplash / Pixabay / Wallhaven / NASA / Coverr) and download-by-URL; playback pauses on lock screen, screensaver, display sleep, system sleep, full-screen apps and low battery, holding the last frame instead of going black |
 | **Clipboard** | Six record types — text, rich text, link, image, file, colour; search, filter, pinning, duplicate merging with counts, keyboard copy/paste, paste as plain text, edit and detail views; ignore rules for confidential types, apps, regex and one-shot skips; recording pauses automatically while secure input is active. The mini clipboard can anchor to the text caret |
@@ -77,6 +77,16 @@ The panel itself is a small dashboard: a status bar with the mode and a live rat
 Known limits: this only affects apps that follow system proxy settings; it does not capture all UDP or system DNS and never rewrites macOS DNS. The engine listens on `127.0.0.1` only — no TUN, no LAN access, no controller port. Subscription URLs, passwords and resolved configs stay in `~/Library/Application Support/Aurora/Network/` (directory 0700, files 0600); nothing goes through a third-party converter and error messages never echo the original URL. Tailscale integration is planned for a later release.
 
 Full support matrix, privacy notes and verification commands live in the [network module notes](docs/network-proxy.md) (Chinese).
+
+## Language keyboard
+
+Learning German, French or Spanish on a Chinese or English keyboard is rarely about vocabulary — it is **how to type the special characters** and **which keys moved**. The Input methods page splits those two problems:
+
+- **Key map** reads the real German / French / Spanish layouts from macOS and draws what every physical key actually produces (German Z ↔ Y, French A/Q and Z/W, Spanish ñ on the semicolon key), followed by a one-line summary of what differs from an English keyboard. It is not a drawing: if Apple changes a layout, the map follows.
+- **Character cheat sheet** derives the chords from the local ABC layout — ä is `⌥U` then A, ß is `⌥S`, é is `⌥E` then E, ç is `⌥C` — and clicking a character copies it.
+- **Practice** drills 14 words chosen for this language's hardest characters (Größe, français, pingüino…), shows the chord for the next character while you type, advances on a correct word and records accuracy, speed and **your most frequent mistakes**, which stay marked on the key map next time.
+
+Everything happens inside Aurora's own window: no global key capture, no changing your system input source, and therefore no extra permissions.
 
 ## File lock
 
@@ -229,7 +239,8 @@ Sources/
 ├── AuroraTunnel/                Transparent-proxy system extension (optional, needs a profile)
 └── NetworkProxyKit/             Subscription parsing, rule generation, engine manifest (pure logic, unit tested)
 Modules/
-└── LogitechPlugin/              Logitech HID++ device plugin (with unit tests)
+├── LogitechPlugin/              Logitech HID++ device plugin (with unit tests)
+└── LanguageLayoutPlugin/        Language layouts, chords and drill engine (with unit tests)
 Resources/                       Icons, entitlements, network third-party notices
 Tests/                           Regression scripts; NetworkProxyKit / SystemProxy have their own tests
 Tools/                           Icon and device-frame generators
@@ -242,14 +253,16 @@ docs/                            Screenshots, architecture, performance and netw
 
 ```bash
 swift build                      # build
-swift test                       # unit tests: LogitechPlugin + NetworkProxyKit
+swift test                       # unit tests: LogitechPlugin + NetworkProxyKit + LanguageLayoutPlugin
 swift test --filter 'SubscriptionTests|RoutingTests|DownloadTests'
+swift test --filter LanguageLayoutPluginTests
 
 bash Tests/Behavior/run.sh       # wallpaper playback policy, recording, desktop
 bash Tests/Functional/run.sh     # energy, display, audio, DDC
 bash Tests/Panel/run.sh Tests/Preferences/run.sh Tests/Permissions/run.sh
 bash Tests/Input/run.sh Tests/Macros/run.sh
 bash Tests/SystemProxy/run.sh    # system-proxy backup and restore conflict checks
+bash Tests/Localization/run.sh   # duplicate translation keys (they crash the English UI at launch)
 bash Tests/NetworkProxyKit/run-integration.sh   # downloads the engine and APNIC data, talks only to a local test server
 ```
 

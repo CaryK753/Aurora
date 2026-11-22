@@ -84,6 +84,15 @@ gh secret set AURORA_CERT_PASSWORD --body '<密码>'
 - **仪表盘**：`ProxyConfiguration` 写 `external-controller-unix`（`Network/controller.sock`，目录 0700，不需要 secret），`ProxyControllerClient` 用 POSIX socket 手写 HTTP/1.1——一次性请求读到 EOF，`/traffic` 与 `/logs` 保持连接按 SSE 行推送；`ProxyLineBuffer` 负责半行拼接，`ProxyMetricsService` 只在面板可见且代理运行时轮询 `/connections` 与 `/proxies`。
 - **Tailscale**：`TailscaleStatusParser` 解析 `tailscale status --json`（官方 App 与自带 daemon 同一结构）；有官方 App 时只调 CLI，没有则用 `tailscaled --tun=userspace-networking --socks5-server` 拉起独立实例，把 SOCKS 端口作为 `TAILSCALE` 代理写进配置，规则里 `ts.net` 与用户域名指向它。
 
+## 小语种键盘
+
+`Modules/LanguageLayoutPlugin` 是纯逻辑包：语言元数据（`LanguageCatalog`）、物理键位与差异比较（`KeyLayout`）、组合键（`Chord`）、练习引擎与错键统计（`DrillEngine`）。界面与系统 API 都在主应用这边。
+
+- **键位从系统读，不写死**：`KeyboardLayoutProbe` 用 `TISCreateInputSourceList`（`includeAllInstalled: true`，没启用的布局也能读）拿到 German / French / Spanish 的 `UCKeyboardLayout`，再用 `UCKeyTranslate` 按物理 keyCode 翻译出「不按 Shift / 按住 Shift」的字符。Apple 改布局、换键盘类型都不用改代码。
+- **组合键也是算出来的**：对 ABC 布局逐个按 `⌥`、`⌥⇧`，遇到死键（`deadKeyState != 0`）就把后面 51 个键依次接上去，得到「ä = ⌥U → A」这类真实两步组合；读不到布局时才退回内置表。
+- **TIS 只能在主线程串行调用**：并发或后台线程调用会让 HIToolbox 在 `islGetInputSourceListWithAdditions` 里直接 abort，所以探测留在主 actor、加锁、并用序号丢弃切语言时过期的结果。
+- **练习不碰系统按键**：输入只来自本应用窗口里的 `TextField`，`DrillEngine` 按目标字符逐位记分（含退格重打），错键统计按字符累积到 `LanguageProgress` 存在 `UserDefaults`。
+
 ## 文件锁
 
 - 只加密内容，不改权限位：权限位挡不住文件主人，把明文挪走才是真保护。
@@ -112,6 +121,7 @@ gh secret set AURORA_CERT_PASSWORD --body '<密码>'
 - **自定义右键菜单**：扩展必须沙盒化，因此落盘与 shell 动作要委托主 App，主 App 没运行时会自动拉起。
 - **系统代理**：只影响遵循系统代理设置的应用，不接管 UDP 与系统 DNS（不改 macOS DNS），内核固定监听 `127.0.0.1`、不开 TUN；控制口走 Unix socket，不暴露 TCP。
 - **规则测试**：本地近似——IP 规则要解析、规则集内容在文件里、进程规则要真实进程，这三类明确标注为无法判断。
+- **小语种键盘**：只画 ANSI 字母与数字区，ISO 专属键不画；不做系统级按键重映射，也不改系统输入源。
 - **Tailscale**：只做出站，不做 TUN；userspace 实例不能给局域网其他设备当出口，也不支持子网路由下发。
 - **网络扩展**：必须带 `app-proxy-provider-systemextension` 描述文件（要开发者计划），这一版只接管 TCP；Tailscale 组网未实现，界面不提供占位按钮。
 - **文件锁**：钥匙串条目丢失或换机即不可恢复；用原 App 打开密文后保存会毁掉密文；8 GB 上限。

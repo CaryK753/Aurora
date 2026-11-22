@@ -21,7 +21,7 @@ struct NetworkRulesTab: View {
             customRules
             ruleSets
         }
-        .task { await loadHits() }
+        .task(id: metrics.live) { await loadHits() }
     }
 
     // MARK: - 规则测试
@@ -109,6 +109,15 @@ struct NetworkRulesTab: View {
                     NetworkQuietButton(title: showAllRules ? T("收起") : T("展开全部")) {
                         showAllRules.toggle()
                     }
+                    Button {
+                        Task { await loadHits() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise").font(.system(size: 9, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help(T("刷新命中次数"))
+                    .disabled(!metrics.live)
                 }
                 let visible = showAllRules ? plan : Array(plan.prefix(8))
                 VStack(spacing: 2) {
@@ -216,8 +225,11 @@ struct NetworkRulesTab: View {
     }
 
     private func loadHits() async {
-        guard metrics.live else { return }
+        guard metrics.live else { hits = [:]; return }
         let rules = await metrics.fetchRules()
+        // 命中次数按内核里的规则序号对应本地计划。条数对不上（例如还在全局模式、
+        // 或者订阅更新后没重新应用）就不显示，免得把别的规则的数字安到这一条上。
+        guard rules.count == plan.count else { hits = [:]; return }
         var map: [Int: Int] = [:]
         for rule in rules { map[rule.index] = rule.hitCount }
         hits = map

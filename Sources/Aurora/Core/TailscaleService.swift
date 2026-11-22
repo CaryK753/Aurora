@@ -152,8 +152,8 @@ final class TailscaleService: ObservableObject {
         error = nil
         defer { busy = false }
         do {
-            if provider == .userspace { try startDaemon() }
-            let result = await command(cli, ["up"], timeout: 6)
+            if provider == .userspace { try await startDaemon() }
+            let result = await command(cli, ["up"], timeout: 20)
             let output = result.output + "\n" + result.error
             if let url = Self.loginURL(in: output) {
                 loginURL = url
@@ -204,7 +204,8 @@ final class TailscaleService: ObservableObject {
 
     // MARK: - userspace daemon
 
-    private func startDaemon() throws {
+    /// 拉起 userspace daemon。等 socket 是异步等——以前在主线程 usleep，最多冻 6 秒。
+    private func startDaemon() async throws {
         if let process = daemonProcess, process.isRunning { return }
         guard let daemonPath else { throw ProxyFailure("本机没有 tailscaled") }
         try FileManager.default.createDirectory(at: Self.directory, withIntermediateDirectories: true,
@@ -227,10 +228,11 @@ final class TailscaleService: ObservableObject {
         try child.run()
         daemonProcess = child
         socksPort = port
-        // 等 socket 出现，最多 6 秒；tailscaled 起来很慢时上层会看到「正在连接」。
+        // 等 socket 出现，最多 6 秒；tailscaled 起来慢时上层会看到「正在连接」。
         let deadline = Date().addingTimeInterval(6)
         while Date() < deadline, !FileManager.default.fileExists(atPath: socketURL.path) {
-            usleep(120_000)
+            try? await Task.sleep(for: .milliseconds(120))
+            if !child.isRunning { break }
         }
         daemonRunning = child.isRunning && FileManager.default.fileExists(atPath: socketURL.path)
         if !daemonRunning {

@@ -56,6 +56,8 @@ public final class ProxyControllerClient {
         private let lock = NSLock()
         private var fd: Int32
         private var cancelled = false
+        /// 连接被对端关掉或读失败时回调（取消不算）。上层用它决定要不要重连。
+        public var onClose: (() -> Void)?
         init(fd: Int32) { self.fd = fd }
         public func cancel() {
             lock.lock(); defer { lock.unlock() }
@@ -63,6 +65,10 @@ public final class ProxyControllerClient {
             cancelled = true
             close(fd)
             fd = -1
+        }
+        fileprivate var isCancelled: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return cancelled
         }
     }
 
@@ -102,7 +108,9 @@ public final class ProxyControllerClient {
                     if let payload { onLine(payload) }
                 }
             }
+            let cancelled = stream.isCancelled
             stream.cancel()
+            if !cancelled { stream.onClose?() }
         }
         return stream
     }

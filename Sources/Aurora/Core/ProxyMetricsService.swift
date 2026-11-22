@@ -31,8 +31,11 @@ final class ProxyMetricsService: ObservableObject {
     private var trafficStream: ProxyControllerClient.Stream?
     private var logStream: ProxyControllerClient.Stream?
     private var pollTask: Task<Void, Never>?
+    private var reconnectTask: Task<Void, Never>?
     private var socketPath: String?
     private var visible = false
+    /// 连续读失败次数：内核刚起来时第一次读可能失败，连着失败才算真的断了。
+    private var failures = 0
 
     var downloadSpeed: Int { sample.down }
     var uploadSpeed: Int { sample.up }
@@ -52,17 +55,20 @@ final class ProxyMetricsService: ObservableObject {
         startedAt = Date()
         live = true
         error = nil
+        failures = 0
         openStreams(client)
         if visible { resume() }
     }
 
     func stop() {
-        trafficStream?.cancel(); trafficStream = nil
-        logStream?.cancel(); logStream = nil
+        reconnectTask?.cancel(); reconnectTask = nil
+        trafficStream?.onClose = nil; trafficStream?.cancel(); trafficStream = nil
+        logStream?.onClose = nil; logStream?.cancel(); logStream = nil
         pollTask?.cancel(); pollTask = nil
         client = nil
         socketPath = nil
         live = false
+        failures = 0
         startedAt = nil
         connections = []
         group = nil
@@ -95,10 +101,34 @@ final class ProxyMetricsService: ObservableObject {
                   let sample = try? ProxyControllerPayload.traffic(data) else { return }
             Task { @MainActor in self?.apply(sample) }
         }
+        trafficStream?.onClose = { [weak self] in
+            Task { @MainActor in self?.streamClosed() }
+        }
         logStream = try? client.stream("/logs?level=info") { [weak self] payload in
             guard let data = payload.data(using: .utf8),
                   let line = try? ProxyControllerPayload.logLine(data) else { return }
             Task { @MainActor in self?.append(line) }
+        }
+        logStream?.onClose = { [weak self] in
+            Task { @MainActor in self?.streamClosed() }
+        }
+    }
+
+    /// 内核重启、socket 被换掉时流会断。隔一秒重开一次，别让面板停在一张旧数据上。
+    private func streamClosed() {
+        guard live, let path = socketPath, reconnectTask == nil else { return }
+        live = false
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, !Task.isCancelled, self.socketPath == path, self.client != nil else { return }
+            self.reconnectTask = nil
+            let client = ProxyControllerClient(socketPath: path)
+            self.client = client
+            self.failures = 0
+            self.error = nil
+            self.live = true
+            self.openStreams(client)
+            if self.visible { self.resume() }
         }
     }
 
@@ -125,10 +155,10 @@ final class ProxyMetricsService: ObservableObject {
             let snapshot = try ProxyControllerPayload.connections(data)
             connections = snapshot.connections.sorted { $0.start ?? .distantPast > $1.start ?? .distantPast }
             memory = snapshot.memory
+            failures = 0
             error = nil
         } catch {
-            self.error = (error as? ProxyFailure)?.message ?? "无法读取代理连接"
-            live = false
+            register(failure: error, fallback: T("无法读取代理连接"))
         }
     }
 
@@ -140,8 +170,18 @@ final class ProxyMetricsService: ObservableObject {
             proxies = map
             group = map[ProxyConfiguration.groupName]
         } catch {
-            self.error = (error as? ProxyFailure)?.message ?? "无法读取策略组"
+            register(failure: error, fallback: T("无法读取策略组"))
         }
+    }
+
+    /// 读失败不代表内核真死了（刚启动、正在重载配置）。先留着界面继续试；
+    /// 连续失败多次才认定断开，避免一次抖动就把整页数据清空。
+    private func register(failure: Error, fallback: String) {
+        failures += 1
+        error = (failure as? ProxyFailure).map { NetworkProxyLocalization.text($0.message) } ?? fallback
+        guard failures >= 5 else { return }
+        stop()
+        error = T("代理内核没有响应，请恢复原代理后重新应用")
     }
 
     func fetchRules() async -> [ProxyRuleInfo] {

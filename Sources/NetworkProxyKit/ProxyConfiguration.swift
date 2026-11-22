@@ -56,18 +56,25 @@ public enum ProxyConfiguration {
         }
 
         var proxies: [[String: Any]] = []
-        for item in subscription.nodes {
+        // 重名节点会让 mihomo 直接拒绝整份配置；订阅里重复命名很常见，这里按名字去重。
+        var seen = Set<String>()
+        for item in subscription.nodes where seen.insert(item.name).inserted {
             if let dictionary = try? item.dictionary() { proxies.append(dictionary) }
         }
-        if let tailscalePort {
+        if let tailscalePort, seen.insert(tailscaleName).inserted {
             proxies.append(["name": tailscaleName, "type": "socks5", "server": "127.0.0.1",
                             "port": tailscalePort, "udp": false])
         }
         if !proxies.isEmpty { config["proxies"] = proxies }
 
-        if settings.mode != .direct, !nodes.isEmpty {
+        // 伪节点（流量、到期）留在 proxies 里给用户看，但不进策略组、也不参与选择。
+        var nodeNames: [String] = []
+        var nodeSeen = Set<String>()
+        for item in nodes where nodeSeen.insert(item.name).inserted { nodeNames.append(item.name) }
+
+        if settings.mode != .direct, !nodeNames.isEmpty {
             var group: [String: Any] = ["name": groupName, "type": settings.groupType.engineType,
-                                        "proxies": nodes.map(\.name)]
+                                        "proxies": nodeNames]
             if settings.groupType != .select {
                 group["url"] = settings.testURL
                 group["interval"] = settings.healthCheckSeconds

@@ -147,7 +147,9 @@ public struct ProxyRuleSet: Codable, Identifiable, Equatable {
     public var providerName: String {
         let allowed = name.lowercased().map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" ? $0 : "-" }
         let trimmed = String(allowed).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-        return "aurora-" + (trimmed.isEmpty ? "rules" : trimmed)
+        let base = "aurora-" + (trimmed.isEmpty ? "rules" : trimmed)
+        // 和内置的大陆地址库重名会互相覆盖，挪开一格。
+        return base == ProxyConfiguration.mainlandProvider ? base + "-set" : base
     }
 
     public var isValid: Bool {
@@ -294,6 +296,9 @@ public struct ProxyProfile: Codable {
                                               refreshHours: settings.subscriptionRefreshHours ?? 0)
             subscriptions = [profile]
             activeSubscriptionID = profile.id
+            // 老配置可能没存 source（那时默认就是订阅）。要是落在「手动节点」上，
+            // 用户升级后点应用会拿 127.0.0.1:7890 去连，看起来像订阅丢了。
+            settings.source = "subscription"
         }
         if activeSubscriptionID == nil { activeSubscriptionID = subscriptions.first?.id }
     }

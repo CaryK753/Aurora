@@ -345,12 +345,12 @@ struct AuroraRootView: View {
 
     private var header: some View {
         HStack(spacing: 9) {
-            Text(T(state.showHotkeys ? "全局快捷键" : state.module.title))
+            Text(T(state.showLanguageCoach ? "小语种键盘" : state.showHotkeys ? "全局快捷键" : state.module.title))
                 .font(.system(size: 15, weight: .semibold, design: .rounded))
                 .lineLimit(1)
                 .layoutPriority(1)
 
-            if !state.showHotkeys, state.module.isBeta {
+            if !state.showHotkeys, !state.showLanguageCoach, state.module.isBeta {
                 Text("Beta")
                     .font(.system(size: 8.5, weight: .bold, design: .rounded))
                     .foregroundStyle(AuroraTheme.accent)
@@ -462,6 +462,8 @@ struct AuroraRootView: View {
             VStack(spacing: 12) {
                 if state.showHotkeys {
                     HotkeySettingsView(hotkeys: state.hotkeys)
+                } else if state.showLanguageCoach {
+                    LanguageCoachPage(state: state)
                 } else {
                     switch state.module {
                     case .overview:

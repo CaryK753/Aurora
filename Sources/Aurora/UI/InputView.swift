@@ -28,6 +28,7 @@ struct InputView: View {
             permissions.accessibility ? nil : AnyView(permissionCard),
             AnyView(indicatorCard),
             AnyView(habitCard),
+            AnyView(LanguageCoachCard(state: state, service: state.languageTyping)),
             AnyView(autoSwitchCard),
             AnyView(snippetCard),
             AnyView(healthCard),

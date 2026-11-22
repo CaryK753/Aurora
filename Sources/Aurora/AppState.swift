@@ -18,6 +18,8 @@ final class AppState: ObservableObject {
     private var pendingFileLockURLs: [URL] = []
     /// 全局快捷键页（与设置页同层的单层内容页，不是覆盖层）
     @Published var showHotkeys = false
+    /// 小语种键盘教练页（输入法模块里的插件，同样是单层内容页）
+    @Published var showLanguageCoach = false
     /// 罗技鼠标设置向导（检测到设备后自动弹出）
     @Published var showLogitechSetup = false
     /// 「动态壁纸」全屏覆盖层
@@ -152,6 +154,7 @@ final class AppState: ObservableObject {
     let trackpad = TrackpadService()
     let keyboard = KeyboardService()
     let input = InputMethodService()
+    let languageTyping = LanguageTypingService()
     let snippets = SnippetService()
     let imeHealth = IMEHealthService()
     let hid = HIDDeviceService()
@@ -220,6 +223,7 @@ final class AppState: ObservableObject {
             self.appAudio.setModuleEnabled(!disabled.contains("audio"))
             self.keyboard.setModuleEnabled(!disabled.contains("keyboard"))
             self.input.setModuleEnabled(!disabled.contains("input"))
+            self.languageTyping.setModuleEnabled(!disabled.contains("input"))
             self.snippets.setModuleEnabled(!disabled.contains("input"))
             self.imeHealth.setModuleEnabled(!disabled.contains("input"))
         }
@@ -355,6 +359,7 @@ final class AppState: ObservableObject {
         withAnimation(.smooth(duration: 0.26)) {
             self.module = module
             self.showHotkeys = false
+            self.showLanguageCoach = false
         }
         monitor.resume()
     }

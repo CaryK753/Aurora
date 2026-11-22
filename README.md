@@ -42,7 +42,7 @@ Aurora 是一个常驻菜单栏的原生 macOS 工具，用 SwiftUI 写成，界
 | **鼠标** | 识别所有外接鼠标与指针实时测试；指针速度与加速度、滚轮速度与加速度、**平滑滚动**、鼠标与触控板**分别反转**、Shift 横向滚动、修饰键临时反转；**按键捕获映射**（像 Mos 那样点「捕获」后单独按下某个按键再指定动作，捕获期间窗口自动固定，不会误触快捷键收起）；**罗技鼠标**长期接管：DPI、SmartShift / 分段阻尼、滚轮模式、特殊按键映射，方案按设备保存并可设默认，检测到设备时弹向导直接调好；系统睡眠前主动断开 HID，避免蓝牙鼠标反向唤醒电脑 |
 | **触控板** | 跟踪速度、轻点点按、双指辅助点按、自然滚动、放大旋转、页面轻扫、三指拖移，直接写入系统偏好 |
 | **键盘** | 列出所有键盘（内建 / USB / 蓝牙、电量、VID:PID）；键盘类型 ANSI / ISO / JIS；**按键测试**窗口高亮物理按键并识别 ⌃⌥⇧⌘ 组合；**清洁键盘**临时吞掉所有按键；按键重复延迟与速度、F1–F12 功能键优先 |
-| **输入法**（Beta） | 输入源切换与光标旁指示器、按应用 / 网站自动切换、Shift 中英文切换、Caps Lock 行为、自定义短语与系统文本替换导入、输入法进程健康监测 |
+| **输入法**（Beta） | 输入源切换与光标旁指示器、按应用 / 网站自动切换、Shift 中英文切换、Caps Lock 行为、自定义短语与系统文本替换导入、输入法进程健康监测；**小语种键盘**（德 / 法 / 西）键位图、特殊字符速查与错键统计练习 |
 | **菜单** | 内置 FinderSync 扩展实现的**自定义右键菜单**：复制路径、在终端打开、用指定 App 打开、运行命令、新建文件、**锁定 / 解锁**，可增删改、排序、单独开关，改完即时生效；同时管理系统的快速操作 / 服务 / Finder 扩展 |
 | **桌面** | 隐藏或显示桌面图标、隐藏文件与扩展名、重启访达；**动态壁纸**：视频 / GIF 循环播放（可掐头去尾），支持固定一张、跟随浅色 / 深色外观（柔和过渡）、按一天内时间点、随机轮播四种自动规则；内置 4 个**程序生成动态场景**（极光 / 波浪 / 流光 / 暮色，不占磁盘、可自定义配色）；壁纸库直接拖入文件、按类型筛选、全屏预览、五种填充方式（填充 / 适应 / 拉伸 / 居中 / 平铺）、每个显示器独立设置；内置 Apple 壁纸库（含系统下载的航拍动态视频），外部壁纸库收录 Unsplash / Pixabay / Wallhaven / NASA / Coverr，可从直链下载；锁屏 / 屏保 / 显示器休眠 / 整机睡眠 / 全屏应用 / 低电量时按策略停住画面，暂停保留最后一帧 |
 | **剪贴板** | 文本 / 富文本 / 链接 / 图片 / 文件 / 颜色六类记录；搜索、筛选、固定置顶、重复合并计数、快捷键复制与粘贴、纯文本粘贴、编辑与详情；忽略规则支持机密类型、指定 App、正则与单次忽略；输入密码时自动暂停记录；mini 剪切板可贴在输入光标处 |
@@ -77,6 +77,16 @@ macOS 上的代理分两种做法，Aurora 都支持，但默认只走能用的�
 已知边界：只影响遵循系统代理的应用，不接管所有 UDP 或系统 DNS，不改写 macOS 的 DNS 设置；内核只监听 `127.0.0.1`，不开 TUN、不开局域网访问、不开控制器端口。订阅地址、密码与解析后的配置只写在本机 `~/Library/Application Support/Aurora/Network/`（目录 0700、文件 0600），不上传第三方转换服务，错误提示也不会回显原链接。Tailscale 组网留到后续版本。
 
 完整的支持范围、隐私说明与验证命令见 [网络模块说明](docs/network-proxy.md)。
+
+## 小语种键盘
+
+用中文或英文键盘学德语、法语、西语时，麻烦的从来不是单词，而是**特殊字符怎么打**和**哪些键被换了位置**。输入法页的「小语种键盘」把这两件事拆开处理：
+
+- **键位图**直接读系统里的 German / French / Spanish 布局，把每个物理键真实打出来的字符画出来（德语 Z ↔ Y、法语 A/Q 与 Z/W、西语 ñ 在分号键），下面用一句话列出与英文键盘的差别。不是示意图，Apple 改布局也跟着变。
+- **特殊字符速查**从本机的 ABC 布局反推组合键：ä 是 `⌥U` 再按 A，ß 是 `⌥S`，é 是 `⌥E` 再按 E，ç 是 `⌥C`。点一下就把字符复制走。
+- **练习**用这门语言里最容易打错的 14 个词（Größe、français、pingüino……），边打边显示下一个字符怎么按；打对自动进下一个，结束后记录正确率、速度与**错得最多的字符**，下次打开还标在键位图上。
+
+只在 Aurora 自己的窗口里读文本框，不拦截系统按键、不改系统输入源，所以不需要额外权限。
 
 ## 文件锁
 
@@ -229,7 +239,8 @@ Sources/
 ├── AuroraTunnel/                透明代理系统扩展（可选打包，需要描述文件）
 └── NetworkProxyKit/             订阅解析、规则生成、内核清单（纯逻辑，可单测）
 Modules/
-└── LogitechPlugin/              罗技 HID++ 设备插件（含单元测试）
+├── LogitechPlugin/              罗技 HID++ 设备插件（含单元测试）
+└── LanguageLayoutPlugin/        小语种键位数据、组合键与练习引擎（含单元测试）
 Resources/                       图标、entitlements、网络第三方声明
 Tests/                           回归脚本；NetworkProxyKit / SystemProxy 另有测试
 Tools/                           图标与设备外壳生成
@@ -242,14 +253,16 @@ docs/                            截图、架构、性能与网络模块说明
 
 ```bash
 swift build                      # 编译
-swift test                       # 单元测试：LogitechPlugin + NetworkProxyKit
+swift test                       # 单元测试：LogitechPlugin + NetworkProxyKit + LanguageLayoutPlugin
 swift test --filter 'SubscriptionTests|RoutingTests|DownloadTests'
+swift test --filter LanguageLayoutPluginTests
 
 bash Tests/Behavior/run.sh       # 壁纸播放策略、录屏、桌面等回归
 bash Tests/Functional/run.sh     # 节能、显示、音量、DDC 等
 bash Tests/Panel/run.sh Tests/Preferences/run.sh Tests/Permissions/run.sh
 bash Tests/Input/run.sh Tests/Macros/run.sh
 bash Tests/SystemProxy/run.sh    # 系统代理备份与恢复的冲突判定
+bash Tests/Localization/run.sh   # 翻译表重复键（重复会让英文界面启动即崩）
 bash Tests/NetworkProxyKit/run-integration.sh   # 会下载内核与 APNIC 数据，只连本机测试服务
 ```
 

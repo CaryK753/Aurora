@@ -139,12 +139,27 @@ public struct ProxyConnection: Decodable, Identifiable, Equatable {
         return ""
     }
 
+    /// mihomo 的 start 是 RFC3339Nano（`2026-01-02T03:04:05.123456789+08:00`）。
+    /// ISO8601DateFormatter 只认毫秒，9 位小数会整条解析失败、时长永远显示 0，
+    /// 所以先把小数部分截到 3 位再交给它。
     static func date(from text: String) -> Date? {
+        let normalized = normalizeFraction(text)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: text) { return date }
+        if let date = formatter.date(from: normalized) { return date }
         formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: text)
+        return formatter.date(from: normalized)
+    }
+
+    /// 只截时间部分的小数位，时区偏移里的数字不动。
+    static func normalizeFraction(_ text: String) -> String {
+        guard let dot = text.firstIndex(of: ".") else { return text }
+        var end = text.index(after: dot)
+        while end < text.endIndex, text[end].isNumber { end = text.index(after: end) }
+        let digits = text.distance(from: text.index(after: dot), to: end)
+        guard digits > 3 else { return text }
+        let keep = text.index(text.index(after: dot), offsetBy: 3)
+        return String(text[text.startIndex..<keep]) + String(text[end...])
     }
 }
 

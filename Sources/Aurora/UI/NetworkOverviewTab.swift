@@ -6,10 +6,8 @@ import NetworkProxyKit
 import SwiftUI
 
 struct NetworkOverviewTab: View {
-    @ObservedObject var state: AppState
     @ObservedObject var system: SystemProxyService
     @ObservedObject var metrics: ProxyMetricsService
-    @ObservedObject var tunnel: NetworkTunnelService
     @ObservedObject var tailscale: TailscaleService
 
     var body: some View {
@@ -54,6 +52,8 @@ private struct NetworkGroupCard: View {
     @ObservedObject var system: SystemProxyService
     @ObservedObject var metrics: ProxyMetricsService
     @State private var showAllNodes = false
+    /// 节点列表的「展开全部」和健康检查折叠是两件事，别共用同一个状态。
+    @State private var showHealth = false
 
     private var groupType: ProxyGroupType { system.profile.settings.groupType }
     private var nodes: [ProxyNode] { system.nodes }
@@ -105,8 +105,9 @@ private struct NetworkGroupCard: View {
                     nodeList
                 }
 
-                DisclosureGroup(isExpanded: $showAllNodes) {
-                    VStack(alignment: .leading, spacing: 6) {                        HStack {
+                DisclosureGroup(isExpanded: $showHealth) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
                             Text(T("健康检查地址")).font(.system(size: 10.5)).foregroundStyle(.secondary)
                             TextField("https://www.gstatic.com/generate_204",
                                       text: $system.profile.settings.testURL)

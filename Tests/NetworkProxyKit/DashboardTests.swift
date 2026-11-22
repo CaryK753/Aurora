@@ -258,6 +258,50 @@ final class DashboardTests: XCTestCase {
         XCTAssertEqual(process.terminationStatus, 0, output)
     }
 
+    // MARK: - 审查修复
+
+    /// mihomo 的 start 是 9 位小数的 RFC3339，ISO8601DateFormatter 默认只认毫秒。
+    func testConnectionStartAcceptsNanosecondFraction() throws {
+        let json = Data(#"""
+        {"connections":[{"id":"1","upload":1,"download":2,
+        "start":"2026-11-22T10:00:00.123456789+08:00","chains":["AURORA"],"rule":"Match","rulePayload":""}]}
+        """#.utf8)
+        let snapshot = try ProxyControllerPayload.connections(json)
+        let start = try XCTUnwrap(snapshot.connections.first?.start)
+        let expected = try XCTUnwrap(ProxyConnection.date(from: "2026-11-22T10:00:00.123+08:00"))
+        XCTAssertEqual(start.timeIntervalSince1970, expected.timeIntervalSince1970, accuracy: 0.001)
+        XCTAssertEqual(ProxyConnection.normalizeFraction("2026-11-22T10:00:00.12Z"), "2026-11-22T10:00:00.12Z")
+    }
+
+    func testDuplicateNodeNamesAreDroppedFromConfig() throws {
+        var settings = ProxySettings()
+        settings.selectedNode = "N1"
+        settings.bypassMainland = false
+        let subscription = ProxySubscription(nodes: [try node("N1"), try node("N1"), try node("N2")])
+        let config = try object(settings, subscription)
+        let proxies = try XCTUnwrap(config["proxies"] as? [[String: Any]])
+        XCTAssertEqual(proxies.compactMap { $0["name"] as? String }, ["N1", "N2"])
+        let groups = try XCTUnwrap(config["proxy-groups"] as? [[String: Any]])
+        XCTAssertEqual(groups.first?["proxies"] as? [String], ["N1", "N2"])
+    }
+
+    /// 自定义规则集叫「mainland」时不能和内置大陆地址库撞名。
+    func testRuleSetCannotShadowMainlandProvider() {
+        let set = ProxyRuleSet(name: "mainland", url: "https://rules.example.com/a.yaml")
+        XCTAssertNotEqual(set.providerName, ProxyConfiguration.mainlandProvider)
+    }
+
+    /// 1.5.x 老配置没有 source 时不应该落到「手动节点」。
+    func testLegacyProfileWithoutSourceFallsBackToSubscription() throws {
+        let legacy = Data(#"""
+        {"settings":{"subscriptionURL":"https://sub.example.com/x"},
+        "subscription":{"nodes":[{"name":"Node","configuration":""}],"rules":[],"warnings":[],"format":"clash"}}
+        """#.utf8)
+        let profile = try JSONDecoder().decode(ProxyProfile.self, from: legacy)
+        XCTAssertEqual(profile.settings.source, "subscription")
+        XCTAssertEqual(profile.subscriptions.count, 1)
+    }
+
     // MARK: - 辅助
 
     private func node(_ name: String) throws -> ProxyNode {

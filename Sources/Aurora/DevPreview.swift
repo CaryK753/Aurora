@@ -53,7 +53,9 @@ enum DevPreview {
     /// 屏幕检测图案的离屏预览（只用于核对图案本身，不影响真实显示器）
     @ViewBuilder
     static func previewBody(_ state: AppState, module: String) -> some View {
-        if module == "storage-apps" {
+        if module == "language-coach" {
+            LanguageCoachPage(state: state)
+        } else if module == "storage-apps" {
             StorageView(state: state, initialTab: .apps)
         } else if module == "storage-dev" {
             StorageView(state: state, initialTab: .dev)
@@ -129,6 +131,17 @@ enum DevPreview {
         if let target = AuroraModule(rawValue: module == "recorder-pip" ? "recorder" : module) {
             state.module = target
         }
+        // 键盘教练：先把系统布局读出来、开一轮练习，截图里才有内容
+        if module == "language-coach" {
+            state.module = .input
+            state.showLanguageCoach = true
+            state.languageTyping.setVisible(true)
+            if let id = ProcessInfo.processInfo.environment["AURORA_COACH_LANG"] {
+                state.languageTyping.select(id)
+            }
+            state.languageTyping.startDrill()
+            waitUntil(timeout: 8) { !state.languageTyping.loading }
+        }
         // 离屏渲染不会跑视图的 .task，扫描得手动起一次
         if module == "storage" || module == "storage-apps" || module == "storage-dev" {
             state.module = .storage
@@ -181,7 +194,7 @@ enum DevPreview {
         // 直接用模块视图（不带 ScrollView），ImageRenderer 才能把它们完整排版出来
         let content = VStack(spacing: 0) {
             HStack(spacing: 9) {
-                Text(T(state.module.title))
+                Text(T(state.showLanguageCoach ? "小语种键盘" : state.module.title))
                     .font(.system(size: 15, weight: .semibold, design: .rounded))
                 Spacer()
             }
@@ -367,10 +380,23 @@ enum WindowSnapshot {    /// 截图编辑器真窗口快照（检查工具栏在
             state.showWallpaper = true
         }
         if ProcessInfo.processInfo.arguments.contains("--preview-import") { state.showImport = true }
+        if ProcessInfo.processInfo.arguments.contains("--preview-coach") {
+            state.module = .input
+            state.showLanguageCoach = true
+            state.languageTyping.setVisible(true)
+            if let id = ProcessInfo.processInfo.environment["AURORA_COACH_LANG"] {
+                state.languageTyping.select(id)
+            }
+            state.languageTyping.startDrill()
+            waitUntil(timeout: 8) { !state.languageTyping.loading }
+        }
         RunLoop.main.run(until: Date().addingTimeInterval(1.5))
         if module == "storage" { waitForStorageScan(state) }
 
-        let size = PanelController.panelSize
+        // --preview-tall：临时把窗口拉高，用来核对长页面（滚动区域一次看全）
+        let base = PanelController.panelSize
+        let size = ProcessInfo.processInfo.arguments.contains("--preview-tall")
+            ? CGSize(width: base.width, height: 1400) : base
         let window = AuroraPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: pinned ? [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView] : [.borderless, .fullSizeContentView],

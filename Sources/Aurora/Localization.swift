@@ -472,6 +472,7 @@ enum L10n {
             .merging(ModuleTranslations.english) { _, value in value }
             .merging(FeatureTranslations.english) { _, value in value }
             .merging(NetworkProxyTranslations.english) { _, value in value }
+            .merging(LanguageCoachTranslations.english) { _, value in value }
     }()
 }
 

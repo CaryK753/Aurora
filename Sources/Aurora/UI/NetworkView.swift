@@ -56,7 +56,7 @@ struct NetworkView: View {
                 NetworkTabBar(selection: $tab, connections: metrics.connections.count, logs: metrics.logs.count)
                 switch tab {
                 case .overview:
-                    NetworkOverviewTab(state: state, system: system, metrics: metrics, tunnel: tunnel, tailscale: tailscale)
+                    NetworkOverviewTab(system: system, metrics: metrics, tailscale: tailscale)
                 case .connections:
                     NetworkConnectionsTab(system: system, metrics: metrics)
                 case .rules:
@@ -88,7 +88,12 @@ private struct NetworkStatusCard: View {
     @ObservedObject var system: SystemProxyService
     @ObservedObject var metrics: ProxyMetricsService
 
-    private var running: Bool { system.hasBackup }
+    /// 「系统代理已写入」和「内核还活着」是两件事：恢复失败或内核崩掉时，
+    /// 系统代理仍指向一个不通的本地端口，界面必须说实话。
+    private var applied: Bool { system.hasBackup }
+    private var engineRunning: Bool { system.isRunning }
+    private var abnormal: Bool { applied && !engineRunning }
+
     private var modeText: String {
         switch system.profile.settings.mode {
         case .global: return T("全局")
@@ -105,17 +110,19 @@ private struct NetworkStatusCard: View {
                     get: { system.profile.settings.mode },
                     set: { system.profile.settings.mode = $0 }
                 ), options: [(ProxyMode.global, "全局"), (ProxyMode.rule, "规则"), (ProxyMode.direct, "直连")])
-                .disabled(running || system.isBusy)
-                .opacity(running ? 0.55 : 1)
-                if running {
+                .disabled(applied || system.isBusy)
+                .opacity(applied ? 0.55 : 1)
+                if applied {
                     Text(T("运行中改模式需先恢复原代理"))
                         .font(.system(size: 9.5)).foregroundStyle(.tertiary)
                 }
 
-                if running, metrics.live {
+                if applied, metrics.live {
                     liveTraffic
                 } else {
-                    Text(running ? T("正在等待内核就绪…") : T("应用后这里会显示实时速率与本次会话流量。"))
+                    Text(abnormal ? T("内核不在运行，系统代理目前指向一个不通的本地端口。")
+                                  : applied ? T("正在等待内核就绪…")
+                                  : T("应用后这里会显示实时速率与本次会话流量。"))
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                 }
@@ -133,15 +140,15 @@ private struct NetworkStatusCard: View {
                         .buttonStyle(.plain)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(AuroraTheme.accent)
-                    if running, let status = metrics.error, !status.isEmpty {
+                    if applied, let status = metrics.error, !status.isEmpty {
                         Text(status).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer()
-                    NetworkPrimaryButton(title: running ? T("恢复原代理") : T("应用系统代理"),
+                    NetworkPrimaryButton(title: applied ? T("恢复原代理") : T("应用系统代理"),
                                          busy: system.isBusy,
-                                         busyTitle: running ? T("正在恢复") : T("正在应用")) {
+                                         busyTitle: applied ? T("正在恢复") : T("正在应用")) {
                         Task {
-                            if running { system.restore() } else { await system.apply() }
+                            if applied { system.restore() } else { await system.apply() }
                         }
                     }
                     .disabled(system.isBusy)
@@ -154,20 +161,26 @@ private struct NetworkStatusCard: View {
         HStack(alignment: .center, spacing: 12) {
             ZStack {
                 Circle()
-                    .fill(running ? AuroraTheme.accent.opacity(0.16) : Color.primary.opacity(0.06))
+                    .fill(abnormal ? AuroraTheme.warn.opacity(0.16)
+                          : applied ? AuroraTheme.accent.opacity(0.16)
+                          : Color.primary.opacity(0.06))
                     .frame(width: 52, height: 52)
-                Image(systemName: running ? "network.badge.shield.half.filled" : "network")
+                Image(systemName: abnormal ? "exclamationmark.triangle.fill"
+                                     : applied ? "network.badge.shield.half.filled" : "network")
                     .font(.system(size: 21, weight: .medium))
-                    .foregroundStyle(running ? AnyShapeStyle(AuroraTheme.accent) : AnyShapeStyle(Color.secondary))
+                    .foregroundStyle(abnormal ? AnyShapeStyle(AuroraTheme.warn)
+                                     : applied ? AnyShapeStyle(AuroraTheme.accent)
+                                     : AnyShapeStyle(Color.secondary))
             }
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(running ? T("系统代理运行中") : T("系统代理未启用"))
+                    Text(abnormal ? T("系统代理已写入，内核未运行")
+                                  : applied ? T("系统代理运行中") : T("系统代理未启用"))
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
                         .layoutPriority(1)
-                    NetworkChip(text: modeText, tint: running ? AuroraTheme.accent : Color.secondary, maxWidth: 56)
+                    NetworkChip(text: modeText, tint: applied ? AuroraTheme.accent : Color.secondary, maxWidth: 56)
                 }
                 Text(subtitle)
                     .font(.system(size: 10.5))
@@ -176,7 +189,7 @@ private struct NetworkStatusCard: View {
             }
             Spacer(minLength: 6)
             if system.isBusy { ProgressView().controlSize(.small) }
-            AuroraToggle(isOn: Binding(get: { running }, set: { on in
+            AuroraToggle(isOn: Binding(get: { applied }, set: { on in
                 guard !system.isBusy else { return }
                 Task { if on { await system.apply() } else { system.restore() } }
             }))
@@ -185,7 +198,8 @@ private struct NetworkStatusCard: View {
 
     private var subtitle: String {
         if system.isBusy, !system.status.isEmpty { return system.status }
-        if running {
+        if abnormal { return T("内核可能已退出。先恢复原代理，再重新应用即可。") }
+        if applied {
             let port = system.profile.settings.localPort
             return T("正在把流量交给本机内核") + " · 127.0.0.1:\(port)"
         }
