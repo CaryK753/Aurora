@@ -36,6 +36,9 @@ public struct TypingLanguage: Identifiable, Equatable, Sendable {
     public let id: String
     /// 系统输入源 ID（`com.apple.keylayout.German` 这类），用来读真实键位。
     public let layoutID: String
+    /// 系统设置里显示的输入源名。意大利语的 QWERTY 版 ID 是 Italian-Pro，
+    /// 但系统里就叫「Italian」，别让用户照着 ID 去设置里找一个不存在的名字。
+    public let layoutName: String
     /// 这门语言自己的写法
     public let nativeName: String
     public let chineseName: String
@@ -49,6 +52,11 @@ public struct TypingLanguage: Identifiable, Equatable, Sendable {
     public let words: [DrillWord]
 
     public var displayName: String { nativeName }
+
+    /// 键位图角标用的布局名。
+    public var layoutTitle: String {
+        layoutName.isEmpty ? layoutID.replacingOccurrences(of: "com.apple.keylayout.", with: "") : layoutName
+    }
 }
 
 // MARK: - 内置语言
@@ -57,6 +65,7 @@ public extension TypingLanguage {
     static let german = TypingLanguage(
         id: "de",
         layoutID: "com.apple.keylayout.German",
+        layoutName: "German",
         nativeName: "Deutsch",
         chineseName: "德语",
         englishName: "German",
@@ -93,6 +102,7 @@ public extension TypingLanguage {
     static let french = TypingLanguage(
         id: "fr",
         layoutID: "com.apple.keylayout.French",
+        layoutName: "French",
         nativeName: "Français",
         chineseName: "法语",
         englishName: "French",
@@ -129,6 +139,7 @@ public extension TypingLanguage {
     static let spanish = TypingLanguage(
         id: "es",
         layoutID: "com.apple.keylayout.Spanish",
+        layoutName: "Spanish",
         nativeName: "Español",
         chineseName: "西班牙语",
         englishName: "Spanish",
@@ -162,8 +173,49 @@ public extension TypingLanguage {
         ]
     )
 
+    static let italian = TypingLanguage(
+        id: "it",
+        // 系统里叫「Italian」的那个就是 QWERTY，ID 却是 Italian-Pro；
+        // 只有 ID 为 Italian 的是老打字机布局（QZERTY，Z/W 互换）。
+        layoutID: "com.apple.keylayout.Italian-Pro",
+        layoutName: "Italian",
+        nativeName: "Italiano",
+        chineseName: "意大利语",
+        englishName: "Italian",
+        family: .qwerty,
+        specialCharacters: ["à", "è", "é", "ì", "ò", "ù", "À", "È", "É", "Ì", "Ò", "Ù", "€"],
+        notes: [
+            "字母行和英文键盘完全一样，A–Z 不用重新记。",
+            "重音字母在右手边：[ 键是 è、; 键是 ò（加 Shift 是 ç）、' 键是 à、\\ 键是 ù，= 键是 ì。",
+            "撇号挪到了 - 键（加 Shift 是 ?），真正的连字符在 / 键。",
+            "macOS 里还有一个老式的「Italian – QZERTY」输入源（Z/W 互换、M 跑到 L 右边），那是打字机布局，日常别选它。",
+        ],
+        notesEN: [
+            "The letter rows are identical to a US keyboard; nothing to relearn from A to Z.",
+            "Accents sit on the right: è on [, ò on ; (ç with Shift), à on ', ù on \\ and ì on =.",
+            "The apostrophe moved onto the - key (Shift gives ?), and the real hyphen is on /.",
+            "macOS also ships a legacy \u{201C}Italian – QZERTY\u{201D} source (Z/W swapped, M beside L); that is the typewriter layout, don't pick it day to day.",
+        ],
+        words: [
+            DrillWord("caffè", "咖啡", "coffee"),
+            DrillWord("città", "城市", "city"),
+            DrillWord("più", "更多", "more"),
+            DrillWord("però", "但是", "but"),
+            DrillWord("così", "这样", "like this"),
+            DrillWord("perché", "为什么", "why"),
+            DrillWord("università", "大学", "university"),
+            DrillWord("qualità", "质量", "quality"),
+            DrillWord("lunedì", "星期一", "Monday"),
+            DrillWord("ventitré", "二十三", "twenty-three"),
+            DrillWord("società", "公司", "company"),
+            DrillWord("può", "能够", "can"),
+            DrillWord("già", "已经", "already"),
+            DrillWord("un'altra", "另一个（阴性）", "another"),
+        ]
+    )
+
     /// 现在支持的语言。顺序就是界面上的顺序。
-    static let catalog: [TypingLanguage] = [.german, .french, .spanish]
+    static let catalog: [TypingLanguage] = [.german, .french, .spanish, .italian]
 
     static func language(id: String) -> TypingLanguage? {
         catalog.first { $0.id == id }

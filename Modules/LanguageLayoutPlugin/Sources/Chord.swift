@@ -72,6 +72,7 @@ public extension ChordBook {
         case "de": return german
         case "fr": return french
         case "es": return spanish
+        case "it": return italian
         default: return ChordBook()
         }
     }
@@ -130,6 +131,23 @@ public extension ChordBook {
         "Ü": Chord(["⌥U", "⇧U"], deadKey: true),
         "¿": Chord(["⌥⇧?"]),
         "¡": Chord(["⌥1"]),
+        "€": Chord(["⌥⇧2"]),
+    ])
+
+    /// 意大利语只需要重音符（à è ì ò ù）与一个锐音符（é）。
+    static let italian = ChordBook([
+        "à": Chord(["⌥`", "A"], deadKey: true),
+        "è": Chord(["⌥`", "E"], deadKey: true),
+        "ì": Chord(["⌥`", "I"], deadKey: true),
+        "ò": Chord(["⌥`", "O"], deadKey: true),
+        "ù": Chord(["⌥`", "U"], deadKey: true),
+        "é": Chord(["⌥E", "E"], deadKey: true),
+        "À": Chord(["⌥`", "⇧A"], deadKey: true),
+        "È": Chord(["⌥`", "⇧E"], deadKey: true),
+        "Ì": Chord(["⌥`", "⇧I"], deadKey: true),
+        "Ò": Chord(["⌥`", "⇧O"], deadKey: true),
+        "Ù": Chord(["⌥`", "⇧U"], deadKey: true),
+        "É": Chord(["⌥E", "⇧E"], deadKey: true),
         "€": Chord(["⌥⇧2"]),
     ])
 }

@@ -5,8 +5,8 @@ enum LanguageCoachTranslations {
     static let english: [String: String] = [
         "小语种键盘": "Language keyboard",
         "特殊字符与键位互换，边看边练": "Special characters and moved keys, with practice",
-        "用中文/英文键盘学德语、法语、西语：先看清特殊字符怎么打，再用练习词把键位练成肌肉记忆。":
-            "Learn German, French or Spanish on a Chinese or English keyboard: see how each special character is typed, then drill the key positions into muscle memory.",
+        "用中文/英文键盘学%@：先看清特殊字符怎么打，再用练习词把键位练成肌肉记忆。":
+            "Learn %@ on a Chinese or English keyboard: see how each special character is typed, then drill the key positions into muscle memory.",
         "特殊字符掌握度": "Character mastery",
         "还没练过，先开始一轮练习": "Not practised yet — start a round",
         "上次练习 %@": "Last practised %@",

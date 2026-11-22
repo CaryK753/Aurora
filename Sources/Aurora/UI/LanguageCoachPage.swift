@@ -127,7 +127,7 @@ private struct KeyboardMapCard: View {
                 HStack(spacing: 6) {
                     SectionLabel(text: T("键位图"), symbol: "keyboard")
                     if let snapshot = service.snapshot {
-                        Text(snapshot.isFallback ? T("内置表") : snapshot.layoutID.replacingOccurrences(of: "com.apple.keylayout.", with: ""))
+                        Text(snapshot.isFallback ? T("内置表") : service.language.layoutTitle)
                             .font(.system(size: 8.5, design: .monospaced))
                             .foregroundStyle(.tertiary)
                     }

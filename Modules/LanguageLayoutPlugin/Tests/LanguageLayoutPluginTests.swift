@@ -5,14 +5,24 @@ final class LanguageLayoutPluginTests: XCTestCase {
 
     // MARK: - 语言数据
 
-    func testCatalogHasThreeLanguagesWithLayoutIDs() {
+    func testCatalogLanguagesHaveLayoutIDs() {
         let ids = TypingLanguage.catalog.map(\.id)
-        XCTAssertEqual(ids, ["de", "fr", "es"])
+        XCTAssertEqual(ids, ["de", "fr", "es", "it"])
         for language in TypingLanguage.catalog {
             XCTAssertFalse(language.words.isEmpty)
             XCTAssertTrue(language.layoutID.hasPrefix("com.apple.keylayout."))
             XCTAssertFalse(language.specialCharacters.isEmpty)
             XCTAssertEqual(language.notes.count, language.notesEN.count)
+        }
+    }
+
+    /// 速查表里的每个字符都得有打法，否则界面上会出现一列「—」。
+    func testEverySpecialCharacterHasAChord() {
+        for language in TypingLanguage.catalog {
+            let book = ChordBook.builtIn(for: language)
+            for character in language.specialCharacters {
+                XCTAssertNotNil(book.chord(for: character), "\(language.id) 缺少 \(character) 的组合键")
+            }
         }
     }
 
@@ -30,6 +40,15 @@ final class LanguageLayoutPluginTests: XCTestCase {
         for character in ["é", "è", "ê", "ç", "à"] {
             XCTAssertTrue(text.contains(character), "缺少 \(character)")
         }
+    }
+
+    /// 意大利语的重音全在数字行上，练习词得把这六个都覆盖到。
+    func testItalianWordsCoverEveryAccentedVowel() {
+        let text = TypingLanguage.italian.words.map(\.text).joined()
+        for character in ["à", "è", "é", "ì", "ò", "ù"] {
+            XCTAssertTrue(text.contains(character), "缺少 \(character)")
+        }
+        XCTAssertEqual(TypingLanguage.italian.words.count, 14)
     }
 
     // MARK: - 组合键
@@ -50,6 +69,19 @@ final class LanguageLayoutPluginTests: XCTestCase {
         XCTAssertEqual(ChordBook.builtIn(for: .spanish).chord(for: "ñ")?.steps, ["⌥N", "N"])
         XCTAssertEqual(ChordBook.builtIn(for: .spanish).chord(for: "¿")?.steps, ["⌥⇧?"])
         XCTAssertTrue(ChordBook.builtIn(for: .spanish).chord(for: "ñ")?.isDeadKey == true)
+    }
+
+    /// 意大利语：重音符走 ⌥`，只有 é 走 ⌥E。
+    func testItalianFallbackChords() {
+        let book = ChordBook.builtIn(for: .italian)
+        XCTAssertEqual(book.chord(for: "è")?.steps, ["⌥`", "E"])
+        XCTAssertEqual(book.chord(for: "à")?.steps, ["⌥`", "A"])
+        XCTAssertEqual(book.chord(for: "ò")?.steps, ["⌥`", "O"])
+        XCTAssertEqual(book.chord(for: "ù")?.steps, ["⌥`", "U"])
+        XCTAssertEqual(book.chord(for: "ì")?.steps, ["⌥`", "I"])
+        XCTAssertEqual(book.chord(for: "é")?.steps, ["⌥E", "E"])
+        XCTAssertEqual(book.chord(for: "É")?.steps, ["⌥E", "⇧E"])
+        XCTAssertTrue(book.chord(for: "è")?.isDeadKey == true)
     }
 
     func testSpecialCharactersKeepOrderAndDropDuplicates() {

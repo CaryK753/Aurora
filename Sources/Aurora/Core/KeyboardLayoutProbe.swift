@@ -2,7 +2,7 @@
 //  Aurora — 读取系统里的真实键盘布局
 //
 //  小语种键盘教练不写死「德语 Z 在 Y 的位置」这种结论：直接把系统里的
-//  German / French / Spanish 布局读出来，按物理键位翻译成字符。
+//  German / French / Spanish / Italian 布局读出来，按物理键位翻译成字符。
 //  同时把 ABC 布局上的死键组合扫一遍，得到「ä = ⌥U → A」这类真实打法。
 
 import Carbon.HIToolbox
