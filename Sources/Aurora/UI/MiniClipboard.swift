@@ -121,6 +121,10 @@ struct MiniClipboardView: View {
     @State private var hovered: UUID?
     @FocusState private var searchFocused: Bool
 
+    private struct HistoryRequest: Equatable {
+        let query: String
+        let revision: Int
+    }
     private let corner: CGFloat = 24
 
     var body: some View {
@@ -140,14 +144,19 @@ struct MiniClipboardView: View {
         .onAppear {
             selection = 0
             searchFocused = true
-            rebuild()
         }
-        .onChange(of: clipboard.query) { _, _ in
-            selection = 0
-            rebuild()
-        }
-        .onChange(of: clipboard.historyRevision) { _, _ in
-            rebuild()
+        .onChange(of: clipboard.query) { _, _ in selection = 0 }
+        .task(id: HistoryRequest(query: clipboard.query, revision: clipboard.historyRevision)) {
+            let query = clipboard.query
+            let revision = clipboard.historyRevision
+            if !query.isEmpty {
+                do { try await Task.sleep(for: .milliseconds(110)) } catch { return }
+            }
+            guard !Task.isCancelled else { return }
+            let page = await clipboard.summaries(query: query, filter: .all, pinnedFirst: false, limit: 30)
+            guard !Task.isCancelled, clipboard.query == query, clipboard.historyRevision == revision else { return }
+            visible = page.rows
+            if selection >= visible.count { selection = max(0, visible.count - 1) }
         }
     }
 
@@ -164,7 +173,7 @@ struct MiniClipboardView: View {
                         ForEach(Array(visible.enumerated()), id: \.element.id) { index, item in
                             MiniClipRow(
                                 item: item,
-                                thumbnail: item.kind == .image ? clipboard.thumbnail(for: item) : nil,
+                                clipboard: clipboard,
                                 selected: index == selection,
                                 hovered: hovered == item.id
                             )
@@ -261,11 +270,6 @@ struct MiniClipboardView: View {
 
     // MARK: 逻辑
 
-    private func rebuild() {
-        visible = clipboard.summaries(query: clipboard.query, filter: .all, pinnedFirst: false, limit: 30)
-        if selection >= visible.count { selection = max(0, visible.count - 1) }
-    }
-
     private func commitSelected() {
         guard let item = visible[safe: selection] else { return }
         commit(item)
@@ -281,7 +285,7 @@ struct MiniClipboardView: View {
 
 struct MiniClipRow: View {
     let item: ClipItem
-    let thumbnail: NSImage?
+    let clipboard: ClipboardService
     let selected: Bool
     let hovered: Bool
 
@@ -326,18 +330,8 @@ struct MiniClipRow: View {
     private var leading: some View {
         switch item.kind {
         case .image:
-            if let thumbnail {
-                Image(nsImage: thumbnail)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: 22, height: 22)
-                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                    .padding(2)
-            } else {
-                Image(systemName: "photo")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
+            ClipboardRowThumbnail(item: item, service: clipboard, size: 22, radius: 5)
+                .padding(2)
         case .text:
             Image(systemName: "text.alignleft")
                 .font(.system(size: 10, weight: .medium))

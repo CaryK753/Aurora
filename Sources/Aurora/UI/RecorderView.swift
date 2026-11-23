@@ -14,10 +14,17 @@ struct RecorderView: View {
     @ObservedObject private var permissions: PermissionService
     @ObservedObject private var camera = CameraBubble.shared
     @State private var cameraDevices: [CameraBubble.Device] = []
-    @State private var recentFiles: [URL] = []
-    @State private var overlayAccess = OverlayAccess.hasAccessibility
+    private struct RecentRecording: Identifiable, Sendable {
+        let url: URL
+        let modified: Date
+        let bytes: Int64?
+        var id: URL { url }
+    }
+    @State private var recentFiles: [RecentRecording] = []
+    @State private var overlayAccess = false
     /// 按键显示走「输入监控」，和点击高亮的辅助功能是两项权限
-    @State private var keyAccess = OverlayAccess.hasKeyboardAccess
+    @State private var keyAccess = false
+    @State private var accessRevision = 0
     @State private var bezelError: String?
 
     init(state: AppState) {
@@ -32,17 +39,20 @@ struct RecorderView: View {
             optionsCard
             recentCard
         }
-        .onAppear {
-            recorder.refreshSources()
-            reloadRecent()
-            overlayAccess = OverlayAccess.hasAccessibility
-            keyAccess = OverlayAccess.hasKeyboardAccess
-            cameraDevices = CameraBubble.availableDevices()
+        .onAppear { recorder.refreshSources() }
+        .task(id: recorder.lastMovieURL) { await reloadRecent() }
+        .task(id: recorder.pipCamera) {
+            let devices = await readInBackground { CameraBubble.availableDevices() }
+            if !Task.isCancelled { cameraDevices = devices }
         }
-        // 用户去系统设置勾完权限回来，这里跟着刷新
+        .task(id: accessRevision) {
+            let access = await readInBackground { (OverlayAccess.hasAccessibility, OverlayAccess.hasKeyboardAccess) }
+            guard !Task.isCancelled else { return }
+            (overlayAccess, keyAccess) = access
+        }
+        // 用户去系统设置勾完权限回来，这里跟着刷新。
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            overlayAccess = OverlayAccess.hasAccessibility
-            keyAccess = OverlayAccess.hasKeyboardAccess
+            accessRevision &+= 1
         }
         .onChange(of: recorder.showKeystrokes) { _, on in
             if on, !keyAccess { OverlayAccess.requestKeyboardAccess() }
@@ -53,13 +63,11 @@ struct RecorderView: View {
         // 开关就是气泡的开关：打开立刻出画面（可以先摆好位置），关掉就收起
         .onChange(of: recorder.pipCamera) { _, on in
             if on {
-                cameraDevices = CameraBubble.availableDevices()
                 CameraBubble.shared.show(on: recorder.targetScreen)
             } else {
                 CameraBubble.shared.hide()
             }
         }
-        .onReceive(recorder.$lastMovieURL) { _ in reloadRecent() }
     }
 
     // MARK: 控制卡
@@ -600,8 +608,8 @@ struct RecorderView: View {
                         .foregroundStyle(.tertiary)
                 } else {
                     VStack(spacing: 3) {
-                        ForEach(recentFiles, id: \.self) { url in
-                            recentRow(url)
+                        ForEach(recentFiles) { file in
+                            recentRow(file)
                         }
                     }
                 }
@@ -628,7 +636,8 @@ struct RecorderView: View {
     }
 
     /// 最近录像的一行：点行进访达，右侧「加壳」给已有录像补一个带壳版本
-    private func recentRow(_ url: URL) -> some View {
+    private func recentRow(_ file: RecentRecording) -> some View {
+        let url = file.url
         let isFramed = url.lastPathComponent.contains("带壳")
         return HStack(spacing: 6) {
             Button {
@@ -643,9 +652,8 @@ struct RecorderView: View {
                         .font(.system(size: 10))
                         .lineLimit(1)
                     Spacer(minLength: 4)
-                    if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-                       let size = attrs[.size] as? NSNumber {
-                        Text(ByteCountFormatter.string(fromByteCount: size.int64Value, countStyle: .file))
+                    if let size = file.bytes {
+                        Text(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
                             .font(.system(size: 8, design: .rounded))
                             .foregroundStyle(.tertiary)
                     }
@@ -678,18 +686,20 @@ struct RecorderView: View {
         }
     }
 
-    private func reloadRecent() {
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: recorder.outputDirectory,
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
-        )) ?? []
-        recentFiles = Array(files
-            .filter { ["mp4", "mov", "m4a"].contains($0.pathExtension) }
-            .sorted { a, b in
-                let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                return da > db
+    private func reloadRecent() async {
+        let files = await readInBackground {
+            let keys: Set<URLResourceKey> = [.contentModificationDateKey, .fileSizeKey]
+            let urls = (try? FileManager.default.contentsOfDirectory(
+                at: RecorderService.recordingsDirectory(), includingPropertiesForKeys: Array(keys)
+            )) ?? []
+            let recordings = urls.filter { ["mp4", "mov", "m4a"].contains($0.pathExtension) }.map { url in
+                let values = try? url.resourceValues(forKeys: keys)
+                return RecentRecording(url: url, modified: values?.contentModificationDate ?? .distantPast,
+                                       bytes: values?.fileSize.map(Int64.init))
             }
-            .prefix(6))
+            return Array(recordings.sorted { $0.modified > $1.modified }.prefix(6))
+        }
+        guard !Task.isCancelled else { return }
+        recentFiles = files
     }
 }

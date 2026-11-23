@@ -9,7 +9,7 @@ import AppKit
 import Combine
 import CoreGraphics
 
-struct DisplayModeOption: Identifiable, Hashable {
+struct DisplayModeOption: Identifiable, Hashable, Sendable {
     let id: String
     let width: Int
     let height: Int
@@ -46,16 +46,7 @@ struct DisplayItem: Identifiable, Equatable {
     var resolutionLabel: String { "\(Int(pointSize.width)) × \(Int(pointSize.height))" }
     var pixelLabel: String { "\(Int(pixelSize.width)) × \(Int(pixelSize.height))" }
 
-    static func == (lhs: DisplayItem, rhs: DisplayItem) -> Bool {
-        lhs.id == rhs.id
-            && lhs.brightness == rhs.brightness
-            && lhs.volume == rhs.volume
-            && lhs.contrast == rhs.contrast
-            && lhs.modes == rhs.modes
-            && lhs.name == rhs.name
-            && lhs.softwareBrightness == rhs.softwareBrightness
-            && lhs.softwareOnly == rhs.softwareOnly
-    }
+
 }
 
 /// 多屏亮度联动方式
@@ -182,6 +173,18 @@ final class DisplayService: ObservableObject {
 
     private let ddc = DDCManager()
     private let readQueue = DispatchQueue(label: "aurora.display.ddc", qos: .userInitiated)
+    private struct HardwareDisplay: Sendable {
+        let id: CGDirectDisplayID
+        let isBuiltIn: Bool
+        let isMain: Bool
+        let pixelSize: CGSize
+        let refresh: Double
+        let brightness: Float?
+        let modes: [DisplayModeOption]
+    }
+    private let discovery = BackgroundSnapshot<Void, [HardwareDisplay]?>(label: "aurora.display.discovery", read: { DisplayService.discoverDisplays() })
+    private var didLoadDisplays = false
+    private var readingDDC = false
     private var pollingTimer: Timer?
     private var screenParametersObserver: NSObjectProtocol?
     /// 读到的 DDC 量程（显示器报告的最大值）
@@ -191,10 +194,9 @@ final class DisplayService: ObservableObject {
 
     init() {
         refresh()
-        if restoreOnLaunch { applySavedBrightness() }
         pollingTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
             guard let self else { return }
-            Task { @MainActor in self.refresh(preserve: true) }
+            Task { @MainActor in self.refresh() }
         }
         // 只在屏幕参数变化（或定时轮询）时重新枚举，不在弹出面板的事件里做。
         screenParametersObserver = NotificationCenter.default.addObserver(
@@ -217,29 +219,55 @@ final class DisplayService: ObservableObject {
     // MARK: - 读取
 
     func refresh(preserve: Bool = false) {
-        var count: UInt32 = 0
-        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else {
-            displays = []
-            return
+        let apply: @MainActor ([HardwareDisplay]?) -> Void = { [weak self] hardware in
+            guard let self, let hardware else { return }
+            self.applyHardware(hardware)
+            if !self.didLoadDisplays, !self.displays.isEmpty {
+                self.didLoadDisplays = true
+                if self.restoreOnLaunch { self.applySavedBrightness() }
+            }
+            self.readDDCInBackground()
         }
-        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return }
+        if preserve {
+            discovery.requestLatest((), apply)
+        } else {
+            discovery.request(apply)
+        }
+    }
 
+    nonisolated private static func discoverDisplays() -> [HardwareDisplay]? {
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success else { return nil }
+        guard count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return nil }
+        return ids.prefix(Int(count)).map { id in
+            let isBuiltIn = CGDisplayIsBuiltin(id) != 0
+            let mode = CGDisplayCopyDisplayMode(id)
+            let refresh = mode?.refreshRate ?? 0
+            return HardwareDisplay(id: id, isBuiltIn: isBuiltIn, isMain: CGDisplayIsMain(id) != 0,
+                pixelSize: CGSize(width: mode?.pixelWidth ?? CGDisplayPixelsWide(id),
+                                  height: mode?.pixelHeight ?? CGDisplayPixelsHigh(id)),
+                refresh: refresh > 0 ? refresh : 60,
+                brightness: isBuiltIn ? DisplayServicesShim.brightness(of: id) : nil,
+                modes: loadModes(for: id, current: mode))
+        }
+    }
+
+    private func applyHardware(_ hardware: [HardwareDisplay]) {
         let screens = NSScreen.screens
         var updated: [DisplayItem] = []
 
-        for id in ids.prefix(Int(count)) {
-            let isBuiltIn = CGDisplayIsBuiltin(id) != 0
+        for display in hardware {
+            let id = display.id
+            let isBuiltIn = display.isBuiltIn
             let screen = screens.first {
                 ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id
             }
             let nativeName = screen?.localizedName ?? (isBuiltIn ? T("内建显示器") : T("外接显示器"))
             let tuning = tunings.tuning(for: id)
             let name = tuning.customName.isEmpty ? nativeName : tuning.customName
-            let mode = CGDisplayCopyDisplayMode(id)
-            let pixelW = mode?.pixelWidth ?? CGDisplayPixelsWide(id)
-            let pixelH = mode?.pixelHeight ?? CGDisplayPixelsHigh(id)
-            let pointSize = screen?.frame.size ?? CGSize(width: pixelW / 2, height: pixelH / 2)
+            let pointSize = screen?.frame.size ?? CGSize(width: display.pixelSize.width / 2, height: display.pixelSize.height / 2)
             let previous = displays.first { $0.id == id }
 
             var item = DisplayItem(
@@ -247,10 +275,10 @@ final class DisplayService: ObservableObject {
                 name: name,
                 nativeName: nativeName,
                 isBuiltIn: isBuiltIn,
-                isMain: CGDisplayIsMain(id) != 0,
+                isMain: display.isMain,
                 pointSize: pointSize,
-                pixelSize: CGSize(width: pixelW, height: pixelH),
-                refresh: currentRefreshRate(id),
+                pixelSize: display.pixelSize,
+                refresh: display.refresh,
                 brightness: previous?.brightness ?? 0.5,
                 volume: previous?.volume ?? 0.3,
                 contrast: previous?.contrast ?? 0.75,
@@ -259,7 +287,7 @@ final class DisplayService: ObservableObject {
                 hasContrast: previous?.hasContrast ?? false
             )
 
-            if isBuiltIn, let value = DisplayServicesShim.brightness(of: id) {
+            if let value = display.brightness {
                 item.hasBrightness = true
                 if fadeTasks[id] == nil, !tuning.softwareOnly { item.brightness = Double(value) }
             }
@@ -269,23 +297,16 @@ final class DisplayService: ObservableObject {
             if !isBuiltIn && tuning.softwareOnly { item.hasBrightness = true }
             item.ddcMax = ddcMaxima[id]?[DisplayChannel.brightness.rawValue]
 
-            item.modes = loadModes(for: id)
+            item.modes = display.modes
             gamma.capture(id)
             updated.append(item)
         }
 
-        displays = updated
-        readDDCInBackground()
+        if displays != updated { displays = updated }
     }
 
-    private func currentRefreshRate(_ id: CGDirectDisplayID) -> Double {
-        guard let mode = CGDisplayCopyDisplayMode(id), mode.refreshRate > 0 else { return 60 }
-        return mode.refreshRate
-    }
-
-    private func loadModes(for id: CGDirectDisplayID) -> [DisplayModeOption] {
+    nonisolated private static func loadModes(for id: CGDirectDisplayID, current: CGDisplayMode?) -> [DisplayModeOption] {
         guard let list = CGDisplayCopyAllDisplayModes(id, nil) as? [CGDisplayMode] else { return [] }
-        let current = CGDisplayCopyDisplayMode(id)
         var best: [String: DisplayModeOption] = [:]
 
         for mode in list {
@@ -309,9 +330,11 @@ final class DisplayService: ObservableObject {
     // MARK: - DDC 读取
 
     private func readDDCInBackground() {
+        guard !readingDDC else { return }
         let externalIDs = displays.filter { !$0.isBuiltIn }.map(\.id)
         guard !externalIDs.isEmpty else { return }
         let ddc = self.ddc
+        readingDDC = true
 
         readQueue.async { [weak self] in
             var results: [CGDirectDisplayID: (brightness: (Double, Int)?, volume: (Double, Int)?, contrast: (Double, Int)?)] = [:]
@@ -328,33 +351,36 @@ final class DisplayService: ObservableObject {
                     results[id] = (brightness, volume, contrast)
                 }
             }
-            guard !results.isEmpty else { return }
+            let snapshot = results
             Task { @MainActor in
                 guard let self else { return }
-                for (id, value) in results {
-                    guard let index = self.displays.firstIndex(where: { $0.id == id }) else { continue }
+                self.readingDDC = false
+                var updated = self.displays
+                for (id, value) in snapshot {
+                    guard let index = updated.firstIndex(where: { $0.id == id }) else { continue }
                     // 正在调光时不要用 DDC 读回值覆盖（读取有延迟，会把滑杆拽回去）
                     if let brightness = value.brightness, self.fadeTasks[id] == nil,
                        !self.tunings.tuning(for: id).softwareOnly {
-                        self.displays[index].brightness = brightness.0
-                        self.displays[index].hasBrightness = true
+                        updated[index].brightness = brightness.0
+                        updated[index].hasBrightness = true
                         // 首轮 refresh 时还没读到 DDC，softwareOnly 会被判成 true；
                         // 读到通道后要立刻纠正，否则界面会一直显示「软件 · Gamma」
-                        self.displays[index].softwareOnly = self.tunings.tuning(for: id).softwareOnly
-                        self.displays[index].ddcMax = brightness.1
+                        updated[index].softwareOnly = self.tunings.tuning(for: id).softwareOnly
+                        updated[index].ddcMax = brightness.1
                         self.ddcMaxima[id, default: [:]][DisplayChannel.brightness.rawValue] = brightness.1
                     }
                     if let volume = value.volume {
-                        self.displays[index].volume = volume.0
-                        self.displays[index].hasVolume = true
+                        updated[index].volume = volume.0
+                        updated[index].hasVolume = true
                         self.ddcMaxima[id, default: [:]][DisplayChannel.volume.rawValue] = volume.1
                     }
                     if let contrast = value.contrast {
-                        self.displays[index].contrast = contrast.0
-                        self.displays[index].hasContrast = true
+                        updated[index].contrast = contrast.0
+                        updated[index].hasContrast = true
                         self.ddcMaxima[id, default: [:]][DisplayChannel.contrast.rawValue] = contrast.1
                     }
                 }
+                if self.displays != updated { self.displays = updated }
             }
         }
     }

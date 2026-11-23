@@ -83,7 +83,7 @@ final class CameraBubble: ObservableObject {
         }
     }
 
-    struct Device: Identifiable, Equatable {
+    struct Device: Identifiable, Equatable, Sendable {
         let id: String
         let name: String
         let isContinuity: Bool

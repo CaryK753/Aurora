@@ -4,6 +4,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CHECK_DIR="$(mktemp -d /tmp/aurora-behavior.XXXXXX)"
 trap 'rm -rf "$CHECK_DIR"' EXIT
 swiftc -target "$(uname -m)-apple-macos26.0" \
+  "$ROOT/Sources/Aurora/Core/BackgroundSnapshot.swift" \
   "$ROOT/Sources/Aurora/Core/WallpaperModels.swift" \
   "$ROOT/Sources/Aurora/Core/WallpaperPlayback.swift" \
   "$ROOT/Sources/Aurora/Core/WallpaperRenderer.swift" \

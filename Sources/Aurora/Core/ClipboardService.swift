@@ -12,7 +12,7 @@ import Combine
 import CryptoKit
 import ImageIO
 
-enum ClipKind: String, Codable, CaseIterable, Identifiable {
+enum ClipKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case text, rich, link, image, file, color
 
     var id: String { rawValue }
@@ -40,7 +40,7 @@ enum ClipKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
-enum ClipFilter: String, CaseIterable, Identifiable {
+enum ClipFilter: String, CaseIterable, Identifiable, Sendable {
     case all, pinned, text, link, image, file, color
 
     var id: String { rawValue }
@@ -58,7 +58,7 @@ enum ClipFilter: String, CaseIterable, Identifiable {
     }
 }
 
-struct ClipItem: Identifiable, Codable, Equatable {
+struct ClipItem: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
     var kind: ClipKind
     var text: String
@@ -197,8 +197,11 @@ final class ClipboardService: ObservableObject {
     private var lastChangeCount: Int = 0
     private var store: ClipboardHistoryStore?
     private var resettingSettings = false
+    private let historyURL: URL
+    private let historyReads = DispatchQueue(label: "aurora.clipboard.page", qos: .utility)
     private let imageDir: URL
     private let rtfDir: URL
+    private let thumbnailReads = DispatchQueue(label: "aurora.clipboard.thumbnail", qos: .utility)
     private let thumbCache = NSCache<NSString, NSImage>()
 
     private static let confidentialTypes: Set<String> = [
@@ -213,19 +216,29 @@ final class ClipboardService: ObservableObject {
     ]
 
     func summaries(query: String, filter: ClipFilter, pinnedFirst: Bool = true,
-                   limit: Int = 30, offset: Int = 0) -> [ClipItem] {
-        do {
-            return try store?.page(query: query.trimmingCharacters(in: .whitespacesAndNewlines),
-                                   filter: filter, pinnedFirst: pinnedFirst, limit: limit, offset: offset) ?? []
-        } catch {
-            reportStorageError()
-            return []
+                   limit: Int = 30, offset: Int = 0, includePinned: Bool = false) async -> (rows: [ClipItem], pinned: [ClipItem]) {
+        guard store != nil else { return ([], []) }
+        let url = historyURL
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let result = await readInBackground(on: historyReads) {
+            Result {
+                let reader = try ClipboardHistoryStore(url: url, readOnly: true)
+                let rows = try reader.page(query: query, filter: filter, pinnedFirst: pinnedFirst, limit: limit, offset: offset)
+                let pinned = includePinned ? try reader.page(query: query, filter: filter, pinnedFirst: true, limit: 9, offset: 0) : []
+                return (rows, Array(pinned.prefix(while: \.pinned)))
+            }
+        }
+        guard !Task.isCancelled else { return ([], []) }
+        switch result {
+        case .success(let page): return page
+        case .failure: reportStorageError(); return ([], [])
         }
     }
 
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Aurora", isDirectory: true)
+        historyURL = support.appendingPathComponent("clipboard.sqlite3")
         imageDir = support.appendingPathComponent("clips", isDirectory: true)
         rtfDir = support.appendingPathComponent("clips-rtf", isDirectory: true)
         try? FileManager.default.createDirectory(at: imageDir, withIntermediateDirectories: true)
@@ -247,7 +260,7 @@ final class ClipboardService: ObservableObject {
         thumbCache.totalCostLimit = 2 * 1024 * 1024
         thumbCache.countLimit = 32
         do {
-            let db = try ClipboardHistoryStore(url: support.appendingPathComponent("clipboard.sqlite3"))
+            let db = try ClipboardHistoryStore(url: historyURL)
             store = db
             do { try db.migrateLegacy(from: support.appendingPathComponent("clipboard.json")) }
             catch { reportStorageError() }
@@ -567,17 +580,6 @@ final class ClipboardService: ObservableObject {
         catch { reportStorageError(); return nil }
     }
 
-    /// ⌘1–⌘9 follows the pin order of the current filter, including when browsing older pages.
-    func pinnedSummaries() -> [ClipItem] {
-        summaries(query: query, filter: filter, limit: 9).prefix(while: \.pinned).map { $0 }
-    }
-
-    func pinnedItem(at index: Int) -> ClipItem? {
-        let items = pinnedSummaries()
-        guard items.indices.contains(index) else { return nil }
-        return items[index]
-    }
-
     func reveal(_ item: ClipItem) {
         guard let item = self.item(with: item.id) else { return }
         switch item.kind {
@@ -640,20 +642,26 @@ final class ClipboardService: ObservableObject {
     }
 
     /// List thumbnails never hold the full-size image in the cache.
-    func thumbnail(for item: ClipItem) -> NSImage? {
+    func thumbnail(for item: ClipItem) async -> NSImage? {
         guard let url = imageURL(for: item) else { return nil }
         let key = url.lastPathComponent as NSString
         if let image = thumbCache.object(forKey: key) { return image }
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-              let bitmap = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true,
-                kCGImageSourceThumbnailMaxPixelSize: 96
-              ] as CFDictionary) else { return nil }
+        let bitmap = await readInBackground(on: thumbnailReads) { Self.decodeThumbnail(at: url) }
+        guard !Task.isCancelled, let bitmap else { return nil }
+        if let image = thumbCache.object(forKey: key) { return image }
         let image = NSImage(cgImage: bitmap, size: .zero)
         thumbCache.setObject(image, forKey: key, cost: bitmap.bytesPerRow * bitmap.height)
         return image
+    }
+
+    nonisolated private static func decodeThumbnail(at url: URL) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: 96
+        ] as CFDictionary)
     }
 
     private func removeFiles(_ attachment: ClipboardHistoryStore.Attachment) {

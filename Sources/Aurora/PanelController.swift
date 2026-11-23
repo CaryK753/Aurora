@@ -217,6 +217,7 @@ final class PanelController {
 
     private func updateDashboardVisibility() {
         guard shouldSampleDashboard else {
+            state.vpnStatus.setPanelVisible(false)
             state.monitor.setDashboardVisible(false)
             return
         }
@@ -224,6 +225,7 @@ final class PanelController {
         let generation = transitionGeneration
         DispatchQueue.main.async { [weak self] in
             guard let self, self.transitionGeneration == generation, self.shouldSampleDashboard else { return }
+            self.state.vpnStatus.setPanelVisible(true)
             self.state.monitor.setDashboardVisible(true)
         }
     }

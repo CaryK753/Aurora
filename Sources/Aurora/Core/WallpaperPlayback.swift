@@ -200,6 +200,27 @@ final class WallpaperPlaybackMonitor: ObservableObject {
     private var pollTimer: Timer?
     private var pollTicks = 0
     private var isRunning = false
+    private var generation = 0
+    private struct Display: Sendable {
+        let id: CGDirectDisplayID
+        let fallbackName: String
+    }
+    private struct Reading: Sendable {
+        let lowPowerMode: Bool
+        let thermalState: ProcessInfo.ThermalState
+        let battery: (onBattery: Bool, percent: Int)?
+        let fullscreen: Set<String>
+    }
+    private let worker = BackgroundSnapshot<(displays: [Display], battery: Bool), Reading>(
+        label: "aurora.wallpaper.environment",
+        read: { request in
+            Reading(lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled,
+                    thermalState: ProcessInfo.processInfo.thermalState,
+                    battery: request.battery ? WallpaperPlaybackMonitor.batteryState() : nil,
+                    fullscreen: WallpaperPlaybackMonitor.fullscreenDisplays(request.displays))
+        }
+    )
+    private var batteryRefreshPending = false
 
     deinit {
         for observer in centerObservers { NotificationCenter.default.removeObserver(observer) }
@@ -223,6 +244,8 @@ final class WallpaperPlaybackMonitor: ObservableObject {
 
     func stop() {
         isRunning = false
+        generation &+= 1
+        batteryRefreshPending = false
         pollTimer?.invalidate()
         pollTimer = nil
         for observer in centerObservers { NotificationCenter.default.removeObserver(observer) }
@@ -302,11 +325,7 @@ final class WallpaperPlaybackMonitor: ObservableObject {
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                guard let self else { return }
-                let fullscreen = Self.fullscreenDisplays()
-                if fullscreen != self.inputs.fullscreenDisplays {
-                    self.mutate { $0.fullscreenDisplays = fullscreen }
-                }
+                self?.refresh(pollSlow: false)
             }
         })
     }
@@ -323,21 +342,33 @@ final class WallpaperPlaybackMonitor: ObservableObject {
     }
 
     private func refresh(pollSlow: Bool) {
-        var next = inputs
-        next.lowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
-        next.thermalState = ProcessInfo.processInfo.thermalState
-        if pollSlow {
-            let battery = Self.batteryState()
-            next.onBattery = battery.onBattery
-            next.batteryPercent = battery.percent
+        guard isRunning else { return }
+        // AppKit screen objects stay on main. The worker resolves CG bounds, UUIDs and the window list.
+        let displays = NSScreen.screens.compactMap { screen -> Display? in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
+            return Display(id: number.uint32Value, fallbackName: screen.localizedName)
         }
-        next.fullscreenDisplays = Self.fullscreenDisplays()
-        if next != inputs { inputs = next }
+        if pollSlow { batteryRefreshPending = true }
+        let pending = batteryRefreshPending
+        let generation = generation
+        worker.requestLatest((displays, pending)) { [weak self] reading in
+            guard let self, self.isRunning, self.generation == generation else { return }
+            self.mutate {
+                $0.lowPowerMode = reading.lowPowerMode
+                $0.thermalState = reading.thermalState
+                if let battery = reading.battery {
+                    $0.onBattery = battery.onBattery
+                    $0.batteryPercent = battery.percent
+                }
+                $0.fullscreenDisplays = reading.fullscreen
+            }
+            if pending { self.batteryRefreshPending = false }
+        }
     }
 
     // MARK: 采样
 
-    private static func batteryState() -> (onBattery: Bool, percent: Int) {
+    nonisolated private static func batteryState() -> (onBattery: Bool, percent: Int) {
         guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef],
               let source = sources.first,
@@ -352,13 +383,19 @@ final class WallpaperPlaybackMonitor: ObservableObject {
 
     /// 找出被「铺满整块屏的普通窗口」盖住的显示器。
     /// 拿不到窗口信息（没有屏幕录制权限）时一律当作没盖住，宁可多播也不误停。
-    static func fullscreenDisplays() -> Set<String> {
+    nonisolated private static func fullscreenDisplays(_ displays: [Display]) -> Set<String> {
         guard let list = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
         ) as? [[String: Any]] else { return [] }
 
         let ownPID = Int(ProcessInfo.processInfo.processIdentifier)
-        let screens = NSScreen.screens
+        let screens = displays.compactMap { screen -> (CGRect, String)? in
+            let bounds = CGDisplayBounds(screen.id)
+            guard bounds.width > 1, bounds.height > 1 else { return nil }
+            let uuid = CGDisplayCreateUUIDFromDisplayID(screen.id)?.takeRetainedValue()
+            let key = uuid.map { (CFUUIDCreateString(nil, $0) as String).uppercased() } ?? screen.fallbackName
+            return (bounds.insetBy(dx: 2, dy: 2), key)
+        }
         var covered: Set<String> = []
 
         for window in list {
@@ -368,16 +405,12 @@ final class WallpaperPlaybackMonitor: ObservableObject {
                   let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary),
                   rect.width > 200, rect.height > 150 else { continue }
 
-            for screen in screens {
-                guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { continue }
-                let display = CGDisplayBounds(number.uint32Value)
-                guard display.width > 1, display.height > 1 else { continue }
-                // 允许 2pt 的边距误差：窗口通常和屏幕严丝合缝，但缩放/安全区会差一点
-                let inset = display.insetBy(dx: 2, dy: 2)
+            // 允许 2pt 的边距误差：窗口通常和屏幕严丝合缝，但缩放/安全区会差一点。
+            for (inset, key) in screens {
                 let coversOrigin = rect.contains(CGPoint(x: inset.minX, y: inset.minY))
                 let coversEnd = rect.contains(CGPoint(x: inset.maxX, y: inset.maxY))
                 if coversOrigin, coversEnd {
-                    covered.insert(WallpaperDisplay.key(for: screen))
+                    covered.insert(key)
                     break
                 }
             }

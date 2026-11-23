@@ -503,7 +503,10 @@ final class PerAppAudioService: ObservableObject {
     @Published private(set) var lastError: String?
     @Published private(set) var controlledCount = 0
 
+    private typealias ProcessReading = (object: AudioObjectID, pid: pid_t, bundleID: String, isPlaying: Bool)
+    private let processWorker = BackgroundSnapshot<Void, [ProcessReading]>(label: "aurora.audio.processes", read: { PerAppAudioService.audioProcesses() })
     private var moduleEnabled = true
+    private var moduleGeneration = 0
     private var volumes: [String: Double]
     private var chains: [String: AppAudioChain] = [:]
     private var failures: [String: Date] = [:]
@@ -595,13 +598,22 @@ final class PerAppAudioService: ObservableObject {
     }
 
     func setModuleEnabled(_ enabled: Bool) {
+        guard moduleEnabled != enabled else { return }
         moduleEnabled = enabled
+        moduleGeneration &+= 1
         if enabled { refresh() } else { shutdown() }
     }
 
     func refresh() {
         guard moduleEnabled else { return }
-        let processes = Self.audioProcesses()
+        let generation = moduleGeneration
+        processWorker.requestLatest(()) { [weak self] processes in
+            guard let self, self.moduleEnabled, self.moduleGeneration == generation else { return }
+            self.applyProcesses(processes)
+        }
+    }
+
+    private func applyProcesses(_ processes: [ProcessReading]) {
         syncChains(processes: processes)
         var visible: [AppAudioItem] = []
         var seen = Set<String>()
@@ -640,11 +652,13 @@ final class PerAppAudioService: ObservableObject {
             ))
         }
 
-        items = visible.sorted { lhs, rhs in
+        let sorted = visible.sorted { lhs, rhs in
             if lhs.isControlled != rhs.isControlled { return lhs.isControlled }
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
-        controlledCount = chains.values.filter(\.isRunning).count
+        if items != sorted { items = sorted }
+        let count = chains.values.filter(\.isRunning).count
+        if controlledCount != count { controlledCount = count }
     }
 
     /// 让链路状态与「音量是否为默认」保持一致
@@ -773,7 +787,7 @@ final class PerAppAudioService: ObservableObject {
         "com.apple.cloudpaird", "com.apple.cmio.ContinuityCaptureAgent", "com.apple.accessibility.heard"
     ]
 
-    private static func isRunningOutput(_ object: AudioObjectID) -> Bool {
+    nonisolated private static func isRunningOutput(_ object: AudioObjectID) -> Bool {
         var address = AudioObjectPropertyAddress(
             mSelector: AudioObjectPropertySelector(0x7069726F), // 'piro' IsRunningOutput
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -786,7 +800,7 @@ final class PerAppAudioService: ObservableObject {
         return value != 0
     }
 
-    private static func audioProcesses() -> [(object: AudioObjectID, pid: pid_t, bundleID: String, isPlaying: Bool)] {
+    nonisolated private static func audioProcesses() -> [ProcessReading] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyProcessObjectList,
             mScope: kAudioObjectPropertyScopeGlobal,

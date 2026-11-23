@@ -5,7 +5,7 @@ import AppKit
 import Combine
 import CoreAudio
 
-struct AudioDeviceInfo: Identifiable, Equatable {
+struct AudioDeviceInfo: Identifiable, Equatable, Sendable {
     let id: AudioDeviceID
     var name: String
     var isOutput: Bool
@@ -25,6 +25,13 @@ final class AudioService: ObservableObject {
     /// 切换默认设备失败时的说明（设备离线 / 系统拒绝 / 被系统改回）
     @Published private(set) var switchError: String?
 
+    private struct Reading: Sendable {
+        let outputs: [AudioDeviceInfo]
+        let inputs: [AudioDeviceInfo]
+    }
+
+    private let worker = BackgroundSnapshot<Set<AudioDeviceID>, Reading>(label: "aurora.audio.devices", read: { AudioService.capture(fallbackMuted: $0) })
+    private var activationObserver: NSObjectProtocol?
     private var mutedVolumes: [AudioDeviceID: Double] = [:]
     private var verifyTask: Task<Void, Never>?
 
@@ -36,16 +43,34 @@ final class AudioService: ObservableObject {
         refresh()
         installListeners()
         // 后台回到前台时补一次同步：监听偶尔漏事件（休眠唤醒 / 其它 App 改路由）也能对上
-        NotificationCenter.default.addObserver(
+        activationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
     }
 
+    deinit {
+        if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
+        verifyTask?.cancel()
+    }
+
     // MARK: - 读取
 
     func refresh() {
+        worker.requestLatest(Set(mutedVolumes.keys)) { [weak self] value in
+            guard let self else { return }
+            self.observeDevices(Set(value.outputs.map(\.id) + value.inputs.map(\.id)))
+            if self.outputs != value.outputs { self.outputs = value.outputs }
+            if self.inputs != value.inputs { self.inputs = value.inputs }
+            let outputName = value.outputs.first(where: \.isDefault)?.name ?? "—"
+            let inputName = value.inputs.first(where: \.isDefault)?.name ?? "—"
+            if self.defaultOutputName != outputName { self.defaultOutputName = outputName }
+            if self.defaultInputName != inputName { self.defaultInputName = inputName }
+        }
+    }
+
+    nonisolated private static func capture(fallbackMuted: Set<AudioDeviceID>) -> Reading {
         let defaultOutput = Self.defaultDevice(output: true)
         let defaultInput = Self.defaultDevice(output: false)
 
@@ -57,37 +82,35 @@ final class AudioService: ObservableObject {
             let transport = Self.transportName(of: device)
 
             if Self.hasStreams(device, output: true) {
-                let volume = Self.volume(of: device) ?? 0
+                let volume = Self.volume(of: device)
                 outList.append(AudioDeviceInfo(
                     id: device,
                     name: name,
                     isOutput: true,
                     isDefault: device == defaultOutput,
-                    volume: volume,
-                    isMuted: Self.isMuted(device) ?? (mutedVolumes[device] != nil),
+                    volume: volume ?? 0,
+                    isMuted: Self.isMuted(device) ?? fallbackMuted.contains(device),
                     transport: transport,
-                    hasVolume: Self.volume(of: device) != nil
+                    hasVolume: volume != nil
                 ))
             }
             if Self.hasStreams(device, output: false) {
+                let volume = Self.volume(of: device, output: false)
                 inList.append(AudioDeviceInfo(
                     id: device,
                     name: name,
                     isOutput: false,
                     isDefault: device == defaultInput,
-                    volume: Self.volume(of: device, output: false) ?? 0,
-                    isMuted: Self.isMuted(device, output: false) ?? (mutedVolumes[device] != nil),
+                    volume: volume ?? 0,
+                    isMuted: Self.isMuted(device, output: false) ?? fallbackMuted.contains(device),
                     transport: transport,
-                    hasVolume: Self.volume(of: device, output: false) != nil
+                    hasVolume: volume != nil
                 ))
             }
         }
 
-        observeDevices(Set(outList.map(\.id) + inList.map(\.id)))
-        outputs = outList.sorted { $0.isDefault && !$1.isDefault }
-        inputs = inList.sorted { $0.isDefault && !$1.isDefault }
-        defaultOutputName = outList.first(where: \.isDefault)?.name ?? "—"
-        defaultInputName = inList.first(where: \.isDefault)?.name ?? "—"
+        return Reading(outputs: outList.sorted { $0.isDefault && !$1.isDefault },
+                       inputs: inList.sorted { $0.isDefault && !$1.isDefault })
     }
 
     // MARK: - 操作
@@ -120,14 +143,17 @@ final class AudioService: ObservableObject {
             for _ in 0..<10 {
                 try? await Task.sleep(nanoseconds: 120_000_000)
                 guard let self, !Task.isCancelled else { return }
-                if Self.defaultDevice(output: device.isOutput) == device.id {
+                let current = await readInBackground { Self.defaultDevice(output: device.isOutput) }
+                guard !Task.isCancelled else { return }
+                if current == device.id {
                     self.refresh()
                     return
                 }
             }
             guard let self, !Task.isCancelled else { return }
             self.refresh()
-            let landed = Self.name(of: Self.defaultDevice(output: device.isOutput))
+            let landed = await readInBackground { Self.name(of: Self.defaultDevice(output: device.isOutput)) }
+            guard !Task.isCancelled else { return }
             self.switchError = TF("%@ 没有成为默认设备，系统仍在用 %@", device.name, landed)
         }
     }
@@ -185,7 +211,7 @@ final class AudioService: ObservableObject {
 
     // MARK: - HAL 辅助
 
-    private static func address(_ selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> AudioObjectPropertyAddress {
+    nonisolated private static func address(_ selector: AudioObjectPropertySelector, scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(
             mSelector: selector,
             mScope: scope,
@@ -193,7 +219,7 @@ final class AudioService: ObservableObject {
         )
     }
 
-    static func allDevices() -> [AudioDeviceID] {
+    nonisolated static func allDevices() -> [AudioDeviceID] {
         var address = address(kAudioHardwarePropertyDevices)
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size) == noErr else { return [] }
@@ -203,7 +229,7 @@ final class AudioService: ObservableObject {
         return devices
     }
 
-    static func defaultDevice(output: Bool) -> AudioDeviceID {
+    nonisolated static func defaultDevice(output: Bool) -> AudioDeviceID {
         var address = address(output ? kAudioHardwarePropertyDefaultOutputDevice : kAudioHardwarePropertyDefaultInputDevice)
         var deviceID = AudioDeviceID(0)
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
@@ -235,7 +261,7 @@ final class AudioService: ObservableObject {
         return value != 0
     }
 
-    static func name(of device: AudioDeviceID) -> String {
+    nonisolated static func name(of device: AudioDeviceID) -> String {
         var address = address(kAudioObjectPropertyName)
         var name: CFString = "" as CFString
         var size = UInt32(MemoryLayout<CFString>.size)
@@ -245,14 +271,14 @@ final class AudioService: ObservableObject {
         return status == noErr ? (name as String) : T("未命名设备")
     }
 
-    static func hasStreams(_ device: AudioDeviceID, output: Bool) -> Bool {
+    nonisolated static func hasStreams(_ device: AudioDeviceID, output: Bool) -> Bool {
         var address = address(kAudioDevicePropertyStreams, scope: output ? kAudioObjectPropertyScopeOutput : kAudioObjectPropertyScopeInput)
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr else { return false }
         return size > 0
     }
 
-    static func transportName(of device: AudioDeviceID) -> String {
+    nonisolated static func transportName(of device: AudioDeviceID) -> String {
         var address = address(kAudioDevicePropertyTransportType)
         var transport: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
@@ -270,7 +296,7 @@ final class AudioService: ObservableObject {
         }
     }
 
-    static func volume(of device: AudioDeviceID, output: Bool = true) -> Double? {
+    nonisolated static func volume(of device: AudioDeviceID, output: Bool = true) -> Double? {
         for element in [kAudioObjectPropertyElementMain, AudioObjectPropertyElement(1), AudioObjectPropertyElement(2)] {
             var address = AudioObjectPropertyAddress(
                 mSelector: kAudioDevicePropertyVolumeScalar,
@@ -308,7 +334,7 @@ final class AudioService: ObservableObject {
         return AudioObjectIsPropertySettable(device, &property, &settable) == noErr && settable.boolValue
     }
 
-    static func isMuted(_ device: AudioDeviceID, output: Bool = true) -> Bool? {
+    nonisolated static func isMuted(_ device: AudioDeviceID, output: Bool = true) -> Bool? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyMute,
             mScope: output ? kAudioObjectPropertyScopeOutput : kAudioObjectPropertyScopeInput,

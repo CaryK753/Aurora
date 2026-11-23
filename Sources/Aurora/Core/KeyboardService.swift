@@ -207,19 +207,21 @@ final class KeyboardService: ObservableObject {
         engine.stop()
     }
 
+    private let typeWorker = BackgroundSnapshot<String, [String: Int]>(label: "aurora.keyboard.types") { path in
+        guard let data = FileManager.default.contents(atPath: path),
+              let dict = (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any],
+              let table = dict["keyboardtype"] as? [String: Any] else { return [:] }
+        return table.compactMapValues { ($0 as? NSNumber)?.intValue }
+    }
+
     // MARK: - 键盘类型
 
     func reloadTypes() {
-        guard let dict = NSDictionary(contentsOfFile: typePlist) as? [String: Any],
-              let table = dict["keyboardtype"] as? [String: Any] else {
-            types = [:]
-            return
+        let path = typePlist
+        typeWorker.requestLatest(path) { [weak self] parsed in
+            guard let self, self.types != parsed else { return }
+            self.types = parsed
         }
-        var parsed: [String: Int] = [:]
-        for (key, value) in table {
-            if let number = value as? NSNumber { parsed[key] = number.intValue }
-        }
-        types = parsed
     }
 
     func storedType(for device: HIDDevice) -> KeyboardType {

@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 import SQLite3
 
-/// Owned by ClipboardService's main actor. No full history is materialized during normal use.
+/// Each connection is owned by one executor. Normal history queries never materialize all bodies.
 final class ClipboardHistoryStore {
     struct Stats {
         let count: Int
@@ -42,15 +42,17 @@ final class ClipboardHistoryStore {
     private static let columns = "id,kind,image,rtf,color,saved,pinned,source,bundle,copies,bytes,digest,preview"
     private static let newest = "saved DESC, rowid DESC"
 
-    init(url: URL) throws {
+    init(url: URL, readOnly: Bool = false) throws {
         var connection: OpaquePointer?
-        let result = sqlite3_open_v2(url.path, &connection, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil)
+        let flags = readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+        let result = sqlite3_open_v2(url.path, &connection, flags, nil)
         guard result == SQLITE_OK, let connection else {
             sqlite3_close(connection)
             throw StorageError(code: result)
         }
         do {
-            try Self.configure(connection, url: url)
+            try Self.configureReader(connection)
+            if !readOnly { try Self.configureWriter(connection, url: url) }
         } catch {
             sqlite3_close(connection)
             throw error
@@ -58,9 +60,8 @@ final class ClipboardHistoryStore {
         db = connection
     }
 
-    private static func configure(_ db: OpaquePointer, url: URL) throws {
-        // Set permissions before creating WAL/SHM files.
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    private static func configureReader(_ db: OpaquePointer) throws {
+        try configureSQL(db, "PRAGMA cache_size=-1024")
         sqlite3_busy_timeout(db, 150)
         try Self.check(sqlite3_create_function_v2(db, "clip_contains", 2, SQLITE_UTF8, nil, { context, _, values in
             guard let values, let value = ClipboardHistoryStore.valueText(values[0]), let needle = ClipboardHistoryStore.valueText(values[1]) else {
@@ -69,9 +70,13 @@ final class ClipboardHistoryStore {
             }
             sqlite3_result_int(context, value.localizedCaseInsensitiveContains(needle) ? 1 : 0)
         }, nil, nil, nil))
+    }
+
+    private static func configureWriter(_ db: OpaquePointer, url: URL) throws {
+        // Set permissions before creating WAL/SHM files.
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         try configureSQL(db, "PRAGMA journal_mode=WAL")
         try configureSQL(db, "PRAGMA synchronous=FULL")
-        try configureSQL(db, "PRAGMA cache_size=-1024")
         try configureSQL(db, "PRAGMA secure_delete=ON")
         try configureSQL(db, """
             CREATE TABLE IF NOT EXISTS clips (

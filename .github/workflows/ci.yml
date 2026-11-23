@@ -37,6 +37,13 @@ jobs:
       - name: 单元测试
         run: swift test --disable-sandbox
 
+      - name: 数据刷新回归
+        run: |
+          bash Tests/Performance/run.sh
+          bash Tests/Permissions/run.sh
+          bash Tests/Panel/run.sh
+          bash Tests/ClipboardHistory/run.sh
+
       - name: 打包 .app
         env:
           AURORA_INSTALL: "0"

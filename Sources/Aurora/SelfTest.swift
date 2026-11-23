@@ -1646,8 +1646,10 @@ enum SelfTest {
 
         // 资源
         let monitor = SystemMonitor()
-        Thread.sleep(forTimeInterval: 1.2)
-        monitor.sampleOnce()
+        let diskDeadline = Date().addingTimeInterval(2)
+        while (monitor.disk.total == 0 || monitor.memory.total == 0) && Date() < diskDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
         report("CPU 采样", monitor.cpu >= 0, Fmt.percent(monitor.cpu) + " · " + "\(monitor.perCore.count) 核")
         report("内存采样", monitor.memory.total > 0, "\(Fmt.bytes(monitor.memory.used)) / \(Fmt.bytes(monitor.memory.total))")
         report("网络采样", true, "↓\(Fmt.rate(monitor.network.download)) ↑\(Fmt.rate(monitor.network.upload))")
@@ -1661,6 +1663,10 @@ enum SelfTest {
 
         // 权限
         let permissions = PermissionService()
+        let permissionDeadline = Date().addingTimeInterval(2)
+        while permissions.statuses.isEmpty && Date() < permissionDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
         report("辅助功能", permissions.accessibility, permissions.accessibility ? "已授权" : "未授权")
         report("屏幕录制", permissions.screenRecording, permissions.screenRecording ? "已授权" : "未授权")
         report("输入监控", permissions.inputMonitoring, permissions.inputMonitoring ? "已授权" : "未授权")

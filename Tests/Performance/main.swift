@@ -43,66 +43,179 @@ precondition(rankings.memory.map(\.id) == [9,8,7,6,5,4,3,2])
 precondition(lookups.count == 9 && lookups.values.allSatisfy { $0 == 1 })
 print("PASS: independent rankings, idle 2 GiB first for memory; 9 unique name lookups")
 
+final class Locked<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+    init(_ value: Value) { self.value = value }
+
+    func update<Result>(_ change: (inout Value) -> Result) -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return change(&value)
+    }
+    var current: Value { update { $0 } }
+}
+
+@MainActor
+func waitUntil(_ condition: () -> Bool) {
+    let deadline = ProcessInfo.processInfo.systemUptime + 4
+    while !condition(), ProcessInfo.processInfo.systemUptime < deadline {
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+    }
+    precondition(condition(), "timed out waiting for background refresh")
+}
+
 MainActor.assumeIsolated {
-    var simulatedBattery = BatteryStats(level: 0.8, isPluggedIn: true)
-    var powerReads = 0
-    var detailReads = 0
-    let monitor = SystemMonitor(dashboardVisible: false, pollInterval: 0.25, readPowerState: {
-        powerReads += 1
-        return simulatedBattery
+    let reads = Locked<[Int]>([])
+    let started = DispatchSemaphore(value: 0)
+    let unblock = DispatchSemaphore(value: 0)
+    let coalescer = BackgroundSnapshot<Int, Int>(label: "fixture.probe") { input in
+        precondition(!Thread.isMainThread)
+        reads.update { $0.append(input) }
+        if input == 1 {
+            started.signal()
+            precondition(unblock.wait(timeout: .now() + 3) == .success)
+        }
+        return input
+    }
+    precondition(coalescer.request(1) { _ in preconditionFailure("stale reading delivered") })
+    precondition(started.wait(timeout: .now() + 2) == .success)
+    precondition(!coalescer.request(2) { _ in preconditionFailure("overlapping reading delivered") })
+    coalescer.requestLatest(3) { _ in preconditionFailure("superseded reading delivered") }
+    var received: Int?
+    coalescer.requestLatest(4) {
+        precondition(Thread.isMainThread)
+        received = $0
+    }
+    unblock.signal()
+    waitUntil { received == 4 }
+    precondition(reads.current == [1, 4])
+    print("PASS: reads run off-main; newest-only coalescing and main-thread publication")
+
+    let power = Locked((BatteryStats(level: 0.8, isPluggedIn: true), 0))
+    let detailReads = Locked(0)
+    let diskReads = Locked(0)
+    let holdDisk = DispatchSemaphore(value: 0)
+    let monitor = SystemMonitor(dashboardVisible: false, pollInterval: 0.3, readPowerState: {
+        precondition(!Thread.isMainThread)
+        return power.update { $0.1 += 1; return $0.0 }
     }, readBatteryDetails: { battery in
-        detailReads += 1
+        precondition(!Thread.isMainThread)
+        detailReads.update { $0 += 1 }
         battery.health = 0.95
+    }, diskCapacityInterval: 30, readDiskCapacity: {
+        precondition(!Thread.isMainThread)
+        diskReads.update { $0 += 1 }
+        precondition(holdDisk.wait(timeout: .now() + 4) == .success)
+        return DiskCapacity(total: 1000, free: 432)
     })
     var dashboardSamples = 0
+    var lastUptime: TimeInterval = 0
     var lastBatteryEvent: BatteryStats?
-    let uptimeSub = monitor.$uptime.dropFirst().sink { _ in dashboardSamples += 1 }
-    let batterySub = monitor.$battery.sink { lastBatteryEvent = $0 }
-    defer { uptimeSub.cancel(); batterySub.cancel() }
-
-    func waitUntil(_ condition: () -> Bool) {
-        let deadline = ProcessInfo.processInfo.systemUptime + 3
-        while !condition(), ProcessInfo.processInfo.systemUptime < deadline {
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
-        }
-        precondition(condition(), "timed out waiting for sampling")
+    let dashboardSub = monitor.$dashboard.dropFirst().sink {
+        precondition(Thread.isMainThread)
+        if $0.uptime != lastUptime { dashboardSamples += 1; lastUptime = $0.uptime }
     }
+    let batterySub = monitor.$battery.sink {
+        precondition(Thread.isMainThread)
+        lastBatteryEvent = $0
+    }
+    defer { dashboardSub.cancel(); batterySub.cancel() }
 
-    precondition(monitor.memory.total == 0 && lastBatteryEvent?.level == 0.8)
-    simulatedBattery.isPluggedIn = false
-    simulatedBattery.level = 0.1
-    waitUntil { powerReads >= 4 }
-    precondition(dashboardSamples == 0 && detailReads == 0)
-    precondition(lastBatteryEvent?.level == 0.1 && lastBatteryEvent?.isPluggedIn == false)
-    print("PASS: cold-hidden 0 dashboard samples / 0 battery-detail reads; unplugged/10% delivered")
+    waitUntil { lastBatteryEvent?.level == 0.8 }
+    power.update { $0.0.isPluggedIn = false; $0.0.level = 0.1 }
+    waitUntil { lastBatteryEvent?.level == 0.1 }
+    precondition(lastBatteryEvent?.isPluggedIn == false)
+    precondition(monitor.memory.total == 0 && dashboardSamples == 0 && detailReads.current == 0 && diskReads.current == 0)
+    print("PASS: hidden: only background power reads; unplugged/10% delivered")
 
     monitor.setDashboardVisible(true)
-    precondition(dashboardSamples == 1 && detailReads == 1 && monitor.memory.total > 0)
+    monitor.setDashboardVisible(true)
+    waitUntil { dashboardSamples >= 1 }
+    precondition(dashboardSamples == 1 && detailReads.current == 1 && monitor.memory.total > 0)
     precondition(monitor.battery?.health == 0.95)
-    monitor.setDashboardVisible(true)
-    precondition(dashboardSamples == 1) // repeat show is idempotent
-    waitUntil { dashboardSamples >= 3 }
-    precondition(detailReads == 1 && monitor.battery?.health == 0.95)
+    waitUntil { dashboardSamples >= 3 && diskReads.current == 1 }
+    precondition(monitor.disk.total == 0)
+    holdDisk.signal()
+    waitUntil { monitor.disk.total == 1000 }
+    precondition(monitor.disk.free == 432)
+    precondition(detailReads.current == 1 && monitor.battery?.health == 0.95)
+    print("PASS: blocked disk capacity does not stall sampling; capacity publishes when ready")
 
     monitor.setDashboardVisible(false)
     let samplesAtHide = dashboardSamples
-    let readsAtHide = powerReads
     let cpuHistoryCount = monitor.cpuHistory.count
     let netHistoryCount = monitor.netHistory.count
-    simulatedBattery.isPluggedIn = true
-    simulatedBattery.level = 0.11
-    waitUntil { powerReads >= readsAtHide + 3 }
-    precondition(dashboardSamples == samplesAtHide && detailReads == 1)
-    precondition(lastBatteryEvent?.level == 0.11 && lastBatteryEvent?.isPluggedIn == true)
-    print("PASS: hidden again 0 dashboard samples / 0 battery-detail reads; AC/11% delivered")
+    power.update { $0.0.isPluggedIn = true; $0.0.level = 0.11 }
+    waitUntil { lastBatteryEvent?.level == 0.11 }
+    precondition(dashboardSamples == samplesAtHide && detailReads.current == 1 && diskReads.current == 1)
+    precondition(lastBatteryEvent?.isPluggedIn == true)
 
     monitor.setDashboardVisible(true)
-    precondition(dashboardSamples == samplesAtHide + 1 && detailReads == 2)
+    waitUntil { dashboardSamples == samplesAtHide + 1 }
+    precondition(detailReads.current == 2)
     precondition(monitor.network.download == 0 && monitor.network.upload == 0)
-    precondition(monitor.disk.readRate == 0 && monitor.disk.writeRate == 0)
+    precondition(monitor.disk.readRate == 0 && monitor.disk.writeRate == 0 && monitor.disk.total == 1000)
     precondition(monitor.processRankings.cpu.isEmpty && monitor.cpuHistory.count == cpuHistoryCount)
     precondition(monitor.netHistory.count == netHistoryCount)
     waitUntil { dashboardSamples >= samplesAtHide + 2 }
     precondition(monitor.cpuHistory.count > cpuHistoryCount && monitor.netHistory.count > netHistoryCount)
-    print("PASS: reopening samples immediately; CPU/network/disk rates reset and polling resumes")
+    precondition(diskReads.current == 1)
+    print("PASS: reopening resets rate baselines, resumes sampling and retains disk capacity")
+}
+
+MainActor.assumeIsolated {
+    let attempts = Locked(0)
+    let grant = DispatchSemaphore(value: 0)
+    let permission = PermissionService {
+        precondition(!Thread.isMainThread)
+        let attempt = attempts.update { $0 += 1; return $0 }
+        if attempt == 1 { precondition(grant.wait(timeout: .now() + 3) == .success) }
+        return .init(snapshot: PermissionSnapshot(accessibility: attempt > 1, screenRecording: false,
+                     inputMonitoring: false, disk: .denied), camera: .unknown, microphone: .unknown)
+    }
+    var permissionEvents = 0
+    let sub = permission.$statuses.dropFirst().sink { statuses in
+        precondition(Thread.isMainThread && statuses["accessibility"] == .granted)
+        permissionEvents += 1
+    }
+    defer { sub.cancel() }
+    permission.recheck()
+    permission.recheck()
+    grant.signal()
+    waitUntil { permission.accessibility && permissionEvents == 1 }
+    precondition(attempts.current == 2)
+    permission.refresh()
+    waitUntil { attempts.current == 3 }
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.04))
+    precondition(permissionEvents == 1)
+    print("PASS: permission recheck drops a stale in-flight reading; unchanged snapshot is not republished")
+
+    let vpnReads = Locked(0)
+    let vpn = VPNStatusService(interval: 0.12) {
+        precondition(!Thread.isMainThread)
+        vpnReads.update { $0 += 1 }
+        return VPNStatus(connected: true, name: "fixture VPN")
+    }
+    var vpnEvents = 0
+    let vpnSub = vpn.$status.dropFirst().sink { _ in
+        precondition(Thread.isMainThread)
+        vpnEvents += 1
+    }
+    defer { vpnSub.cancel() }
+    vpn.setOverviewVisible(true)
+    precondition(vpnReads.current == 0)
+    vpn.setPanelVisible(true)
+    waitUntil { vpn.status.summary == "fixture VPN" }
+    waitUntil { vpnReads.current >= 2 }
+    precondition(vpnEvents == 1)
+    vpn.setPanelVisible(false)
+    let count = vpnReads.current
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.3))
+    precondition(vpnReads.current == count)
+    vpn.setOverviewVisible(false)
+    vpn.setPanelVisible(true)
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.17))
+    precondition(vpnReads.current == count)
+    print("PASS: VPN reads only on visible overview, refreshes by TTL, skips unchanged publications")
 }

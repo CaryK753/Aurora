@@ -11,7 +11,7 @@
 import AppKit
 import Combine
 
-enum StoragePolicy {
+enum StoragePolicy: Sendable {
     case safe      // 缓存类，删了会自动重建
     case confirm   // 可能含个人数据，勾选后需要再确认一次
     case readOnly  // 只统计，不提供清理
@@ -25,7 +25,7 @@ enum StoragePolicy {
     }
 }
 
-struct StorageItem: Identifiable {
+struct StorageItem: Identifiable, Sendable {
     let id: String
     let title: String
     let detail: String
@@ -46,7 +46,7 @@ struct StorageItem: Identifiable {
     var permanentlyDeletes: Bool { id == "trash" }
 }
 
-struct StorageBigFile: Identifiable {
+struct StorageBigFile: Identifiable, Sendable {
     let id: String
     let name: String
     let path: String
@@ -54,7 +54,7 @@ struct StorageBigFile: Identifiable {
     let modified: Date
 }
 
-struct StorageVolume {
+struct StorageVolume: Sendable {
     var name: String
     var total: Int64
     var free: Int64
@@ -109,23 +109,30 @@ final class StorageService: ObservableObject {
         isScanning = true
         scanningLabel = T("正在读取磁盘信息…")
         status = nil
-        items = Self.catalog(home: home).map { spec in
-            var item = spec
-            item.available = spec.paths.contains { FileManager.default.fileExists(atPath: $0) } || spec.command != nil
-            return item
-        }
         bigFiles = []
+        isFindingBigFiles = false
         scanTask = Task { [weak self] in await self?.performScan() }
     }
 
     private func performScan() async {
-        refreshVolume()
-        tools = await Self.detectTools()
-        if let docker = tools["docker"], docker {
-            dockerSummary = await Self.dockerReclaimable()
-        } else {
-            dockerSummary = nil
+        let home = home
+        let initial = await readInBackground {
+            let items = Self.catalog(home: home).map { spec in
+                var item = spec
+                item.available = spec.paths.contains { FileManager.default.fileExists(atPath: $0) } || spec.command != nil
+                return item
+            }
+            return (items, Self.readVolume())
         }
+        guard !Task.isCancelled else { return }
+        items = initial.0
+        volume = initial.1
+        let detected = await Self.detectTools()
+        guard !Task.isCancelled else { return }
+        tools = detected
+        let summary = detected["docker"] == true ? await Self.dockerReclaimable() : nil
+        guard !Task.isCancelled else { return }
+        dockerSummary = summary
 
         let snapshot = items
         await withTaskGroup(of: (String, Int64, String?).self) { group in
@@ -164,24 +171,25 @@ final class StorageService: ObservableObject {
         status = total > 0 ? TF("扫描完成，约 %@ 可回收", Fmt.bytes(UInt64(total))) : T("扫描完成，没有发现明显可回收的空间")
 
         isFindingBigFiles = true
-        bigFiles = await Self.findBigFiles(roots: [
+        let files = await Self.findBigFiles(roots: [
             home.appendingPathComponent("Downloads").path,
             home.appendingPathComponent("Desktop").path,
             home.appendingPathComponent("Documents").path,
             home.appendingPathComponent("Movies").path
         ])
+        guard !Task.isCancelled else { return }
+        bigFiles = files
         isFindingBigFiles = false
     }
 
-    private func refreshVolume() {
+    nonisolated private static func readVolume() -> StorageVolume? {
         let url = URL(fileURLWithPath: "/")
         guard let values = try? url.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey]) else {
-            volume = nil
-            return
+            return nil
         }
         let total = Int64(values.volumeTotalCapacity ?? 0)
         let free = values.volumeAvailableCapacityForImportantUsage ?? 0
-        volume = StorageVolume(name: FileManager.default.displayName(atPath: "/"), total: total, free: free)
+        return StorageVolume(name: FileManager.default.displayName(atPath: "/"), total: total, free: free)
     }
 
     // MARK: - 清理
@@ -230,7 +238,7 @@ final class StorageService: ObservableObject {
 
         selection = []
         cleaningLabel = ""
-        refreshVolume()
+        volume = await readInBackground { Self.readVolume() }
         let emptied = targets.contains(where: \.permanentlyDeletes)
         status = failed == 0
             ? (emptied ? TF("已清空 %d 项（废纸篓中的项目无法恢复）", moved)
@@ -422,7 +430,7 @@ final class StorageService: ObservableObject {
 
     // MARK: - 目录清单
 
-    private static func catalog(home: URL) -> [StorageItem] {
+    nonisolated private static func catalog(home: URL) -> [StorageItem] {
         func path(_ relative: String) -> String {
             home.appendingPathComponent(relative).path
         }
