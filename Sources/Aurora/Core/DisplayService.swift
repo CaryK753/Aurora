@@ -183,6 +183,7 @@ final class DisplayService: ObservableObject {
     private let ddc = DDCManager()
     private let readQueue = DispatchQueue(label: "aurora.display.ddc", qos: .userInitiated)
     private var pollingTimer: Timer?
+    private var screenParametersObserver: NSObjectProtocol?
     /// 读到的 DDC 量程（显示器报告的最大值）
     private var ddcMaxima: [CGDirectDisplayID: [String: Int]] = [:]
 
@@ -195,11 +196,18 @@ final class DisplayService: ObservableObject {
             guard let self else { return }
             Task { @MainActor in self.refresh(preserve: true) }
         }
+        // 只在屏幕参数变化（或定时轮询）时重新枚举，不在弹出面板的事件里做。
+        screenParametersObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refresh(preserve: true) }
+        }
         if useNativeKeys { startMediaKeys() }
     }
 
     deinit {
         pollingTimer?.invalidate()
+        if let screenParametersObserver { NotificationCenter.default.removeObserver(screenParametersObserver) }
     }
 
     private static func bool(_ key: String, default value: Bool) -> Bool {
