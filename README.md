@@ -37,7 +37,11 @@ Aurora 是一款原生 macOS 菜单栏工具，使用 SwiftUI 与 AppKit 构建�
 
 ## 界面预览
 
-以下截图来自 macOS 上实际运行的 Aurora，展示显示器设置与小语种键盘。
+以下截图来自 macOS 上实际运行的 Aurora，展示菜单栏面板与各项功能。
+
+![Aurora 概览面板与极光桌面](docs/readme/overview-desktop.jpg)
+
+**概览** — 在菜单栏查看系统状态与常用指标。
 
 <table>
   <tr>
