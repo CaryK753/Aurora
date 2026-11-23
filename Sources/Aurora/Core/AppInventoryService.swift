@@ -48,6 +48,7 @@ final class AppInventoryService: ObservableObject {
     func scan() async {
         guard !isScanning else { return }
         isScanning = true
+        defer { isScanning = false }
         message = nil
         progress = T("正在读取应用列表…")
         let running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.path })
@@ -57,7 +58,6 @@ final class AppInventoryService: ObservableObject {
                 copy.isRunning = running.contains(app.path)
                 return copy
             }
-        isScanning = false
 
         for index in apps.indices {
             progress = TF("正在统计 %d / %d", index + 1, apps.count)

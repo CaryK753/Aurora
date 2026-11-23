@@ -146,7 +146,7 @@ struct MiniClipboardView: View {
             selection = 0
             rebuild()
         }
-        .onChange(of: clipboard.items) { _, _ in
+        .onChange(of: clipboard.historyRevision) { _, _ in
             rebuild()
         }
     }
@@ -262,11 +262,7 @@ struct MiniClipboardView: View {
     // MARK: 逻辑
 
     private func rebuild() {
-        let query = clipboard.query.trimmingCharacters(in: .whitespaces)
-        let base = clipboard.items
-        visible = query.isEmpty ? Array(base.prefix(30)) : Array(base.filter {
-            $0.text.localizedCaseInsensitiveContains(query)
-        }.prefix(30))
+        visible = clipboard.summaries(query: clipboard.query, filter: .all, pinnedFirst: false, limit: 30)
         if selection >= visible.count { selection = max(0, visible.count - 1) }
     }
 
@@ -379,13 +375,13 @@ struct MiniClipRow: View {
                 .font(.system(size: 10.5, design: .monospaced))
                 .lineLimit(1)
         case .link:
-            Text(item.text)
+            Text(item.preview)
                 .font(.system(size: 10.5))
                 .foregroundStyle(AuroraTheme.accent)
                 .lineLimit(1)
         default:
             VStack(alignment: .leading, spacing: 1) {
-                Text(item.text.split(separator: "\n").first.map(String.init) ?? item.text)
+                Text(item.preview)
                     .font(.system(size: 10.5))
                     .lineLimit(1)
                 if item.text.split(separator: "\n").count > 1 {

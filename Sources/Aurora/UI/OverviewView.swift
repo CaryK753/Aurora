@@ -591,14 +591,14 @@ struct OverviewView: View {
 
                 switch metric {
                 case .cpu:
-                    let ranked = monitor.processes.prefix(6)
+                    let ranked = monitor.processRankings.cpu.prefix(6)
                     let peak = max(ranked.first?.cpu ?? 1, 1)
                     processList(ranked.map {
                         RowModel(pid: $0.id, name: $0.name, value: String(format: "%.0f%%", $0.cpu),
                                  detail: Fmt.bytes($0.memory), ratio: min($0.cpu / peak, 1))
                     })
                 case .memory:
-                    let ranked = monitor.processes.sorted { $0.memory > $1.memory }.prefix(6)
+                    let ranked = monitor.processRankings.memory.prefix(6)
                     let peak = Double(ranked.first?.memory ?? 1)
                     processList(ranked.map {
                         RowModel(pid: $0.id, name: $0.name, value: Fmt.bytes($0.memory),

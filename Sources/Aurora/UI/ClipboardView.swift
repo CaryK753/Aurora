@@ -14,6 +14,18 @@ struct ClipboardView: View {
     @State private var editing: ClipItem?
     @State private var editText = ""
     @State private var patternInput = ""
+    @State private var page = 0
+    @State private var rows: [ClipItem] = []
+    @State private var hasNextPage = false
+    @State private var shortcuts: [UUID: Int] = [:]
+    private let pageSize = 30
+
+    private struct PageRequest: Equatable {
+        let query: String
+        let filter: ClipFilter
+        let page: Int
+        let revision: Int
+    }
     @State private var shortcutMonitor: Any?
 
     init(state: AppState) {
@@ -46,7 +58,22 @@ struct ClipboardView: View {
         .animation(.smooth(duration: 0.2), value: detail?.id)
         .animation(.smooth(duration: 0.2), value: editing?.id)
         .onAppear { installShortcuts() }
-        .onDisappear { removeShortcuts() }
+        .onDisappear {
+            removeShortcuts()
+            detail = nil
+            editing = nil
+            editText = ""
+            rows = []
+        }
+        .onChange(of: service.query) { _, _ in page = 0 }
+        .onChange(of: service.filter) { _, _ in page = 0 }
+        .task(id: PageRequest(query: service.query, filter: service.filter, page: page, revision: service.historyRevision)) {
+            if !service.query.isEmpty {
+                do { try await Task.sleep(for: .milliseconds(140)) } catch { return }
+            }
+            guard !Task.isCancelled else { return }
+            loadPage()
+        }
     }
 
     // MARK: - 顶部
@@ -88,11 +115,11 @@ struct ClipboardView: View {
 
             Menu {
                 Button(T("清空未固定")) {
-                    service.clearUnpinned()
+                    guard service.clearUnpinned() else { return }
                     state.showToast(T("已清空未固定的记录"), symbol: "trash")
                 }
                 Button(T("清空全部"), role: .destructive) {
-                    service.clearAll()
+                    guard service.clearAll() else { return }
                     state.showToast(T("已清空剪贴板历史"), symbol: "trash")
                 }
             } label: {
@@ -147,20 +174,31 @@ struct ClipboardView: View {
 
     // MARK: - 列表
 
+    private func loadPage() {
+        let result = service.summaries(query: service.query, filter: service.filter,
+                                       limit: pageSize + 1, offset: page * pageSize)
+        if result.isEmpty && page > 0 {
+            page -= 1
+            return
+        }
+        hasNextPage = result.count > pageSize
+        rows = Array(result.prefix(pageSize))
+        let pinned = page == 0 ? Array(rows.prefix(while: \.pinned).prefix(9)) : service.pinnedSummaries()
+        shortcuts = Dictionary(uniqueKeysWithValues: pinned.enumerated().map { ($0.element.id, $0.offset + 1) })
+    }
+
     private var listCard: some View {
         GlassCard(padding: 6) {
             VStack(spacing: 0) {
-                if service.filtered.isEmpty {
-                    EmptyHint(
-                        symbol: "doc.on.clipboard",
-                        text: service.query.isEmpty ? T("暂无剪贴板记录") : T("没有匹配的内容")
-                    )
+                if rows.isEmpty {
+                    EmptyHint(symbol: "doc.on.clipboard",
+                              text: service.query.isEmpty ? T("暂无剪贴板记录") : T("没有匹配的内容"))
                 } else {
                     ScrollView(.vertical) {
-                        VStack(spacing: 0) {
-                            ForEach(Array(service.filtered.enumerated()), id: \.element.id) { index, item in
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(rows.enumerated()), id: \.element.id) { index, item in
                                 row(item)
-                                if index < service.filtered.count - 1 {
+                                if index < rows.count - 1 {
                                     Rectangle()
                                         .fill(Color.primary.opacity(0.05))
                                         .frame(height: 0.6)
@@ -169,19 +207,26 @@ struct ClipboardView: View {
                             }
                         }
                     }
+                    .id(page)
                     .scrollIndicators(.never)
                     .frame(height: listHeight)
+                }
+                if page > 0 || hasNextPage {
+                    HStack(spacing: 10) {
+                        Button(T("上一页")) { page -= 1 }.disabled(page == 0)
+                        Text("\(page + 1)").monospacedDigit().foregroundStyle(.secondary)
+                        Button(T("下一页")) { page += 1 }.disabled(!hasNextPage)
+                    }
+                    .font(.system(size: 10))
+                    .buttonStyle(.borderless)
+                    .padding(5)
                 }
             }
         }
     }
 
-    /// 条目少时不要让卡片空出一大片，条目多时封顶 348pt 内部滚动
     private var listHeight: CGFloat {
-        let count = service.filtered.count
-        guard count > 0 else { return 118 }
-        let full = min(348, CGFloat(min(count, 7)) * 54 + 6)
-        // 展开记录规则时把列表收短，规则卡片能整块看到
+        let full = min(348, CGFloat(min(rows.count, 7)) * 54 + 6)
         return showSettings ? min(full, 168) : full
     }
 
@@ -214,7 +259,7 @@ struct ClipboardView: View {
 
             Spacer(minLength: 4)
 
-            if let slot = service.shortcutIndex(for: item) {
+            if let slot = shortcuts[item.id] {
                 Text("⌘\(slot)")
                     .font(.system(size: 8.5, weight: .semibold, design: .rounded))
                     .foregroundStyle(AuroraTheme.accent)
@@ -229,7 +274,7 @@ struct ClipboardView: View {
 
             if hovered {
                 HStack(spacing: 2) {
-                    actionButton("eye") { detail = item }
+                    actionButton("eye") { detail = service.item(with: item.id) }
                     actionButton(item.pinned ? "pin.slash" : "pin") { service.togglePin(item) }
                     actionButton("trash") { service.delete(item) }
                 }
@@ -253,7 +298,7 @@ struct ClipboardView: View {
                 service.paste(item)
                 state.dismissMainPanel()
             } else {
-                service.copy(item)
+                guard service.copy(item) else { return }
                 state.showToast(T("已复制"), symbol: "doc.on.doc")
             }
         }
@@ -267,7 +312,7 @@ struct ClipboardView: View {
                 Button(T("粘贴为纯文本")) { pastePlain(item) }
             }
             Divider()
-            Button(T("查看详情")) { detail = item }
+            Button(T("查看详情")) { detail = service.item(with: item.id) }
             if item.isTextual {
                 Button(T("编辑")) { beginEdit(item) }
             }
@@ -462,7 +507,7 @@ struct ClipboardView: View {
                     Image(systemName: "internaldrive")
                         .font(.system(size: 9))
                         .foregroundStyle(.secondary)
-                    Text(TF("%d 条 · %@", service.items.count, storageLabel))
+                    Text(TF("%d 条 · %@", service.historyCount, storageLabel))
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -534,7 +579,12 @@ struct ClipboardView: View {
                 .foregroundStyle(service.isPausedBySecureInput ? AnyShapeStyle(AuroraTheme.warn) : AnyShapeStyle(.tertiary))
                 .lineLimit(1)
             Spacer()
-            Text(TF("%d 个条目", service.items.count))
+            if service.storageFailed {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(AuroraTheme.warn)
+                    .help(T("剪贴板历史存储出错"))
+            }
+            Text(TF("%d 个条目", service.historyCount))
                 .font(.system(size: 9))
                 .foregroundStyle(.tertiary)
         }
@@ -620,7 +670,7 @@ struct ClipboardView: View {
     private func detailContent(_ item: ClipItem) -> some View {
         switch item.kind {
         case .image:
-            if let image = service.thumbnail(for: item) {
+            if let url = service.imageURL(for: item), let image = NSImage(contentsOf: url) {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
@@ -732,7 +782,7 @@ struct ClipboardView: View {
     // MARK: - 动作
 
     private func copy(_ item: ClipItem) {
-        service.copy(item)
+        guard service.copy(item) else { return }
         state.showToast(T("已复制"), symbol: "doc.on.doc")
     }
 
@@ -747,6 +797,7 @@ struct ClipboardView: View {
     }
 
     private func beginEdit(_ item: ClipItem) {
+        guard let item = service.item(with: item.id) else { return }
         detail = nil
         editText = item.text
         editing = item
@@ -767,7 +818,7 @@ struct ClipboardView: View {
                 service.paste(item)
                 state.showToast(T("已粘贴"), symbol: "arrow.down.doc")
             } else {
-                service.copy(item)
+                guard service.copy(item) else { return event }
                 state.showToast(TF("已复制 ⌘%d", slot), symbol: "doc.on.doc")
             }
             return nil

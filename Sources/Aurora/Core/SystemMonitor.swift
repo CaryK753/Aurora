@@ -68,6 +68,55 @@ struct ProcessSample: Identifiable, Equatable {
     var memory: UInt64
 }
 
+struct ProcessRankings: Equatable {
+    var cpu: [ProcessSample] = []
+    var memory: [ProcessSample] = []
+
+    init() {}
+
+    init(samples: [ProcessSample], limit: Int = 8, nameForPID: (pid_t) -> String) {
+        let cpuTop = samples.filter { $0.cpu > 0.6 }.sorted {
+            $0.cpu == $1.cpu ? $0.id < $1.id : $0.cpu > $1.cpu
+        }.prefix(limit)
+        let memoryTop = samples.filter { $0.memory > 0 }.sorted {
+            $0.memory == $1.memory ? $0.id < $1.id : $0.memory > $1.memory
+        }.prefix(limit)
+
+        // Resolve executable names only once per PID, and only for rows that will be published.
+        var names: [pid_t: String] = [:]
+        func withName(_ sample: ProcessSample) -> ProcessSample {
+            var row = sample
+            if let name = names[row.id] {
+                row.name = name
+            } else {
+                row.name = nameForPID(row.id)
+                names[row.id] = row.name
+            }
+            return row
+        }
+        cpu = cpuTop.map(withName)
+        memory = memoryTop.map(withName)
+    }
+}
+
+struct ProcessCPUCounters {
+    let ticks: UInt64
+    let startedAt: UInt64
+
+    static let nanosecondsPerTick: Double = {
+        var timebase = mach_timebase_info_data_t()
+        guard mach_timebase_info(&timebase) == KERN_SUCCESS, timebase.denom != 0 else { return 1 }
+        return Double(timebase.numer) / Double(timebase.denom)
+    }()
+
+    func percent(since previous: Self?, elapsed: TimeInterval) -> Double {
+        guard let previous, startedAt == previous.startedAt, ticks >= previous.ticks, elapsed > 0 else {
+            return 0
+        }
+        return Double(ticks - previous.ticks) * Self.nanosecondsPerTick / (elapsed * 1_000_000_000) * 100
+    }
+}
+
 @MainActor
 final class SystemMonitor: ObservableObject {
     @Published private(set) var cpu: Double = 0
@@ -82,14 +131,14 @@ final class SystemMonitor: ObservableObject {
     @Published private(set) var gpuHistory: [Double] = []
     @Published private(set) var neuralEngineAvailable: Bool = false
     @Published private(set) var battery: BatteryStats?
-    @Published private(set) var processes: [ProcessSample] = []
+    @Published private(set) var processRankings = ProcessRankings()
     @Published private(set) var uptime: TimeInterval = 0
 
     private let hostPort: mach_port_t = mach_host_self()
     private var previousTicks: [UInt32] = []
-    private var previousPrev: [UInt64: UInt64] = [:]   // pid -> cpu ns
+    private var previousUsage: [pid_t: ProcessCPUCounters] = [:]
     private var previousNet: (down: UInt64, up: UInt64) = (0, 0)
-    private var lastSampleDate = Date()
+    private var lastSampleTime = ProcessInfo.processInfo.systemUptime
     private var timer: Timer?
     private let historyLimit = 48
     private let coreCount = ProcessInfo.processInfo.activeProcessorCount
@@ -120,10 +169,10 @@ final class SystemMonitor: ObservableObject {
     }
 
     func sampleOnce() {
-        let now = Date()
-        let elapsed = max(now.timeIntervalSince(lastSampleDate), 0.4)
-        lastSampleDate = now
-        uptime = ProcessInfo.processInfo.systemUptime
+        let now = ProcessInfo.processInfo.systemUptime
+        let elapsed = max(now - lastSampleTime, 0.001)
+        lastSampleTime = now
+        uptime = now
 
         let cpuSample = sampleCPU()
         cpu = cpuSample.total
@@ -145,7 +194,7 @@ final class SystemMonitor: ObservableObject {
         push(&gpuHistory, gpu.utilization)
         neuralEngineAvailable = Self.isAppleSilicon
         battery = sampleBattery()
-        processes = sampleProcesses(elapsed: elapsed)
+        processRankings = sampleProcesses(elapsed: elapsed)
     }
 
     private func push(_ array: inout [Double], _ value: Double) {
@@ -429,48 +478,51 @@ final class SystemMonitor: ObservableObject {
 
     // MARK: - 进程
 
-    private func sampleProcesses(elapsed: TimeInterval) -> [ProcessSample] {
-        var pids = [pid_t](repeating: 0, count: 4096)
-        let count = aurora_proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.stride))
-        guard count > 0 else { return [] }
+    private func sampleProcesses(elapsed: TimeInterval) -> ProcessRankings {
+        let estimatedCount = aurora_proc_listallpids(nil, 0)
+        var pids = [pid_t](repeating: 0, count: max(256, Int(estimatedCount) + 64))
+        let count = pids.withUnsafeMutableBytes {
+            aurora_proc_listallpids($0.baseAddress, Int32($0.count))
+        }
+        guard count > 0 else {
+            previousUsage.removeAll()
+            return ProcessRankings()
+        }
 
         var samples: [ProcessSample] = []
-        var nextUsage: [UInt64: UInt64] = [:]
+        var nextUsage: [pid_t: ProcessCPUCounters] = [:]
+        samples.reserveCapacity(Int(count))
+        nextUsage.reserveCapacity(Int(count))
 
         for pid in pids.prefix(Int(count)) where pid > 0 {
             var info = rusage_info_v4()
             let status = withUnsafeMutablePointer(to: &info) { aurora_proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
             guard status == 0 else { continue }
 
-            let cpuTime = info.ri_user_time + info.ri_system_time
-            nextUsage[UInt64(pid)] = cpuTime
-            let previous = previousPrev[UInt64(pid)] ?? cpuTime
-            let delta = cpuTime >= previous ? cpuTime - previous : 0
-            let percent = Double(delta) / (elapsed * 1_000_000_000) * 100
-
-            var buffer = [CChar](repeating: 0, count: 1024)
-            let pathLength = aurora_proc_pidpath(pid, &buffer, UInt32(buffer.count))
-            var name = pathLength > 0 ? (String(cString: buffer) as NSString).lastPathComponent : ""
-            if name.isEmpty {
-                var nameBuffer = [CChar](repeating: 0, count: 256)
-                if aurora_proc_name(pid, &nameBuffer, UInt32(nameBuffer.count)) > 0 {
-                    name = String(cString: nameBuffer)
-                }
-            }
-
-            if percent > 0.6 || info.ri_phys_footprint > 120 * 1024 * 1024 {
-                samples.append(
-                    ProcessSample(
-                        id: pid,
-                        name: name.isEmpty ? "pid \(pid)" : name,
-                        cpu: percent,
-                        memory: info.ri_phys_footprint
-                    )
-                )
-            }
+            let counters = ProcessCPUCounters(
+                ticks: info.ri_user_time + info.ri_system_time,
+                startedAt: info.ri_proc_start_abstime
+            )
+            nextUsage[pid] = counters
+            samples.append(ProcessSample(id: pid, name: "",
+                                         cpu: counters.percent(since: previousUsage[pid], elapsed: elapsed),
+                                         memory: info.ri_phys_footprint))
         }
 
-        previousPrev = nextUsage
-        return samples.sorted { $0.cpu > $1.cpu }.prefix(8).map { $0 }
+        previousUsage = nextUsage
+        return ProcessRankings(samples: samples, nameForPID: Self.processName)
+    }
+
+    private static func processName(for pid: pid_t) -> String {
+        var path = [CChar](repeating: 0, count: 1024)
+        if aurora_proc_pidpath(pid, &path, UInt32(path.count)) > 0 {
+            let name = (String(cString: path) as NSString).lastPathComponent
+            if !name.isEmpty { return name }
+        }
+        var name = [CChar](repeating: 0, count: 256)
+        if aurora_proc_name(pid, &name, UInt32(name.count)) > 0 {
+            return String(cString: name)
+        }
+        return "pid \(pid)"
     }
 }

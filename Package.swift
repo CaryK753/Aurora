@@ -32,6 +32,7 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
+                .linkedLibrary("sqlite3"),
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreGraphics"),
