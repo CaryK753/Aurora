@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="Resources/AppIcon.iconset/icon_256x256@2x.png" width="104" alt="Aurora 应用图标">
+  <img src="docs/readme/cover.jpg" alt="Aurora：让 Mac 的日常操作更加清晰">
 
 # Aurora
 
@@ -34,6 +34,23 @@ Aurora 是一款原生 macOS 菜单栏工具，使用 SwiftUI 与 AppKit 构建�
 | **维护与其他** | 清理存储空间、管理应用与开发产物；阻止休眠；查看支持的工具在本地记录的 AI 用量。 |
 
 输入法、录屏和网络模块目前标记为 **Beta（测试版）**。具体能力受系统版本、设备、权限及安装包配置影响；网络模块的支持范围和限制见[网络模块说明](docs/network-proxy.md)。
+
+## 界面预览
+
+以下截图来自 macOS 上实际运行的 Aurora，展示显示器设置与小语种键盘。
+
+<table>
+  <tr>
+    <td><img src="docs/readme/display.png" alt="Aurora 显示器设置界面"><br><strong>显示</strong> — 亮度、分辨率与屏幕检测</td>
+    <td><img src="docs/readme/keyboard.png" alt="Aurora 德语键位图界面"><br><strong>小语种键盘</strong> — 键位图与特殊字符速查</td>
+  </tr>
+</table>
+
+<details>
+<summary>查看截图工具</summary>
+<br>
+<img src="docs/readme/capture.png" width="520" alt="Aurora 截图工具界面">
+</details>
 
 ## 系统要求
 
