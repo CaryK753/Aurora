@@ -39,6 +39,10 @@ Input methods, screen recording and networking are marked **Beta**. Availability
 
 A look at Aurora running on macOS. Screenshots show the Chinese interface; English is also available.
 
+![Aurora overview panel on an aurora desktop](docs/readme/overview-desktop.jpg)
+
+**Overview** — system status and key metrics from the menu bar.
+
 <table>
   <tr>
     <td><img src="docs/readme/display.png" alt="Display settings in Aurora"><br><strong>Display</strong> — brightness, resolution and screen tests</td>
