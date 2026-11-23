@@ -137,64 +137,101 @@ final class SystemMonitor: ObservableObject {
     private let hostPort: mach_port_t = mach_host_self()
     private var previousTicks: [UInt32] = []
     private var previousUsage: [pid_t: ProcessCPUCounters] = [:]
-    private var previousNet: (down: UInt64, up: UInt64) = (0, 0)
-    private var lastSampleTime = ProcessInfo.processInfo.systemUptime
+    private var previousNet: (down: UInt64, up: UInt64)?
+    private var lastSampleTime: TimeInterval?
+    private var lastBatteryDetailsTime: TimeInterval?
     private var timer: Timer?
+    private var dashboardVisible: Bool
+    private let pollInterval: TimeInterval
+    private let readPowerState: () -> BatteryStats?
+    private let readBatteryDetails: (inout BatteryStats) -> Void
     private let historyLimit = 48
-    private let coreCount = ProcessInfo.processInfo.activeProcessorCount
 
-    init() {
-        sampleOnce()
-        startTimer()
+    init(dashboardVisible: Bool = true, pollInterval: TimeInterval = 1.2,
+         readPowerState: @escaping () -> BatteryStats? = SystemMonitor.readPowerState,
+         readBatteryDetails: @escaping (inout BatteryStats) -> Void = SystemMonitor.readBatteryDetails) {
+        self.dashboardVisible = dashboardVisible
+        self.pollInterval = pollInterval
+        self.readPowerState = readPowerState
+        self.readBatteryDetails = readBatteryDetails
+        if dashboardVisible {
+            sampleOnce()
+        } else {
+            refreshBattery(at: ProcessInfo.processInfo.systemUptime, includeDetails: false)
+        }
+        let timer = Timer(timeInterval: pollInterval, repeats: true) { [weak self] _ in
+            // This timer only runs on the main run loop.
+            MainActor.assumeIsolated { self?.poll() }
+        }
+        timer.tolerance = pollInterval * 0.1
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
-    deinit { timer?.invalidate() }
-
-    func pause() {
+    deinit {
         timer?.invalidate()
-        timer = nil
+        mach_port_deallocate(mach_task_self_, hostPort)
     }
 
-    func resume() {
-        guard timer == nil else { return }
-        sampleOnce()
-        startTimer()
+    func setDashboardVisible(_ visible: Bool) {
+        guard dashboardVisible != visible else { return }
+        dashboardVisible = visible
+        if visible {
+            // On reopen, refresh current readings and establish fresh rate baselines.
+            sampleOnce()
+        } else {
+            lastSampleTime = nil
+            previousTicks.removeAll()
+            previousUsage.removeAll()
+            previousNet = nil
+            previousDiskBytes = nil
+            lastBatteryDetailsTime = nil
+        }
     }
 
-    private func startTimer() {
-        timer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in self.sampleOnce() }
+    private func poll() {
+        let now = ProcessInfo.processInfo.systemUptime
+        refreshBattery(at: now, includeDetails: dashboardVisible)
+        // A timer may fire right after the immediate sample on reopen.
+        if dashboardVisible, lastSampleTime.map({ now - $0 >= pollInterval / 2 }) ?? true {
+            sampleDashboard(at: now)
         }
     }
 
     func sampleOnce() {
         let now = ProcessInfo.processInfo.systemUptime
-        let elapsed = max(now - lastSampleTime, 0.001)
+        refreshBattery(at: now, includeDetails: true)
+        sampleDashboard(at: now)
+    }
+
+    private func sampleDashboard(at now: TimeInterval) {
+        let elapsed = lastSampleTime.map { max(now - $0, 0.001) }
         lastSampleTime = now
         uptime = now
 
         let cpuSample = sampleCPU()
         cpu = cpuSample.total
         perCore = cpuSample.perCore
-        push(&cpuHistory, cpuSample.total)
+        if elapsed != nil { push(&cpuHistory, cpuSample.total) }
 
         memory = sampleMemory()
         push(&memoryHistory, memory.usage)
 
         network = sampleNetwork(elapsed: elapsed)
-        netHistory.append((network.download, network.upload))
-        if netHistory.count > historyLimit { netHistory.removeFirst() }
+        if elapsed != nil {
+            netHistory.append((network.download, network.upload))
+            if netHistory.count > historyLimit { netHistory.removeFirst() }
+        }
 
-        disk = sampleDisk()
+        var diskSnapshot = sampleDisk()
         let io = sampleDiskIO(elapsed: elapsed)
-        disk.readRate = io.read
-        disk.writeRate = io.write
+        diskSnapshot.readRate = io.read
+        diskSnapshot.writeRate = io.write
+        disk = diskSnapshot
         gpu = sampleGPU()
         push(&gpuHistory, gpu.utilization)
         neuralEngineAvailable = Self.isAppleSilicon
-        battery = sampleBattery()
-        processRankings = sampleProcesses(elapsed: elapsed)
+        processRankings = sampleProcesses(elapsed: elapsed ?? 0)
     }
 
     private func push(_ array: inout [Double], _ value: Double) {
@@ -285,9 +322,12 @@ final class SystemMonitor: ObservableObject {
 
     // MARK: - 网络
 
-    private func sampleNetwork(elapsed: TimeInterval) -> NetworkStats {
+    private func sampleNetwork(elapsed: TimeInterval?) -> NetworkStats {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0 else { return NetworkStats() }
+        guard getifaddrs(&ifaddr) == 0 else {
+            previousNet = nil
+            return NetworkStats()
+        }
         defer { freeifaddrs(ifaddr) }
 
         var received: UInt64 = 0
@@ -313,7 +353,7 @@ final class SystemMonitor: ObservableObject {
         network.totalDown = received
         network.totalUp = sent
 
-        if previousNet.down > 0 || previousNet.up > 0 {
+        if let elapsed, let previousNet {
             let downDelta = received >= previousNet.down ? received - previousNet.down : 0
             let upDelta = sent >= previousNet.up ? sent - previousNet.up : 0
             network.download = Double(downDelta) / elapsed
@@ -389,11 +429,11 @@ final class SystemMonitor: ObservableObject {
         return DiskStats(total: UInt64(total), free: UInt64(free))
     }
 
-    private static func number(_ value: Any?) -> Double {
+    nonisolated private static func number(_ value: Any?) -> Double {
         (value as? NSNumber)?.doubleValue ?? 0
     }
 
-    private static func batteryRegistry() -> [String: Any]? {
+    nonisolated private static func batteryRegistry() -> [String: Any]? {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
         guard service != 0 else { return nil }
         defer { IOObjectRelease(service) }
@@ -403,12 +443,13 @@ final class SystemMonitor: ObservableObject {
         return dictionary
     }
 
-    private var previousDiskBytes: (read: UInt64, write: UInt64) = (0, 0)
+    private var previousDiskBytes: (read: UInt64, write: UInt64)?
 
     /// 整盘读写速率：IOBlockStorageDriver 的 Statistics 累计值做差分（Stats 同款口径）
-    private func sampleDiskIO(elapsed: TimeInterval) -> (read: Double, write: Double) {
+    private func sampleDiskIO(elapsed: TimeInterval?) -> (read: Double, write: Double) {
         var iterator: io_iterator_t = 0
         guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOBlockStorageDriver"), &iterator) == KERN_SUCCESS else {
+            previousDiskBytes = nil
             return (0, 0)
         }
         defer { IOObjectRelease(iterator) }
@@ -431,7 +472,7 @@ final class SystemMonitor: ObservableObject {
         }
 
         defer { previousDiskBytes = (read, write) }
-        guard previousDiskBytes.read > 0 || previousDiskBytes.write > 0, elapsed > 0 else { return (0, 0) }
+        guard let previousDiskBytes, let elapsed else { return (0, 0) }
         let readDelta = read >= previousDiskBytes.read ? read - previousDiskBytes.read : 0
         let writeDelta = write >= previousDiskBytes.write ? write - previousDiskBytes.write : 0
         return (Double(readDelta) / elapsed, Double(writeDelta) / elapsed)
@@ -439,7 +480,25 @@ final class SystemMonitor: ObservableObject {
 
     // MARK: - 电池
 
-    private func sampleBattery() -> BatteryStats? {
+    private func refreshBattery(at now: TimeInterval, includeDetails: Bool) {
+        var snapshot = readPowerState()
+        if var current = snapshot {
+            if includeDetails, lastBatteryDetailsTime.map({ now - $0 >= 60 }) ?? true {
+                readBatteryDetails(&current)
+                lastBatteryDetailsTime = now
+            } else {
+                current.cycleCount = battery?.cycleCount
+                current.health = battery?.health
+                current.condition = battery?.condition
+            }
+            snapshot = current
+        } else {
+            lastBatteryDetailsTime = nil
+        }
+        if battery != snapshot { battery = snapshot }
+    }
+
+    nonisolated private static func readPowerState() -> BatteryStats? {
         guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef],
               let source = sources.first,
@@ -453,6 +512,15 @@ final class SystemMonitor: ObservableObject {
         battery.isCharging = description[kIOPSIsChargingKey as String] as? Bool ?? false
         battery.isPluggedIn = (description[kIOPSPowerSourceStateKey as String] as? String) == kIOPSACPowerValue
 
+        if let minutes = description[kIOPSTimeToEmptyKey as String] as? Int, minutes > 0 {
+            battery.minutesRemaining = minutes
+        } else if let minutes = description[kIOPSTimeToFullChargeKey as String] as? Int, minutes > 0, battery.isCharging {
+            battery.minutesRemaining = minutes
+        }
+        return battery
+    }
+
+    nonisolated private static func readBatteryDetails(_ battery: inout BatteryStats) {
         // IOPS 只给百分比，容量/循环要去 AppleSmartBattery 注册表拿（mAh）
         if let registry = Self.batteryRegistry() {
             battery.cycleCount = (registry["CycleCount"] as? NSNumber)?.intValue
@@ -467,13 +535,6 @@ final class SystemMonitor: ObservableObject {
                 battery.condition = failure == 0 ? "Normal" : "Service Recommended"
             }
         }
-
-        if let minutes = description[kIOPSTimeToEmptyKey as String] as? Int, minutes > 0 {
-            battery.minutesRemaining = minutes
-        } else if let minutes = description[kIOPSTimeToFullChargeKey as String] as? Int, minutes > 0, battery.isCharging {
-            battery.minutesRemaining = minutes
-        }
-        return battery
     }
 
     // MARK: - 进程

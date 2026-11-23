@@ -161,7 +161,7 @@ final class AppState: ObservableObject {
     let devices = DeviceService()
     let screenTest = ScreenTestService.shared
     let contextMenu = ContextMenuService()
-    let monitor = SystemMonitor()
+    let monitor = SystemMonitor(dashboardVisible: false)
     let networkProcesses = NetworkProcessSampler()
     let speedTest = SpeedTester()
     let desktop = DesktopService()
@@ -305,7 +305,7 @@ final class AppState: ObservableObject {
         }
         keyboard.onRequestPermission = { [weak self] in self?.permissions.requestAccessibility() }
         batterySink = monitor.$battery
-            .removeDuplicates()
+            .removeDuplicates(by: { $0?.level == $1?.level && $0?.isPluggedIn == $1?.isPluggedIn })
             .sink { [weak self] battery in
                 guard let battery else { return }
                 Task { @MainActor in
@@ -361,6 +361,5 @@ final class AppState: ObservableObject {
             self.showHotkeys = false
             self.showLanguageCoach = false
         }
-        monitor.resume()
     }
 }

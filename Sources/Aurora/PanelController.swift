@@ -133,14 +133,12 @@ final class PanelController {
 
         state.permissions.recheck()
         state.display.refresh(preserve: true)
-        state.monitor.resume()
-        installMonitors()
 
         if isPinned {
             panel.alphaValue = 1
             NSApp.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(nil)
-            isVisible = true
+            setPanelVisible(true)
             return
         }
 
@@ -153,7 +151,7 @@ final class PanelController {
         panel.makeKeyAndOrderFront(nil)
         // 避免搜索框在面板弹出瞬间抢到键盘焦点
         panel.makeFirstResponder(nil)
-        isVisible = true
+        setPanelVisible(true)
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.26
@@ -171,10 +169,9 @@ final class PanelController {
             return
         }
         Debug.log("hide reason=\(reason)")
-        isVisible = false
+        setPanelVisible(false)
         transitionGeneration += 1
         let generation = transitionGeneration
-        removeMonitors()
 
         var frame = panel.frame
         frame.origin.y += 8
@@ -189,6 +186,16 @@ final class PanelController {
                 self.panel.orderOut(nil)
             }
         }
+    }
+
+    private func setPanelVisible(_ visible: Bool) {
+        isVisible = visible
+        if visible { installMonitors() } else { removeMonitors() }
+        updateDashboardVisibility()
+    }
+
+    private func updateDashboardVisibility() {
+        state.monitor.setDashboardVisible(isVisible && !panel.isMiniaturized && !NSApp.isHidden)
     }
 
     // MARK: - 固定 / 浮动
@@ -365,18 +372,23 @@ final class PanelController {
         windowObservers.append(center.addObserver(
             forName: NSWindow.willCloseNotification, object: panel, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.isVisible = false }
+            MainActor.assumeIsolated { self?.setPanelVisible(false) }
         })
         windowObservers.append(center.addObserver(
             forName: NSWindow.didMiniaturizeNotification, object: panel, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.isVisible = false }
+            MainActor.assumeIsolated { self?.setPanelVisible(false) }
         })
         windowObservers.append(center.addObserver(
             forName: NSWindow.didDeminiaturizeNotification, object: panel, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.isVisible = true }
+            MainActor.assumeIsolated { self?.setPanelVisible(true) }
         })
+        for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
+            windowObservers.append(center.addObserver(forName: name, object: NSApp, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateDashboardVisibility() }
+            })
+        }
         // 拿到焦点 / 尺寸变化时 AppKit 会重排标题栏，红绿灯偏移要跟着补
         windowObservers.append(center.addObserver(
             forName: NSWindow.didResizeNotification, object: panel, queue: .main
