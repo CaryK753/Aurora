@@ -13,6 +13,14 @@ import Carbon.HIToolbox
 
 @MainActor
 enum SelfTest {
+    // CLI diagnostics still need to deliver the services' async publications on the main run loop.
+    private static func waitForRefresh(timeout: TimeInterval = 2, _ ready: () -> Bool) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !ready() && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
+
     /// 验证滚轮变换：速度 / 反转 / Shift 横向 / 修饰键反转
     static func scrollTransform() -> Int32 {
         let engine = PointerEngine()
@@ -248,7 +256,7 @@ enum SelfTest {
         var serviceControlled = false
         var listedName = "—"
         let service = PerAppAudioService()
-        service.refresh()
+        waitForRefresh { service.items.contains { $0.name.lowercased().contains("say") } }
         if let item = service.items.first(where: { $0.name.lowercased().contains("say") }) {
             listedName = item.name
             service.setVolume(0.4, for: item.id)
@@ -1409,6 +1417,7 @@ enum SelfTest {
     /// 默认设备切换：走 AudioService 的真实代码路径，切完再读回系统值
     static func audioDefaultSwitch() -> Int32 {
         let service = AudioService()
+        waitForRefresh { !service.defaultOutputName.isEmpty }
         var failures = 0
         func check(_ name: String, _ ok: Bool, _ detail: String) {
             print(ok ? "✓ \(name)：\(detail)" : "✗ \(name)：\(detail)")
@@ -1424,8 +1433,10 @@ enum SelfTest {
             guard let target = list.first(where: { !$0.isDefault }) else { continue }
             print("候选：\(target.name) (\(target.id))，当前默认：\(original?.name ?? "—")")
             let ok = service.setDefault(target)
-            Thread.sleep(forTimeInterval: 0.4)
             service.refresh()
+            waitForRefresh {
+                (output ? service.outputs : service.inputs).first(where: \.isDefault)?.id == target.id
+            }
             let current = AudioService.defaultDevice(output: output)
             let badge = (output ? service.outputs : service.inputs).first(where: \.isDefault)
             check("切换到\(output ? "输出" : "输入") \(target.name)",
@@ -1475,6 +1486,7 @@ enum SelfTest {
     /// 只验证「监听器能不能把界面状态带过去」：绕过 AudioService，直接写 HAL 再等刷新
     static func audioDefaultListener() -> Int32 {
         let service = AudioService()
+        waitForRefresh { !service.defaultOutputName.isEmpty }
         let list = service.outputs
         guard list.count > 1, let original = list.first(where: \.isDefault),
               let target = list.first(where: { !$0.isDefault }) else {
@@ -1518,12 +1530,12 @@ enum SelfTest {
         defer { if player.isRunning { player.terminate() } }
 
         let perApp = PerAppAudioService()
-        var itemID: String?
-        for _ in 0..<15 where itemID == nil {
-            usleep(300_000)
+        for _ in 0..<15 {
+            if perApp.items.contains(where: { $0.pid == player.processIdentifier }) { break }
             perApp.refresh()
-            itemID = perApp.items.first { $0.pid == player.processIdentifier }?.id
+            waitForRefresh(timeout: 0.3) { perApp.items.contains { $0.pid == player.processIdentifier } }
         }
+        let itemID = perApp.items.first { $0.pid == player.processIdentifier }?.id
         guard let itemID else {
             print("✗ 播放器没有出现在按应用列表里")
             perApp.shutdown()
@@ -1534,6 +1546,7 @@ enum SelfTest {
         print("接管中：\(perApp.isControlled(itemID))")
 
         let service = AudioService()
+        waitForRefresh { !service.defaultOutputName.isEmpty }
         let list = service.outputs
         guard list.count > 1 else {
             print("· 只有一个输出设备，跳过")
@@ -1570,12 +1583,12 @@ enum SelfTest {
         let mutedBefore = defaultOutputMuted()
 
         let service = PerAppAudioService()
-        var itemID: String?
-        for _ in 0..<15 where itemID == nil {
-            usleep(300_000)
+        for _ in 0..<15 {
+            if service.items.contains(where: { $0.pid == player.processIdentifier }) { break }
             service.refresh()
-            itemID = service.items.first { $0.pid == player.processIdentifier }?.id
+            waitForRefresh(timeout: 0.3) { service.items.contains { $0.pid == player.processIdentifier } }
         }
+        let itemID = service.items.first { $0.pid == player.processIdentifier }?.id
         guard let itemID else {
             print("✗ 列表里没出现播放器（静音源可能不算「正在发声」）")
             service.shutdown()
@@ -1620,6 +1633,7 @@ enum SelfTest {
 
         // 显示器
         let display = DisplayService()
+        waitForRefresh { !display.displays.isEmpty }
         report("显示器数量", !display.displays.isEmpty, "\(display.displays.count) 台")
         for item in display.displays {
             report(
@@ -1646,10 +1660,7 @@ enum SelfTest {
 
         // 资源
         let monitor = SystemMonitor()
-        let diskDeadline = Date().addingTimeInterval(2)
-        while (monitor.disk.total == 0 || monitor.memory.total == 0) && Date() < diskDeadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        }
+        waitForRefresh { monitor.disk.total > 0 && monitor.memory.total > 0 }
         report("CPU 采样", monitor.cpu >= 0, Fmt.percent(monitor.cpu) + " · " + "\(monitor.perCore.count) 核")
         report("内存采样", monitor.memory.total > 0, "\(Fmt.bytes(monitor.memory.used)) / \(Fmt.bytes(monitor.memory.total))")
         report("网络采样", true, "↓\(Fmt.rate(monitor.network.download)) ↑\(Fmt.rate(monitor.network.upload))")
@@ -1663,10 +1674,7 @@ enum SelfTest {
 
         // 权限
         let permissions = PermissionService()
-        let permissionDeadline = Date().addingTimeInterval(2)
-        while permissions.statuses.isEmpty && Date() < permissionDeadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-        }
+        waitForRefresh { !permissions.statuses.isEmpty }
         report("辅助功能", permissions.accessibility, permissions.accessibility ? "已授权" : "未授权")
         report("屏幕录制", permissions.screenRecording, permissions.screenRecording ? "已授权" : "未授权")
         report("输入监控", permissions.inputMonitoring, permissions.inputMonitoring ? "已授权" : "未授权")
@@ -1682,6 +1690,7 @@ enum SelfTest {
 
         // 声音
         let audio = AudioService()
+        waitForRefresh { !audio.defaultOutputName.isEmpty }
         report("音频设备", !audio.outputs.isEmpty, "\(audio.outputs.count) 输出 / \(audio.inputs.count) 输入 · 默认 \(audio.defaultOutputName)")
 
         // 用量
@@ -1715,6 +1724,7 @@ enum SelfTest {
 
         // 设备枚举
         let hid = HIDDeviceService()
+        waitForRefresh { !hid.keyboards.isEmpty }
         report("键盘识别", !hid.keyboards.isEmpty, hid.keyboards.map(\.name).joined(separator: " · "))
         report("指针识别", true, hid.pointers.isEmpty ? "仅内建触控板" : hid.pointers.map(\.name).joined(separator: " · "))
 
@@ -1939,8 +1949,8 @@ enum SelfTest {
     /// 设备枚举：打印当前识别到的键盘与指针
     static func deviceScan() -> Int32 {
         let service = HIDDeviceService()
-        service.refresh()
         let keyboard = KeyboardService()
+        waitForRefresh { !service.keyboards.isEmpty }
         print("键盘 \(service.keyboards.count) 个：")
         for device in service.keyboards {
             print("  · \(device.name) · \(device.transportLabel) · \(device.vendorLabel) · 类型键 \(device.keyboardTypeKey) · 当前类型 \(keyboard.storedType(for: device).title)")
