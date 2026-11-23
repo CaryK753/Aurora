@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="Resources/AppIcon.iconset/icon_256x256@2x.png" width="104" alt="Aurora app icon">
+  <img src="docs/readme/cover.jpg" alt="Aurora — A little clarity for your Mac">
 
 # Aurora
 
@@ -34,6 +34,23 @@ Aurora is a native macOS menu bar utility built with SwiftUI and AppKit. Open th
 | **Maintenance & more** | Clean storage, manage apps and development artifacts, keep your Mac awake, and view locally recorded AI usage for supported tools. |
 
 Input methods, screen recording and networking are marked **Beta**. Availability depends on your macOS version, hardware, permissions and build configuration. See the [network documentation](docs/network-proxy.md) for supported features and limitations.
+
+## In the app
+
+A look at Aurora running on macOS. Screenshots show the Chinese interface; English is also available.
+
+<table>
+  <tr>
+    <td><img src="docs/readme/display.png" alt="Display settings in Aurora"><br><strong>Display</strong> — brightness, resolution and screen tests</td>
+    <td><img src="docs/readme/keyboard.png" alt="German keyboard layout in Aurora"><br><strong>Language layouts</strong> — keyboard maps and character shortcuts</td>
+  </tr>
+</table>
+
+<details>
+<summary>Screen capture tools</summary>
+<br>
+<img src="docs/readme/capture.png" width="520" alt="Screen capture tools in Aurora">
+</details>
 
 ## Requirements
 
