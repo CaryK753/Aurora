@@ -15,7 +15,7 @@ private func aurora_proc_pidpath(_ pid: Int32, _ buffer: UnsafeMutableRawPointer
 @_silgen_name("proc_name")
 private func aurora_proc_name(_ pid: Int32, _ buffer: UnsafeMutableRawPointer?, _ size: UInt32) -> Int32
 
-struct MemoryStats: Equatable {
+struct MemoryStats: Equatable, Sendable {
     var total: UInt64 = 0
     var used: UInt64 = 0
     var app: UInt64 = 0
@@ -27,14 +27,19 @@ struct MemoryStats: Equatable {
     var usage: Double { total > 0 ? Double(used) / Double(total) : 0 }
 }
 
-struct NetworkStats: Equatable {
+struct NetworkStats: Equatable, Sendable {
     var download: Double = 0   // bytes / s
     var upload: Double = 0
     var totalDown: UInt64 = 0
     var totalUp: UInt64 = 0
 }
 
-struct DiskStats: Equatable {
+struct DiskCapacity: Sendable {
+    let total: UInt64
+    let free: UInt64
+}
+
+struct DiskStats: Equatable, Sendable {
     var total: UInt64 = 0
     var free: UInt64 = 0
     var readRate: Double = 0   // bytes / s
@@ -42,7 +47,7 @@ struct DiskStats: Equatable {
     var usage: Double { total > 0 ? Double(total - free) / Double(total) : 0 }
 }
 
-struct BatteryStats: Equatable {
+struct BatteryStats: Equatable, Sendable {
     var level: Double = 0
     var isCharging: Bool = false
     var isPluggedIn: Bool = false
@@ -52,7 +57,7 @@ struct BatteryStats: Equatable {
     var condition: String?   // Normal / Service Recommended
 }
 
-struct GPUStats: Equatable {
+struct GPUStats: Equatable, Sendable {
     var available: Bool = false
     var utilization: Double = 0
     var memoryUsed: UInt64 = 0
@@ -61,14 +66,14 @@ struct GPUStats: Equatable {
     var name: String = ""
 }
 
-struct ProcessSample: Identifiable, Equatable {
+struct ProcessSample: Identifiable, Equatable, Sendable {
     let id: pid_t
     var name: String
     var cpu: Double      // 百分比，可超过 100
     var memory: UInt64
 }
 
-struct ProcessRankings: Equatable {
+struct ProcessRankings: Equatable, Sendable {
     var cpu: [ProcessSample] = []
     var memory: [ProcessSample] = []
 
@@ -119,48 +124,64 @@ struct ProcessCPUCounters {
 
 @MainActor
 final class SystemMonitor: ObservableObject {
-    @Published private(set) var cpu: Double = 0
-    @Published private(set) var cpuHistory: [Double] = []
-    @Published private(set) var perCore: [Double] = []
-    @Published private(set) var memory = MemoryStats()
-    @Published private(set) var memoryHistory: [Double] = []
-    @Published private(set) var network = NetworkStats()
-    @Published private(set) var netHistory: [(down: Double, up: Double)] = []
-    @Published private(set) var disk = DiskStats()
-    @Published private(set) var gpu = GPUStats()
-    @Published private(set) var gpuHistory: [Double] = []
-    @Published private(set) var neuralEngineAvailable: Bool = false
-    @Published private(set) var battery: BatteryStats?
-    @Published private(set) var processRankings = ProcessRankings()
-    @Published private(set) var uptime: TimeInterval = 0
+    struct Dashboard {
+        var cpu: Double = 0
+        var cpuHistory: [Double] = []
+        var perCore: [Double] = []
+        var memory = MemoryStats()
+        var memoryHistory: [Double] = []
+        var network = NetworkStats()
+        var netHistory: [(down: Double, up: Double)] = []
+        var disk = DiskStats()
+        var gpu = GPUStats()
+        var gpuHistory: [Double] = []
+        var neuralEngineAvailable: Bool = false
+        var processRankings = ProcessRankings()
+        var uptime: TimeInterval = 0
+    }
 
-    private let hostPort: mach_port_t = mach_host_self()
-    private var previousTicks: [UInt32] = []
-    private var previousUsage: [pid_t: ProcessCPUCounters] = [:]
-    private var previousNet: (down: UInt64, up: UInt64)?
+    @Published private(set) var dashboard = Dashboard()
+    @Published private(set) var battery: BatteryStats?
+    var cpu: Double { dashboard.cpu }
+    var cpuHistory: [Double] { dashboard.cpuHistory }
+    var perCore: [Double] { dashboard.perCore }
+    var memory: MemoryStats { dashboard.memory }
+    var memoryHistory: [Double] { dashboard.memoryHistory }
+    var network: NetworkStats { dashboard.network }
+    var netHistory: [(down: Double, up: Double)] { dashboard.netHistory }
+    var disk: DiskStats { dashboard.disk }
+    var gpu: GPUStats { dashboard.gpu }
+    var gpuHistory: [Double] { dashboard.gpuHistory }
+    var neuralEngineAvailable: Bool { dashboard.neuralEngineAvailable }
+    var processRankings: ProcessRankings { dashboard.processRankings }
+    var uptime: TimeInterval { dashboard.uptime }
+
+    private let sampler: BackgroundSnapshot<MonitorCollector.Request, MonitorCollector.Reading>
+    private let diskCapacityWorker: BackgroundSnapshot<Void, DiskCapacity?>
+    private let pollInterval: TimeInterval
+    private let diskCapacityInterval: TimeInterval
+    private var lastDiskCapacityRequest: TimeInterval?
+    private var diskCapacity: DiskCapacity?
     private var lastSampleTime: TimeInterval?
-    private var lastBatteryDetailsTime: TimeInterval?
     private var timer: Timer?
     private var dashboardVisible: Bool
-    private let pollInterval: TimeInterval
-    private let readPowerState: () -> BatteryStats?
-    private let readBatteryDetails: (inout BatteryStats) -> Void
+    private var session: UInt64 = 0
+    private var forceDashboard = false
     private let historyLimit = 48
 
     init(dashboardVisible: Bool = true, pollInterval: TimeInterval = 1.2,
-         readPowerState: @escaping () -> BatteryStats? = SystemMonitor.readPowerState,
-         readBatteryDetails: @escaping (inout BatteryStats) -> Void = SystemMonitor.readBatteryDetails) {
+         readPowerState: @escaping @Sendable () -> BatteryStats? = { MonitorCollector.readPowerState() },
+         readBatteryDetails: @escaping @Sendable (inout BatteryStats) -> Void = { MonitorCollector.readBatteryDetails(&$0) },
+         diskCapacityInterval: TimeInterval = 30,
+         readDiskCapacity: @escaping @Sendable () -> DiskCapacity? = { MonitorCollector.readDiskCapacity() }) {
         self.dashboardVisible = dashboardVisible
         self.pollInterval = pollInterval
-        self.readPowerState = readPowerState
-        self.readBatteryDetails = readBatteryDetails
-        if dashboardVisible {
-            sampleOnce()
-        } else {
-            refreshBattery(at: ProcessInfo.processInfo.systemUptime, includeDetails: false)
-        }
+        self.diskCapacityInterval = diskCapacityInterval
+        let collector = MonitorCollector(readPowerState: readPowerState, readBatteryDetails: readBatteryDetails)
+        sampler = BackgroundSnapshot(label: "aurora.dashboard.collector", read: { collector.read($0) })
+        diskCapacityWorker = BackgroundSnapshot(label: "aurora.disk.capacity", read: readDiskCapacity)
+        enqueue(sampleDashboard: dashboardVisible)
         let timer = Timer(timeInterval: pollInterval, repeats: true) { [weak self] _ in
-            // This timer only runs on the main run loop.
             MainActor.assumeIsolated { self?.poll() }
         }
         timer.tolerance = pollInterval * 0.1
@@ -168,18 +189,138 @@ final class SystemMonitor: ObservableObject {
         self.timer = timer
     }
 
-    deinit {
-        timer?.invalidate()
-        mach_port_deallocate(mach_task_self_, hostPort)
-    }
+    deinit { timer?.invalidate() }
 
     func setDashboardVisible(_ visible: Bool) {
         guard dashboardVisible != visible else { return }
         dashboardVisible = visible
-        if visible {
-            // On reopen, refresh current readings and establish fresh rate baselines.
-            sampleOnce()
-        } else {
+        session &+= 1
+        lastSampleTime = nil
+        forceDashboard = visible
+        if visible { sampleOnce() }
+    }
+
+    private func poll() {
+        let now = ProcessInfo.processInfo.systemUptime
+        enqueue(sampleDashboard: dashboardVisible && (lastSampleTime.map { now - $0 >= pollInterval / 2 } ?? true))
+    }
+
+    func sampleOnce() {
+        guard dashboardVisible else { return }
+        forceDashboard = true
+        enqueue(sampleDashboard: true)
+    }
+
+    private func enqueue(sampleDashboard: Bool) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let request = MonitorCollector.Request(now: now, session: session, dashboard: sampleDashboard)
+        if sampler.request(request, { [weak self] reading in
+            guard let self else { return }
+            if self.session == request.session {
+                if self.battery != reading.battery { self.battery = reading.battery }
+                if self.dashboardVisible, let latest = reading.dashboard { self.apply(latest) }
+            }
+            if self.forceDashboard { self.enqueue(sampleDashboard: true) }
+        }) {
+            if sampleDashboard {
+                forceDashboard = false
+                lastSampleTime = now
+                refreshDiskCapacityIfNeeded(at: now)
+            }
+        }
+    }
+
+    private func apply(_ sample: MonitorCollector.DashboardReading) {
+        var next = dashboard
+        next.cpu = sample.cpu.total
+        next.perCore = sample.cpu.perCore
+        if sample.hasPrevious { push(&next.cpuHistory, sample.cpu.total) }
+        next.memory = sample.memory
+        push(&next.memoryHistory, sample.memory.usage)
+        next.network = sample.network
+        if sample.hasPrevious { push(&next.netHistory, (sample.network.download, sample.network.upload)) }
+        next.disk = makeDisk(read: sample.diskIO.read, write: sample.diskIO.write)
+        next.gpu = sample.gpu
+        push(&next.gpuHistory, sample.gpu.utilization)
+        next.neuralEngineAvailable = sample.neuralEngineAvailable
+        next.processRankings = sample.processRankings
+        next.uptime = sample.uptime
+        dashboard = next
+    }
+
+    private func push<Value>(_ array: inout [Value], _ value: Value) {
+        array.append(value)
+        if array.count > historyLimit { array.removeFirst() }
+    }
+
+    private func makeDisk(read: Double, write: Double) -> DiskStats {
+        let total = diskCapacity?.total ?? 0
+        return DiskStats(total: total, free: min(diskCapacity?.free ?? 0, total), readRate: read, writeRate: write)
+    }
+
+    private func refreshDiskCapacityIfNeeded(at now: TimeInterval) {
+        if let lastDiskCapacityRequest, now - lastDiskCapacityRequest < diskCapacityInterval { return }
+        if diskCapacityWorker.request({ [weak self] capacity in
+            guard let self, let capacity else { return }
+            self.diskCapacity = capacity
+            guard self.dashboardVisible else { return }
+            let disk = self.makeDisk(read: self.disk.readRate, write: self.disk.writeRate)
+            if disk != self.dashboard.disk { self.dashboard.disk = disk }
+        }) {
+            lastDiskCapacityRequest = now
+        }
+    }
+
+    static var chipName: String { MonitorCollector.chipName }
+}
+
+/// Mutable counters are exclusively owned by the sampler's serial utility queue.
+private final class MonitorCollector: @unchecked Sendable {
+    struct Request: Sendable {
+        let now: TimeInterval
+        let session: UInt64
+        let dashboard: Bool
+    }
+
+    struct DashboardReading: Sendable {
+        let uptime: TimeInterval
+        let hasPrevious: Bool
+        let cpu: (total: Double, perCore: [Double])
+        let memory: MemoryStats
+        let network: NetworkStats
+        let diskIO: (read: Double, write: Double)
+        let gpu: GPUStats
+        let neuralEngineAvailable: Bool
+        let processRankings: ProcessRankings
+    }
+
+    struct Reading: Sendable {
+        let battery: BatteryStats?
+        let dashboard: DashboardReading?
+    }
+
+    private let hostPort = mach_host_self()
+    private let readPowerState: @Sendable () -> BatteryStats?
+    private let readBatteryDetails: @Sendable (inout BatteryStats) -> Void
+    private var battery: BatteryStats?
+    private var lastBatteryDetailsTime: TimeInterval?
+    private var previousTicks: [UInt32] = []
+    private var previousUsage: [pid_t: ProcessCPUCounters] = [:]
+    private var previousNet: (down: UInt64, up: UInt64)?
+    private var lastSampleTime: TimeInterval?
+    private var session: UInt64?
+
+    init(readPowerState: @escaping @Sendable () -> BatteryStats?,
+         readBatteryDetails: @escaping @Sendable (inout BatteryStats) -> Void) {
+        self.readPowerState = readPowerState
+        self.readBatteryDetails = readBatteryDetails
+    }
+
+    deinit { mach_port_deallocate(mach_task_self_, hostPort) }
+
+    func read(_ request: Request) -> Reading {
+        if session != request.session {
+            session = request.session
             lastSampleTime = nil
             previousTicks.removeAll()
             previousUsage.removeAll()
@@ -187,56 +328,33 @@ final class SystemMonitor: ObservableObject {
             previousDiskBytes = nil
             lastBatteryDetailsTime = nil
         }
+        refreshBattery(at: request.now, includeDetails: request.dashboard)
+        guard request.dashboard else { return Reading(battery: battery, dashboard: nil) }
+        let elapsed = lastSampleTime.map { max(request.now - $0, 0.001) }
+        lastSampleTime = request.now
+        return Reading(battery: battery, dashboard: DashboardReading(
+            uptime: request.now, hasPrevious: elapsed != nil, cpu: sampleCPU(), memory: sampleMemory(),
+            network: sampleNetwork(elapsed: elapsed), diskIO: sampleDiskIO(elapsed: elapsed),
+            gpu: sampleGPU(), neuralEngineAvailable: Self.isAppleSilicon,
+            processRankings: sampleProcesses(elapsed: elapsed ?? 0)
+        ))
     }
 
-    private func poll() {
-        let now = ProcessInfo.processInfo.systemUptime
-        refreshBattery(at: now, includeDetails: dashboardVisible)
-        // A timer may fire right after the immediate sample on reopen.
-        if dashboardVisible, lastSampleTime.map({ now - $0 >= pollInterval / 2 }) ?? true {
-            sampleDashboard(at: now)
+    private func refreshBattery(at now: TimeInterval, includeDetails: Bool) {
+        guard var current = readPowerState() else {
+            battery = nil
+            lastBatteryDetailsTime = nil
+            return
         }
-    }
-
-    func sampleOnce() {
-        let now = ProcessInfo.processInfo.systemUptime
-        refreshBattery(at: now, includeDetails: true)
-        sampleDashboard(at: now)
-    }
-
-    private func sampleDashboard(at now: TimeInterval) {
-        let elapsed = lastSampleTime.map { max(now - $0, 0.001) }
-        lastSampleTime = now
-        uptime = now
-
-        let cpuSample = sampleCPU()
-        cpu = cpuSample.total
-        perCore = cpuSample.perCore
-        if elapsed != nil { push(&cpuHistory, cpuSample.total) }
-
-        memory = sampleMemory()
-        push(&memoryHistory, memory.usage)
-
-        network = sampleNetwork(elapsed: elapsed)
-        if elapsed != nil {
-            netHistory.append((network.download, network.upload))
-            if netHistory.count > historyLimit { netHistory.removeFirst() }
+        if includeDetails, lastBatteryDetailsTime.map({ now - $0 >= 60 }) ?? true {
+            readBatteryDetails(&current)
+            lastBatteryDetailsTime = now
+        } else {
+            current.cycleCount = battery?.cycleCount
+            current.health = battery?.health
+            current.condition = battery?.condition
         }
-
-        var diskSnapshot = sampleDisk()
-        let io = sampleDiskIO(elapsed: elapsed)
-        diskSnapshot.readRate = io.read
-        diskSnapshot.writeRate = io.write
-        disk = diskSnapshot
-        gpu = sampleGPU()
-        push(&gpuHistory, gpu.utilization)
-        neuralEngineAvailable = Self.isAppleSilicon
-        processRankings = sampleProcesses(elapsed: elapsed ?? 0)
-    }
-
-    private func push(_ array: inout [Double], _ value: Double) {
-        array.append(value)
-        if array.count > historyLimit { array.removeFirst() }
+        battery = current
     }
 
     // MARK: - CPU
@@ -313,7 +431,7 @@ final class SystemMonitor: ObservableObject {
         memory.wired = UInt64(stats.wire_count) * pageSize
         memory.compressed = UInt64(stats.compressor_page_count) * pageSize
         memory.cached = (UInt64(stats.external_page_count) + UInt64(stats.purgeable_count)) * pageSize
-        let appPages = UInt64(stats.internal_page_count) - UInt64(stats.purgeable_count)
+        let appPages = UInt64(stats.internal_page_count - min(stats.internal_page_count, stats.purgeable_count))
         memory.app = appPages * pageSize
         memory.used = memory.app + memory.wired + memory.compressed
         memory.pressure = memory.total > 0 ? Double(memory.used) / Double(memory.total) : 0
@@ -409,24 +527,23 @@ final class SystemMonitor: ObservableObject {
         return stats
     }
 
-    static var chipName: String {
+    static let chipName: String = {
         var size = 0
         sysctlbyname("machdep.cpu.brand_string", nil, &size, nil, 0)
         guard size > 0 else { return "Apple Silicon" }
         var buffer = [CChar](repeating: 0, count: size)
         sysctlbyname("machdep.cpu.brand_string", &buffer, &size, nil, 0)
         return String(cString: buffer)
-    }
+    }()
 
     // MARK: - 磁盘
 
-    private func sampleDisk() -> DiskStats {
+    static func readDiskCapacity() -> DiskCapacity? {
         let url = URL(fileURLWithPath: "/")
         guard let values = try? url.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey]),
-              let total = values.volumeTotalCapacity, let free = values.volumeAvailableCapacityForImportantUsage else {
-            return DiskStats()
-        }
-        return DiskStats(total: UInt64(total), free: UInt64(free))
+              let total = values.volumeTotalCapacity, let free = values.volumeAvailableCapacityForImportantUsage,
+              total > 0, free >= 0 else { return nil }
+        return DiskCapacity(total: UInt64(total), free: UInt64(free))
     }
 
     nonisolated private static func number(_ value: Any?) -> Double {
@@ -480,25 +597,7 @@ final class SystemMonitor: ObservableObject {
 
     // MARK: - 电池
 
-    private func refreshBattery(at now: TimeInterval, includeDetails: Bool) {
-        var snapshot = readPowerState()
-        if var current = snapshot {
-            if includeDetails, lastBatteryDetailsTime.map({ now - $0 >= 60 }) ?? true {
-                readBatteryDetails(&current)
-                lastBatteryDetailsTime = now
-            } else {
-                current.cycleCount = battery?.cycleCount
-                current.health = battery?.health
-                current.condition = battery?.condition
-            }
-            snapshot = current
-        } else {
-            lastBatteryDetailsTime = nil
-        }
-        if battery != snapshot { battery = snapshot }
-    }
-
-    nonisolated private static func readPowerState() -> BatteryStats? {
+    static func readPowerState() -> BatteryStats? {
         guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef],
               let source = sources.first,
@@ -520,7 +619,7 @@ final class SystemMonitor: ObservableObject {
         return battery
     }
 
-    nonisolated private static func readBatteryDetails(_ battery: inout BatteryStats) {
+    static func readBatteryDetails(_ battery: inout BatteryStats) {
         // IOPS 只给百分比，容量/循环要去 AppleSmartBattery 注册表拿（mAh）
         if let registry = Self.batteryRegistry() {
             battery.cycleCount = (registry["CycleCount"] as? NSNumber)?.intValue

@@ -12,7 +12,7 @@ struct AppTraffic: Identifiable, Equatable {
     var upload: Double
 }
 
-struct VPNStatus: Equatable {
+struct VPNStatus: Equatable, Sendable {
     var connected: Bool = false
     var name: String?
     var interface: String?
@@ -159,21 +159,60 @@ final class SpeedTester: ObservableObject {
     }
 }
 
-enum VPNProbe {
-    private nonisolated(unsafe) static var cached = VPNStatus()
-    private nonisolated(unsafe) static var cachedAt = Date.distantPast
+@MainActor
+final class VPNStatusService: ObservableObject {
+    @Published private(set) var status = VPNStatus()
+    private let worker: BackgroundSnapshot<Void, VPNStatus>
+    private let interval: TimeInterval
+    private var panelVisible = false
+    private var overviewVisible = false
+    private var timer: Timer?
+    private var lastRead: TimeInterval?
 
-    /// 带缓存：Overview 每秒重绘，不能每次都 fork scutil
-    static func current(maxAge: TimeInterval = 15) -> VPNStatus {
-        if Date().timeIntervalSince(cachedAt) < maxAge { return cached }
-        let fresh = probe()
-        cached = fresh
-        cachedAt = Date()
-        return fresh
+    init(interval: TimeInterval = 15, read: @escaping @Sendable () -> VPNStatus = { VPNProbe.probe() }) {
+        self.interval = interval
+        worker = BackgroundSnapshot(label: "aurora.vpn.status", read: read)
     }
 
+    deinit { timer?.invalidate() }
+
+    func setPanelVisible(_ visible: Bool) {
+        guard panelVisible != visible else { return }
+        panelVisible = visible
+        schedule()
+    }
+
+    func setOverviewVisible(_ visible: Bool) {
+        guard overviewVisible != visible else { return }
+        overviewVisible = visible
+        schedule()
+    }
+
+    private func schedule() {
+        timer?.invalidate()
+        timer = nil
+        guard panelVisible && overviewVisible else { return }
+        if let lastRead {
+            let delay = interval - (ProcessInfo.processInfo.systemUptime - lastRead)
+            if delay > 0 {
+                timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.schedule() }
+                }
+                return
+            }
+        }
+        worker.request { [weak self] latest in
+            guard let self else { return }
+            self.lastRead = ProcessInfo.processInfo.systemUptime
+            if self.status != latest { self.status = latest }
+            self.schedule()
+        }
+    }
+}
+
+private enum VPNProbe {
     /// 同时看系统 VPN 配置状态和 utun 隧道，避免漏掉第三方客户端
-    private static func probe() -> VPNStatus {
+    static func probe() -> VPNStatus {
         var status = VPNStatus()
 
         let process = Process()

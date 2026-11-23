@@ -179,7 +179,9 @@ final class RecorderService: ObservableObject {
     private var areaOverlays: [NSWindow] = []
     private var areaDisplay: SCDisplay?
 
-    var outputDirectory: URL {
+    var outputDirectory: URL { Self.recordingsDirectory() }
+
+    nonisolated static func recordingsDirectory() -> URL {
         let movies = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies")
         let dir = movies.appendingPathComponent("Aurora Recordings")
@@ -216,12 +218,25 @@ final class RecorderService: ObservableObject {
 
     // MARK: - 源列表
 
+    private var sourceRefreshInFlight = false
+    private var sourceRefreshPending = false
+
     func refreshSources() {
-        guard hasScreenPermission else {
-            sources = []
-            return
-        }
+        guard !sourceRefreshInFlight else { sourceRefreshPending = true; return }
+        sourceRefreshInFlight = true
         Task {
+            defer {
+                sourceRefreshInFlight = false
+                if sourceRefreshPending {
+                    sourceRefreshPending = false
+                    refreshSources()
+                }
+            }
+            let granted = await readInBackground { CGPreflightScreenCaptureAccess() }
+            guard granted else {
+                if !sources.isEmpty { sources = [] }
+                return
+            }
             let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             var list: [RecorderSource] = []
             for display in content?.displays ?? [] {

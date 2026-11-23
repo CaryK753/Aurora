@@ -17,6 +17,7 @@ struct ClipboardView: View {
     @State private var page = 0
     @State private var rows: [ClipItem] = []
     @State private var hasNextPage = false
+    @State private var pinnedRows: [ClipItem] = []
     @State private var shortcuts: [UUID: Int] = [:]
     private let pageSize = 30
 
@@ -64,15 +65,16 @@ struct ClipboardView: View {
             editing = nil
             editText = ""
             rows = []
+            pinnedRows = []
         }
-        .onChange(of: service.query) { _, _ in page = 0 }
-        .onChange(of: service.filter) { _, _ in page = 0 }
+        .onChange(of: service.query) { _, _ in page = 0; pinnedRows = []; shortcuts = [:] }
+        .onChange(of: service.filter) { _, _ in page = 0; pinnedRows = []; shortcuts = [:] }
         .task(id: PageRequest(query: service.query, filter: service.filter, page: page, revision: service.historyRevision)) {
             if !service.query.isEmpty {
                 do { try await Task.sleep(for: .milliseconds(140)) } catch { return }
             }
             guard !Task.isCancelled else { return }
-            loadPage()
+            await loadPage()
         }
     }
 
@@ -174,16 +176,23 @@ struct ClipboardView: View {
 
     // MARK: - 列表
 
-    private func loadPage() {
-        let result = service.summaries(query: service.query, filter: service.filter,
-                                       limit: pageSize + 1, offset: page * pageSize)
-        if result.isEmpty && page > 0 {
+    private func loadPage() async {
+        let requestedPage = page
+        let query = service.query
+        let filter = service.filter
+        let revision = service.historyRevision
+        let result = await service.summaries(query: query, filter: filter, limit: pageSize + 1,
+                                             offset: requestedPage * pageSize, includePinned: requestedPage > 0)
+        guard !Task.isCancelled, page == requestedPage, service.query == query,
+              service.filter == filter, service.historyRevision == revision else { return }
+        if result.rows.isEmpty && requestedPage > 0 {
             page -= 1
             return
         }
-        hasNextPage = result.count > pageSize
-        rows = Array(result.prefix(pageSize))
-        let pinned = page == 0 ? Array(rows.prefix(while: \.pinned).prefix(9)) : service.pinnedSummaries()
+        hasNextPage = result.rows.count > pageSize
+        rows = Array(result.rows.prefix(pageSize))
+        let pinned = requestedPage == 0 ? Array(rows.prefix(while: \.pinned).prefix(9)) : result.pinned
+        pinnedRows = pinned
         shortcuts = Dictionary(uniqueKeysWithValues: pinned.enumerated().map { ($0.element.id, $0.offset + 1) })
     }
 
@@ -333,12 +342,8 @@ struct ClipboardView: View {
 
     @ViewBuilder
     private func leading(_ item: ClipItem) -> some View {
-        if item.kind == .image, let image = service.thumbnail(for: item) {
-            Image(nsImage: image)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(width: 30, height: 30)
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        if item.kind == .image {
+            ClipboardRowThumbnail(item: item, service: service, size: 30, radius: 7)
                 .overlay {
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.7)
@@ -812,7 +817,7 @@ struct ClipboardView: View {
                   !event.modifierFlags.contains(.control),
                   let characters = event.charactersIgnoringModifiers,
                   let slot = Int(characters), (1...9).contains(slot),
-                  let item = service.pinnedItem(at: slot - 1) else { return event }
+                  let item = pinnedRows[safe: slot - 1] else { return event }
 
             if event.modifierFlags.contains(.option) {
                 service.paste(item)
@@ -880,5 +885,36 @@ private struct FlowChips: View {
     private func display(_ value: String) -> String {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: value) else { return value }
         return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
+    }
+}
+
+
+struct ClipboardRowThumbnail: View {
+    let item: ClipItem
+    let service: ClipboardService
+    let size: CGFloat
+    let radius: CGFloat
+    @State private var image: NSImage?
+    @State private var loadedFile: String?
+
+    var body: some View {
+        Group {
+            if let image, loadedFile == item.imageFile {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                Image(systemName: "photo")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+        .task(id: item.imageFile) {
+            let file = item.imageFile
+            let latest = await service.thumbnail(for: item)
+            guard !Task.isCancelled else { return }
+            loadedFile = file
+            image = latest
+        }
     }
 }

@@ -31,6 +31,12 @@ do {
     check("cold pages are disjoint and contain summaries, not bodies",
           page1.map(\.id) == Array(old.prefix(3)).map(\.id) && page2.map(\.id) == old[3...5].map(\.id)
               && (page1 + page2).allSatisfy { $0.text.isEmpty && !$0.preview.isEmpty })
+    let reader = try ClipboardHistoryStore(url: sqlite, readOnly: true)
+    try check("read-only background connection sees committed WAL and can search full text",
+              reader.page(query: "öMEGA-3", filter: .text, pinnedFirst: true, limit: 9, offset: 0).map(\.id) == [old[6].id])
+    var rejectedWrite = false
+    do { _ = try reader.clear(keepPinned: false) } catch { rejectedWrite = true }
+    try check("read-only connection rejects mutations", rejectedWrite && db.stats().count == 9)
     let hit = try db.page(query: "öMEGA-3", filter: .text, pinnedFirst: true, limit: 30, offset: 0)
     try check("search finds Unicode match past preview; cold item returns full body including NUL",
               hit.map(\.id) == [old[6].id] && db.item(id: old[6].id)?.text == old[6].text)

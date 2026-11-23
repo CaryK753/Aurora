@@ -17,35 +17,37 @@ final class PermissionService: ObservableObject {
         let prompt: (() -> Void)?
     }
 
-    @Published private(set) var accessibility = false
-    @Published private(set) var screenRecording = false
-    @Published private(set) var inputMonitoring = false
-    @Published private(set) var fullDiskAccess = false
-    /// 通知授权（更新、录制完成等即时提醒）
-    @Published private(set) var notifications = false
-    /// 画中画录屏要用的摄像头
-    @Published private(set) var camera = false
-    /// 录屏混入麦克风
-    @Published private(set) var microphone = false
-    @Published private(set) var lastCheck = Date.distantPast
+    struct Reading: Sendable {
+        let snapshot: PermissionSnapshot
+        let camera: PermissionStatus
+        let microphone: PermissionStatus
+    }
+
+    @Published private(set) var statuses: [String: PermissionStatus] = [:]
     @Published private(set) var isChecking = false
     @Published private(set) var checkError: String?
-    @Published private(set) var statuses: [String: PermissionStatus] = [:]
+    var accessibility: Bool { statuses["accessibility"] == .granted }
+    var screenRecording: Bool { statuses["screen"] == .granted }
+    var fullDiskAccess: Bool { statuses["disk"] == .granted }
+    var inputMonitoring: Bool { statuses["input"] == .granted }
     var onRestart: (() -> Void)?
+    private let worker: BackgroundSnapshot<Void, Reading>
     private var fresh: PermissionSnapshot?
+    private var refreshAfterCurrent = false
+    private var publishingRecheck = false
     private var timer: Timer?
     private var activationObserver: NSObjectProtocol?
     private var fastPollTask: Task<Void, Never>?
     private var ticks = 0
 
-    init() {
+    init(read: @escaping @Sendable () -> Reading = { PermissionService.readCurrent() }) {
+        worker = BackgroundSnapshot(label: "aurora.permission.preflight", read: read)
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.refresh()
                 self.ticks += 1
-                if self.ticks % 10 == 0 { self.recheck() }
+                if self.ticks % 10 == 0 { self.recheck() } else { self.refresh() }
             }
         }
         activationObserver = NotificationCenter.default.addObserver(
@@ -59,61 +61,81 @@ final class PermissionService: ObservableObject {
         if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
     }
 
-    func refresh(fullDisk: Bool = true) {
-        let current = PermissionSnapshot.capture()
-        statuses["accessibility"] = .resolve(current: current.accessibility, fresh: fresh?.accessibility)
-        statuses["screen"] = .resolve(current: current.screenRecording, fresh: fresh?.screenRecording)
-        statuses["input"] = .resolve(current: current.inputMonitoring, fresh: fresh?.inputMonitoring)
-        if fullDisk {
-            if fresh?.disk == .granted && current.disk == .denied { statuses["disk"] = .restartRequired }
-            else {
-                switch fresh?.disk ?? current.disk {
-                case .granted: statuses["disk"] = .granted
-                case .denied: statuses["disk"] = .denied
-                case .unknown: statuses["disk"] = .unknown
-                }
+    func refresh(requireFresh: Bool = false) {
+        let started = worker.request { [weak self] reading in
+            guard let self else { return }
+            if self.refreshAfterCurrent {
+                // A grant/recheck finished after this read began. Do not publish that older result.
+                self.refreshAfterCurrent = false
+                self.refresh()
+                return
+            }
+            self.apply(reading)
+            if self.publishingRecheck {
+                self.publishingRecheck = false
+                self.isChecking = false
             }
         }
-        statuses["camera"] = Self.avStatus(AVCaptureDevice.authorizationStatus(for: .video))
-        statuses["microphone"] = Self.avStatus(AVCaptureDevice.authorizationStatus(for: .audio))
-        camera = statuses["camera"] == .granted
-        microphone = statuses["microphone"] == .granted
-        accessibility = statuses["accessibility"] == .granted
-        screenRecording = statuses["screen"] == .granted
-        inputMonitoring = statuses["input"] == .granted
-        fullDiskAccess = statuses["disk"] == .granted
-        // 通知状态由 NotificationService 缓存，这里只读，避免每 3 秒打一次 UN 接口
-        let notify = NotificationService.shared
-        notifications = notify.authorized
-        switch notify.status {
-        case .authorized, .provisional, .ephemeral: statuses["notifications"] = .granted
-        case .denied: statuses["notifications"] = .denied
-        default: statuses["notifications"] = .unknown
+        if !started && requireFresh { refreshAfterCurrent = true }
+    }
+
+    private func apply(_ reading: Reading) {
+        let current = reading.snapshot
+        let disk: PermissionStatus
+        if fresh?.disk == .granted && current.disk == .denied {
+            disk = .restartRequired
+        } else {
+            switch fresh?.disk ?? current.disk {
+            case .granted: disk = .granted
+            case .denied: disk = .denied
+            case .unknown: disk = .unknown
+            }
         }
-        lastCheck = Date()
+
+        let notifications: PermissionStatus
+        switch NotificationService.shared.status {
+        case .authorized, .provisional, .ephemeral: notifications = .granted
+        case .denied: notifications = .denied
+        default: notifications = .unknown
+        }
+        let next: [String: PermissionStatus] = [
+            "accessibility": .resolve(current: current.accessibility, fresh: fresh?.accessibility),
+            "screen": .resolve(current: current.screenRecording, fresh: fresh?.screenRecording),
+            "input": .resolve(current: current.inputMonitoring, fresh: fresh?.inputMonitoring),
+            "disk": disk, "camera": reading.camera, "microphone": reading.microphone,
+            "notifications": notifications,
+        ]
+        if next != statuses { statuses = next }
+    }
+
+    nonisolated private static func readCurrent() -> Reading {
+        Reading(snapshot: PermissionSnapshot.capture(),
+                camera: avStatus(AVCaptureDevice.authorizationStatus(for: .video)),
+                microphone: avStatus(AVCaptureDevice.authorizationStatus(for: .audio)))
     }
 
     /// 仅运行同一应用包内签名相同的只读探针，避开当前进程的授权缓存。
     func recheck() {
-        refresh()
-        guard !isChecking, Bundle.main.bundleURL.pathExtension == "app", let executable = Bundle.main.executableURL else { return }
+        guard !isChecking else { return }
+        guard Bundle.main.bundleURL.pathExtension == "app", let executable = Bundle.main.executableURL else {
+            refresh(requireFresh: true)
+            return
+        }
         isChecking = true
-        checkError = nil
+        if checkError != nil { checkError = nil }
         Task { [weak self] in
             let result = await PermissionProbe.run(executable: executable)
             guard let self else { return }
-            self.isChecking = false
+            self.publishingRecheck = true
             switch result {
             case .success(let snapshot): self.fresh = snapshot
             case .failure(let error): self.checkError = error.localizedDescription
             }
-            self.refresh()
-            Debug.log("permission probe ax=\(String(describing: self.fresh?.accessibilityAPI)) post=\(String(describing: self.fresh?.eventPosting)) operation=\(String(describing: self.fresh?.accessibilityOperation))")
-            Debug.log("permissions path=\(Bundle.main.bundlePath) states=\(self.statuses)")
+            self.refresh(requireFresh: true)
         }
     }
 
-    private static func avStatus(_ status: AVAuthorizationStatus) -> PermissionStatus {
+    nonisolated private static func avStatus(_ status: AVAuthorizationStatus) -> PermissionStatus {
         switch status {
         case .authorized: return .granted
         case .denied, .restricted: return .denied
@@ -167,7 +189,7 @@ final class PermissionService: ObservableObject {
         Task { [weak self] in
             let granted = await AVCaptureDevice.requestAccess(for: .video)
             guard let self else { return }
-            self.refresh()
+            self.refresh(requireFresh: true)
             if !granted { self.openPane("Privacy_Camera") }
         }
     }
@@ -176,7 +198,7 @@ final class PermissionService: ObservableObject {
         Task { [weak self] in
             let granted = await AVCaptureDevice.requestAccess(for: .audio)
             guard let self else { return }
-            self.refresh()
+            self.refresh(requireFresh: true)
             if !granted { self.openPane("Privacy_Microphone") }
         }
     }
@@ -186,7 +208,7 @@ final class PermissionService: ObservableObject {
             let granted = await NotificationService.shared.request()
             guard let self else { return }
             NotificationService.shared.refresh()
-            self.refresh()
+            self.refresh(requireFresh: true)
             if !granted { self.openPane("Notifications") }
         }
     }

@@ -5,8 +5,8 @@ import AppKit
 import Combine
 import IOKit
 
-struct HIDDevice: Identifiable, Equatable {
-    enum Kind { case keyboard, mouse, trackpad, other }
+struct HIDDevice: Identifiable, Equatable, Sendable {
+    enum Kind: Sendable { case keyboard, mouse, trackpad, other }
 
     let id: String
     var name: String
@@ -63,6 +63,7 @@ final class HIDDeviceService: ObservableObject {
     @Published private(set) var lastScan = Date()
 
     private var timer: Timer?
+    private let worker = BackgroundSnapshot<Void, [HIDDevice]>(label: "aurora.devices.hid", read: { HIDDeviceService.enumerate() })
 
     init() {
         refresh()
@@ -74,17 +75,19 @@ final class HIDDeviceService: ObservableObject {
     deinit { timer?.invalidate() }
 
     func refresh() {
-        let devices = Self.enumerate()
-        let keyboards = devices.filter { $0.kind == .keyboard }
-        let pointers = devices.filter { $0.kind == .mouse }
-        if keyboards != self.keyboards { self.keyboards = keyboards }
-        if pointers != self.pointers { self.pointers = pointers }
-        lastScan = Date()
+        worker.request { [weak self] devices in
+            guard let self else { return }
+            let keyboards = devices.filter { $0.kind == .keyboard }
+            let pointers = devices.filter { $0.kind == .mouse }
+            if keyboards != self.keyboards { self.keyboards = keyboards }
+            if pointers != self.pointers { self.pointers = pointers }
+            self.lastScan = Date()
+        }
     }
 
     // MARK: - IOKit
 
-    private static func enumerate() -> [HIDDevice] {
+    nonisolated private static func enumerate() -> [HIDDevice] {
         var iterator: io_iterator_t = 0
         guard IOServiceGetMatchingServices(
             kIOMainPortDefault,
@@ -145,19 +148,19 @@ final class HIDDeviceService: ObservableObject {
         }
     }
 
-    private static func properties(_ entry: io_registry_entry_t) -> [String: Any]? {
+    nonisolated private static func properties(_ entry: io_registry_entry_t) -> [String: Any]? {
         var unmanaged: Unmanaged<CFMutableDictionary>?
         guard IORegistryEntryCreateCFProperties(entry, &unmanaged, kCFAllocatorDefault, 0) == KERN_SUCCESS,
               let dictionary = unmanaged?.takeRetainedValue() as? [String: Any] else { return nil }
         return dictionary
     }
 
-    private static func number(_ value: Any?) -> Int {
+    nonisolated private static func number(_ value: Any?) -> Int {
         (value as? NSNumber)?.intValue ?? 0
     }
 
     /// 蓝牙设备的电量挂在父节点上，沿 IOService 平面往上找几层
-    private static func battery(for entry: io_registry_entry_t) -> Int? {
+    nonisolated private static func battery(for entry: io_registry_entry_t) -> Int? {
         var current: io_registry_entry_t = entry
         IOObjectRetain(current)
 

@@ -163,6 +163,7 @@ final class AppState: ObservableObject {
     let contextMenu = ContextMenuService()
     let monitor = SystemMonitor(dashboardVisible: false)
     let networkProcesses = NetworkProcessSampler()
+    let vpnStatus = VPNStatusService()
     let speedTest = SpeedTester()
     let desktop = DesktopService()
     let imports = ImportService()
@@ -239,7 +240,8 @@ final class AppState: ObservableObject {
             }
         }
 
-        permissionSink = permissions.$accessibility
+        permissionSink = permissions.$statuses
+            .compactMap { $0["accessibility"]?.isGranted }
             .removeDuplicates()
             .sink { [weak self] granted in
                 self?.pointer.setPermissionGranted(granted)

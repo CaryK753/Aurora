@@ -27,7 +27,14 @@ MainActor.assumeIsolated {
     } else {
         print("低电量保护被用户关闭，保留偏好，跳过相应检查")
     }
+    func waitForRefresh(_ ready: () -> Bool) {
+        let deadline = Date().addingTimeInterval(2)
+        while !ready() && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
     let audio = AudioService()
+    waitForRefresh { !audio.defaultInputName.isEmpty }
     for input in audio.inputs {
         var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyVolumeScalar,
             mScope: kAudioObjectPropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
@@ -39,6 +46,7 @@ MainActor.assumeIsolated {
     }
     print("✓ 音频输入通道读取一致（\(audio.inputs.count) 个设备）")
     let display = DisplayService()
+    waitForRefresh { !display.displays.isEmpty || NSScreen.screens.isEmpty }
     let invalid = DisplayModeOption(id: "invalid", width: 0, height: 0, refresh: 0, isCurrent: false)
     for item in display.displays {
         precondition(!display.apply(mode: invalid, for: item.id))

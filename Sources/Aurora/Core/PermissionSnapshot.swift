@@ -4,8 +4,8 @@ import Darwin
 import Foundation
 import IOKit.hid
 
-struct PermissionSnapshot: Codable {
-    enum Disk: String, Codable { case granted, denied, unknown }
+struct PermissionSnapshot: Codable, Sendable {
+    enum Disk: String, Codable, Sendable { case granted, denied, unknown }
     let accessibility: Bool
     let screenRecording: Bool
     let inputMonitoring: Bool
@@ -50,7 +50,7 @@ struct PermissionSnapshot: Codable {
     }
 }
 
-enum PermissionStatus: Equatable {
+enum PermissionStatus: Equatable, Sendable {
     case granted, denied, unknown, restartRequired
     var isGranted: Bool { self == .granted }
     var title: String {

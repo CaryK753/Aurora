@@ -11,7 +11,16 @@ final class TrackpadService: ObservableObject {
     @Published private(set) var trackingSpeed: Double = 1
     @Published private(set) var isApplying = false
     @Published private(set) var message: String?
+    private struct Reading: Sendable {
+        let hasHardware: Bool
+        let deviceName: String
+        let choices: [String: Int]
+        let trackingSpeed: Double
+    }
+
     private var timer: Timer?
+    private var settingsGeneration = 0
+    private let worker = BackgroundSnapshot<Void, Reading>(label: "aurora.trackpad.settings", read: { TrackpadService.capture() })
 
     init() {
         refresh()
@@ -21,7 +30,7 @@ final class TrackpadService: ObservableObject {
     }
     deinit { timer?.invalidate() }
 
-    static func detectedHardware() -> (Bool, String) {
+    nonisolated static func detectedHardware() -> (Bool, String) {
         let battery = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
         if battery != 0 {
             IOObjectRelease(battery)
@@ -40,7 +49,19 @@ final class TrackpadService: ObservableObject {
 
     func refresh() {
         guard !isApplying else { return }
-        (hasHardware, deviceName) = Self.detectedHardware()
+        let generation = settingsGeneration
+        worker.requestLatest(()) { [weak self] reading in
+            guard let self, !self.isApplying, self.settingsGeneration == generation else { return }
+            if self.hasHardware != reading.hasHardware { self.hasHardware = reading.hasHardware }
+            if self.deviceName != reading.deviceName { self.deviceName = reading.deviceName }
+            if self.choices != reading.choices { self.choices = reading.choices }
+            if self.trackingSpeed != reading.trackingSpeed { self.trackingSpeed = reading.trackingSpeed }
+        }
+    }
+
+    nonisolated private static func capture() -> Reading {
+        let (hasHardware, deviceName) = detectedHardware()
+        var choices: [String: Int] = [:]
         for domain in [TrackpadOption.internalDomain, TrackpadOption.externalDomain, TrackpadOption.global, TrackpadOption.dock] {
             let app = domain == TrackpadOption.global ? kCFPreferencesAnyApplication : domain as CFString
             CFPreferencesSynchronize(app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
@@ -59,10 +80,11 @@ final class TrackpadService: ObservableObject {
             if let dockKey = option.dockKey, Self.read(TrackpadOption.dock, dockKey)?.boolValue == false { index = 0 }
             choices[option.id] = index
         }
-        trackingSpeed = Self.read(TrackpadOption.global, "com.apple.trackpad.scaling")?.doubleValue ?? 1
+        return Reading(hasHardware: hasHardware, deviceName: deviceName, choices: choices,
+                       trackingSpeed: read(TrackpadOption.global, "com.apple.trackpad.scaling")?.doubleValue ?? 1)
     }
 
-    static func read(_ domain: String, _ key: String) -> NSNumber? {
+    nonisolated static func read(_ domain: String, _ key: String) -> NSNumber? {
         let app = domain == TrackpadOption.global ? kCFPreferencesAnyApplication : domain as CFString
         return CFPreferencesCopyValue(key as CFString, app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost) as? NSNumber
     }
@@ -85,6 +107,7 @@ final class TrackpadService: ObservableObject {
 
     private func apply(_ writes: [TrackpadOption.Write], speed: Bool = false) {
         guard hasHardware, !isApplying else { return }
+        settingsGeneration &+= 1
         var success = true
         for write in writes {
             let app = write.domain == TrackpadOption.global ? kCFPreferencesAnyApplication : write.domain as CFString

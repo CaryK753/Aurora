@@ -31,6 +31,7 @@ struct OverviewView: View {
     @ObservedObject var monitor: SystemMonitor
     @ObservedObject var state: AppState
     @ObservedObject private var traffic: NetworkProcessSampler
+    @ObservedObject private var vpn: VPNStatusService
     @ObservedObject private var speed: SpeedTester
     @ObservedObject private var deviceStore: DeviceService
     @State private var metric: ProcessMetric = .cpu
@@ -39,6 +40,7 @@ struct OverviewView: View {
         self.state = state
         self.monitor = state.monitor
         self.traffic = state.networkProcesses
+        self.vpn = state.vpnStatus
         self.speed = state.speedTest
         self.deviceStore = state.devices
     }
@@ -55,6 +57,8 @@ struct OverviewView: View {
             ],
             wide: [AnyView(devicesCard), AnyView(processCard)]
         )
+        .onAppear { vpn.setOverviewVisible(true) }
+        .onDisappear { vpn.setOverviewVisible(false) }
     }
 
     // MARK: - CPU
@@ -230,11 +234,11 @@ struct OverviewView: View {
                 HStack(spacing: 6) {
                     SectionLabel(text: T("网络"), symbol: "network")
 
-                    if let vpn = vpnStatus.summary {
+                    if let summary = vpn.status.summary {
                         HStack(spacing: 3) {
                             Image(systemName: "lock.shield.fill")
                                 .font(.system(size: 7.5, weight: .bold))
-                            Text(vpn)
+                            Text(summary)
                                 .font(.system(size: 8.5, weight: .medium))
                                 .lineLimit(1)
                         }
@@ -300,8 +304,6 @@ struct OverviewView: View {
             }
         }
     }
-
-    private var vpnStatus: VPNStatus { VPNProbe.current() }
 
     private func rateLabel(symbol: String, value: Double, color: Color) -> some View {
         HStack(spacing: 3) {
