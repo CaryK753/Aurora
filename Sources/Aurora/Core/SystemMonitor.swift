@@ -68,6 +68,55 @@ struct ProcessSample: Identifiable, Equatable {
     var memory: UInt64
 }
 
+struct ProcessRankings: Equatable {
+    var cpu: [ProcessSample] = []
+    var memory: [ProcessSample] = []
+
+    init() {}
+
+    init(samples: [ProcessSample], limit: Int = 8, nameForPID: (pid_t) -> String) {
+        let cpuTop = samples.filter { $0.cpu > 0.6 }.sorted {
+            $0.cpu == $1.cpu ? $0.id < $1.id : $0.cpu > $1.cpu
+        }.prefix(limit)
+        let memoryTop = samples.filter { $0.memory > 0 }.sorted {
+            $0.memory == $1.memory ? $0.id < $1.id : $0.memory > $1.memory
+        }.prefix(limit)
+
+        // Resolve executable names only once per PID, and only for rows that will be published.
+        var names: [pid_t: String] = [:]
+        func withName(_ sample: ProcessSample) -> ProcessSample {
+            var row = sample
+            if let name = names[row.id] {
+                row.name = name
+            } else {
+                row.name = nameForPID(row.id)
+                names[row.id] = row.name
+            }
+            return row
+        }
+        cpu = cpuTop.map(withName)
+        memory = memoryTop.map(withName)
+    }
+}
+
+struct ProcessCPUCounters {
+    let ticks: UInt64
+    let startedAt: UInt64
+
+    static let nanosecondsPerTick: Double = {
+        var timebase = mach_timebase_info_data_t()
+        guard mach_timebase_info(&timebase) == KERN_SUCCESS, timebase.denom != 0 else { return 1 }
+        return Double(timebase.numer) / Double(timebase.denom)
+    }()
+
+    func percent(since previous: Self?, elapsed: TimeInterval) -> Double {
+        guard let previous, startedAt == previous.startedAt, ticks >= previous.ticks, elapsed > 0 else {
+            return 0
+        }
+        return Double(ticks - previous.ticks) * Self.nanosecondsPerTick / (elapsed * 1_000_000_000) * 100
+    }
+}
+
 @MainActor
 final class SystemMonitor: ObservableObject {
     @Published private(set) var cpu: Double = 0
@@ -82,70 +131,107 @@ final class SystemMonitor: ObservableObject {
     @Published private(set) var gpuHistory: [Double] = []
     @Published private(set) var neuralEngineAvailable: Bool = false
     @Published private(set) var battery: BatteryStats?
-    @Published private(set) var processes: [ProcessSample] = []
+    @Published private(set) var processRankings = ProcessRankings()
     @Published private(set) var uptime: TimeInterval = 0
 
     private let hostPort: mach_port_t = mach_host_self()
     private var previousTicks: [UInt32] = []
-    private var previousPrev: [UInt64: UInt64] = [:]   // pid -> cpu ns
-    private var previousNet: (down: UInt64, up: UInt64) = (0, 0)
-    private var lastSampleDate = Date()
+    private var previousUsage: [pid_t: ProcessCPUCounters] = [:]
+    private var previousNet: (down: UInt64, up: UInt64)?
+    private var lastSampleTime: TimeInterval?
+    private var lastBatteryDetailsTime: TimeInterval?
     private var timer: Timer?
+    private var dashboardVisible: Bool
+    private let pollInterval: TimeInterval
+    private let readPowerState: () -> BatteryStats?
+    private let readBatteryDetails: (inout BatteryStats) -> Void
     private let historyLimit = 48
-    private let coreCount = ProcessInfo.processInfo.activeProcessorCount
 
-    init() {
-        sampleOnce()
-        startTimer()
+    init(dashboardVisible: Bool = true, pollInterval: TimeInterval = 1.2,
+         readPowerState: @escaping () -> BatteryStats? = SystemMonitor.readPowerState,
+         readBatteryDetails: @escaping (inout BatteryStats) -> Void = SystemMonitor.readBatteryDetails) {
+        self.dashboardVisible = dashboardVisible
+        self.pollInterval = pollInterval
+        self.readPowerState = readPowerState
+        self.readBatteryDetails = readBatteryDetails
+        if dashboardVisible {
+            sampleOnce()
+        } else {
+            refreshBattery(at: ProcessInfo.processInfo.systemUptime, includeDetails: false)
+        }
+        let timer = Timer(timeInterval: pollInterval, repeats: true) { [weak self] _ in
+            // This timer only runs on the main run loop.
+            MainActor.assumeIsolated { self?.poll() }
+        }
+        timer.tolerance = pollInterval * 0.1
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 
-    deinit { timer?.invalidate() }
-
-    func pause() {
+    deinit {
         timer?.invalidate()
-        timer = nil
+        mach_port_deallocate(mach_task_self_, hostPort)
     }
 
-    func resume() {
-        guard timer == nil else { return }
-        sampleOnce()
-        startTimer()
+    func setDashboardVisible(_ visible: Bool) {
+        guard dashboardVisible != visible else { return }
+        dashboardVisible = visible
+        if visible {
+            // On reopen, refresh current readings and establish fresh rate baselines.
+            sampleOnce()
+        } else {
+            lastSampleTime = nil
+            previousTicks.removeAll()
+            previousUsage.removeAll()
+            previousNet = nil
+            previousDiskBytes = nil
+            lastBatteryDetailsTime = nil
+        }
     }
 
-    private func startTimer() {
-        timer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in self.sampleOnce() }
+    private func poll() {
+        let now = ProcessInfo.processInfo.systemUptime
+        refreshBattery(at: now, includeDetails: dashboardVisible)
+        // A timer may fire right after the immediate sample on reopen.
+        if dashboardVisible, lastSampleTime.map({ now - $0 >= pollInterval / 2 }) ?? true {
+            sampleDashboard(at: now)
         }
     }
 
     func sampleOnce() {
-        let now = Date()
-        let elapsed = max(now.timeIntervalSince(lastSampleDate), 0.4)
-        lastSampleDate = now
-        uptime = ProcessInfo.processInfo.systemUptime
+        let now = ProcessInfo.processInfo.systemUptime
+        refreshBattery(at: now, includeDetails: true)
+        sampleDashboard(at: now)
+    }
+
+    private func sampleDashboard(at now: TimeInterval) {
+        let elapsed = lastSampleTime.map { max(now - $0, 0.001) }
+        lastSampleTime = now
+        uptime = now
 
         let cpuSample = sampleCPU()
         cpu = cpuSample.total
         perCore = cpuSample.perCore
-        push(&cpuHistory, cpuSample.total)
+        if elapsed != nil { push(&cpuHistory, cpuSample.total) }
 
         memory = sampleMemory()
         push(&memoryHistory, memory.usage)
 
         network = sampleNetwork(elapsed: elapsed)
-        netHistory.append((network.download, network.upload))
-        if netHistory.count > historyLimit { netHistory.removeFirst() }
+        if elapsed != nil {
+            netHistory.append((network.download, network.upload))
+            if netHistory.count > historyLimit { netHistory.removeFirst() }
+        }
 
-        disk = sampleDisk()
+        var diskSnapshot = sampleDisk()
         let io = sampleDiskIO(elapsed: elapsed)
-        disk.readRate = io.read
-        disk.writeRate = io.write
+        diskSnapshot.readRate = io.read
+        diskSnapshot.writeRate = io.write
+        disk = diskSnapshot
         gpu = sampleGPU()
         push(&gpuHistory, gpu.utilization)
         neuralEngineAvailable = Self.isAppleSilicon
-        battery = sampleBattery()
-        processes = sampleProcesses(elapsed: elapsed)
+        processRankings = sampleProcesses(elapsed: elapsed ?? 0)
     }
 
     private func push(_ array: inout [Double], _ value: Double) {
@@ -236,9 +322,12 @@ final class SystemMonitor: ObservableObject {
 
     // MARK: - 网络
 
-    private func sampleNetwork(elapsed: TimeInterval) -> NetworkStats {
+    private func sampleNetwork(elapsed: TimeInterval?) -> NetworkStats {
         var ifaddr: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifaddr) == 0 else { return NetworkStats() }
+        guard getifaddrs(&ifaddr) == 0 else {
+            previousNet = nil
+            return NetworkStats()
+        }
         defer { freeifaddrs(ifaddr) }
 
         var received: UInt64 = 0
@@ -264,7 +353,7 @@ final class SystemMonitor: ObservableObject {
         network.totalDown = received
         network.totalUp = sent
 
-        if previousNet.down > 0 || previousNet.up > 0 {
+        if let elapsed, let previousNet {
             let downDelta = received >= previousNet.down ? received - previousNet.down : 0
             let upDelta = sent >= previousNet.up ? sent - previousNet.up : 0
             network.download = Double(downDelta) / elapsed
@@ -340,11 +429,11 @@ final class SystemMonitor: ObservableObject {
         return DiskStats(total: UInt64(total), free: UInt64(free))
     }
 
-    private static func number(_ value: Any?) -> Double {
+    nonisolated private static func number(_ value: Any?) -> Double {
         (value as? NSNumber)?.doubleValue ?? 0
     }
 
-    private static func batteryRegistry() -> [String: Any]? {
+    nonisolated private static func batteryRegistry() -> [String: Any]? {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
         guard service != 0 else { return nil }
         defer { IOObjectRelease(service) }
@@ -354,12 +443,13 @@ final class SystemMonitor: ObservableObject {
         return dictionary
     }
 
-    private var previousDiskBytes: (read: UInt64, write: UInt64) = (0, 0)
+    private var previousDiskBytes: (read: UInt64, write: UInt64)?
 
     /// 整盘读写速率：IOBlockStorageDriver 的 Statistics 累计值做差分（Stats 同款口径）
-    private func sampleDiskIO(elapsed: TimeInterval) -> (read: Double, write: Double) {
+    private func sampleDiskIO(elapsed: TimeInterval?) -> (read: Double, write: Double) {
         var iterator: io_iterator_t = 0
         guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOBlockStorageDriver"), &iterator) == KERN_SUCCESS else {
+            previousDiskBytes = nil
             return (0, 0)
         }
         defer { IOObjectRelease(iterator) }
@@ -382,7 +472,7 @@ final class SystemMonitor: ObservableObject {
         }
 
         defer { previousDiskBytes = (read, write) }
-        guard previousDiskBytes.read > 0 || previousDiskBytes.write > 0, elapsed > 0 else { return (0, 0) }
+        guard let previousDiskBytes, let elapsed else { return (0, 0) }
         let readDelta = read >= previousDiskBytes.read ? read - previousDiskBytes.read : 0
         let writeDelta = write >= previousDiskBytes.write ? write - previousDiskBytes.write : 0
         return (Double(readDelta) / elapsed, Double(writeDelta) / elapsed)
@@ -390,7 +480,25 @@ final class SystemMonitor: ObservableObject {
 
     // MARK: - 电池
 
-    private func sampleBattery() -> BatteryStats? {
+    private func refreshBattery(at now: TimeInterval, includeDetails: Bool) {
+        var snapshot = readPowerState()
+        if var current = snapshot {
+            if includeDetails, lastBatteryDetailsTime.map({ now - $0 >= 60 }) ?? true {
+                readBatteryDetails(&current)
+                lastBatteryDetailsTime = now
+            } else {
+                current.cycleCount = battery?.cycleCount
+                current.health = battery?.health
+                current.condition = battery?.condition
+            }
+            snapshot = current
+        } else {
+            lastBatteryDetailsTime = nil
+        }
+        if battery != snapshot { battery = snapshot }
+    }
+
+    nonisolated private static func readPowerState() -> BatteryStats? {
         guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef],
               let source = sources.first,
@@ -404,6 +512,15 @@ final class SystemMonitor: ObservableObject {
         battery.isCharging = description[kIOPSIsChargingKey as String] as? Bool ?? false
         battery.isPluggedIn = (description[kIOPSPowerSourceStateKey as String] as? String) == kIOPSACPowerValue
 
+        if let minutes = description[kIOPSTimeToEmptyKey as String] as? Int, minutes > 0 {
+            battery.minutesRemaining = minutes
+        } else if let minutes = description[kIOPSTimeToFullChargeKey as String] as? Int, minutes > 0, battery.isCharging {
+            battery.minutesRemaining = minutes
+        }
+        return battery
+    }
+
+    nonisolated private static func readBatteryDetails(_ battery: inout BatteryStats) {
         // IOPS 只给百分比，容量/循环要去 AppleSmartBattery 注册表拿（mAh）
         if let registry = Self.batteryRegistry() {
             battery.cycleCount = (registry["CycleCount"] as? NSNumber)?.intValue
@@ -418,59 +535,55 @@ final class SystemMonitor: ObservableObject {
                 battery.condition = failure == 0 ? "Normal" : "Service Recommended"
             }
         }
-
-        if let minutes = description[kIOPSTimeToEmptyKey as String] as? Int, minutes > 0 {
-            battery.minutesRemaining = minutes
-        } else if let minutes = description[kIOPSTimeToFullChargeKey as String] as? Int, minutes > 0, battery.isCharging {
-            battery.minutesRemaining = minutes
-        }
-        return battery
     }
 
     // MARK: - 进程
 
-    private func sampleProcesses(elapsed: TimeInterval) -> [ProcessSample] {
-        var pids = [pid_t](repeating: 0, count: 4096)
-        let count = aurora_proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.stride))
-        guard count > 0 else { return [] }
+    private func sampleProcesses(elapsed: TimeInterval) -> ProcessRankings {
+        let estimatedCount = aurora_proc_listallpids(nil, 0)
+        var pids = [pid_t](repeating: 0, count: max(256, Int(estimatedCount) + 64))
+        let count = pids.withUnsafeMutableBytes {
+            aurora_proc_listallpids($0.baseAddress, Int32($0.count))
+        }
+        guard count > 0 else {
+            previousUsage.removeAll()
+            return ProcessRankings()
+        }
 
         var samples: [ProcessSample] = []
-        var nextUsage: [UInt64: UInt64] = [:]
+        var nextUsage: [pid_t: ProcessCPUCounters] = [:]
+        samples.reserveCapacity(Int(count))
+        nextUsage.reserveCapacity(Int(count))
 
         for pid in pids.prefix(Int(count)) where pid > 0 {
             var info = rusage_info_v4()
             let status = withUnsafeMutablePointer(to: &info) { aurora_proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
             guard status == 0 else { continue }
 
-            let cpuTime = info.ri_user_time + info.ri_system_time
-            nextUsage[UInt64(pid)] = cpuTime
-            let previous = previousPrev[UInt64(pid)] ?? cpuTime
-            let delta = cpuTime >= previous ? cpuTime - previous : 0
-            let percent = Double(delta) / (elapsed * 1_000_000_000) * 100
-
-            var buffer = [CChar](repeating: 0, count: 1024)
-            let pathLength = aurora_proc_pidpath(pid, &buffer, UInt32(buffer.count))
-            var name = pathLength > 0 ? (String(cString: buffer) as NSString).lastPathComponent : ""
-            if name.isEmpty {
-                var nameBuffer = [CChar](repeating: 0, count: 256)
-                if aurora_proc_name(pid, &nameBuffer, UInt32(nameBuffer.count)) > 0 {
-                    name = String(cString: nameBuffer)
-                }
-            }
-
-            if percent > 0.6 || info.ri_phys_footprint > 120 * 1024 * 1024 {
-                samples.append(
-                    ProcessSample(
-                        id: pid,
-                        name: name.isEmpty ? "pid \(pid)" : name,
-                        cpu: percent,
-                        memory: info.ri_phys_footprint
-                    )
-                )
-            }
+            let counters = ProcessCPUCounters(
+                ticks: info.ri_user_time + info.ri_system_time,
+                startedAt: info.ri_proc_start_abstime
+            )
+            nextUsage[pid] = counters
+            samples.append(ProcessSample(id: pid, name: "",
+                                         cpu: counters.percent(since: previousUsage[pid], elapsed: elapsed),
+                                         memory: info.ri_phys_footprint))
         }
 
-        previousPrev = nextUsage
-        return samples.sorted { $0.cpu > $1.cpu }.prefix(8).map { $0 }
+        previousUsage = nextUsage
+        return ProcessRankings(samples: samples, nameForPID: Self.processName)
+    }
+
+    private static func processName(for pid: pid_t) -> String {
+        var path = [CChar](repeating: 0, count: 1024)
+        if aurora_proc_pidpath(pid, &path, UInt32(path.count)) > 0 {
+            let name = (String(cString: path) as NSString).lastPathComponent
+            if !name.isEmpty { return name }
+        }
+        var name = [CChar](repeating: 0, count: 256)
+        if aurora_proc_name(pid, &name, UInt32(name.count)) > 0 {
+            return String(cString: name)
+        }
+        return "pid \(pid)"
     }
 }

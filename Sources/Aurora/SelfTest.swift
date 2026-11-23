@@ -1653,7 +1653,7 @@ enum SelfTest {
         report("网络采样", true, "↓\(Fmt.rate(monitor.network.download)) ↑\(Fmt.rate(monitor.network.upload))")
         report("磁盘采样", monitor.disk.total > 0, "可用 \(Fmt.bytes(monitor.disk.free)) / 共 \(Fmt.bytes(monitor.disk.total))")
         report("电池采样", monitor.battery != nil, monitor.battery.map { Fmt.percent($0.level) } ?? "无电池")
-        report("进程采样", !monitor.processes.isEmpty, "\(monitor.processes.count) 个高占用进程")
+        report("进程采样", !monitor.processRankings.memory.isEmpty, "\(monitor.processRankings.memory.count) 个高占用进程")
 
         report("GPU 采样", monitor.gpu.available,
                monitor.gpu.available ? "\(monitor.gpu.cores) 核 · \(Fmt.percent(monitor.gpu.utilization)) · \(Fmt.bytes(monitor.gpu.memoryUsed))" : "不可用")
@@ -1672,7 +1672,7 @@ enum SelfTest {
 
         // 剪贴板
         let clipboard = ClipboardService()
-        report("剪贴板", true, "\(clipboard.items.count) 条历史 · \(clipboard.isEnabled ? "监听中" : "已关闭")")
+        report("剪贴板", true, "\(clipboard.historyCount) 条历史 · \(clipboard.isEnabled ? "监听中" : "已关闭")")
 
         // 声音
         let audio = AudioService()
@@ -1869,7 +1869,7 @@ enum SelfTest {
 
         func wait() { RunLoop.main.run(until: Date().addingTimeInterval(1.6)) }
 
-        print("启用=\(service.isEnabled) 现有条目=\(service.items.count)")
+        print("启用=\(service.isEnabled) 现有条目=\(service.historyCount)")
 
         // 1. 文本 + 去重
         let token = "aurora-e2e-\(Int(Date().timeIntervalSince1970))"
@@ -1878,7 +1878,7 @@ enum SelfTest {
             pasteboard.setString(token, forType: .string)
             wait()
         }
-        let textItem = service.items.first { $0.text == token }
+        let textItem = service.recentItems.first { $0.text == token }
         check("文本被记录", textItem != nil, token)
         check("重复复制合并", textItem?.copies == 2, "次数 \(textItem?.copies ?? -1)")
         if let item = textItem { created.append(item.id) }
@@ -1897,7 +1897,7 @@ enum SelfTest {
             pasteboard.setData(rtf, forType: .rtf)
             pasteboard.setString(richToken, forType: .string)
             wait()
-            let richItem = service.items.first { $0.text == richToken }
+            let richItem = service.recentItems.first { $0.text == richToken }
             check("富文本被记录", richItem?.kind == .rich, "类型 \(richItem?.kind.rawValue ?? "无")")
             check("RTF 落盘", richItem?.rtfFile != nil, "有 RTF 文件")
             if let item = richItem { created.append(item.id) }
@@ -1915,7 +1915,7 @@ enum SelfTest {
             pasteboard.clearContents()
             pasteboard.setData(png, forType: .png)
             wait()
-            let imageItem = service.items.first { $0.kind == .image }
+            let imageItem = service.recentItems.first { $0.kind == .image }
             check("图片被记录", imageItem != nil, "图片条目")
             if let item = imageItem {
                 check("图片文件存在", service.imageURL(for: item).map { FileManager.default.fileExists(atPath: $0.path) } ?? false, "clips/")
@@ -1926,7 +1926,7 @@ enum SelfTest {
         for id in created {
             if let item = service.item(with: id) { service.delete(item) }
         }
-        print("清理后条目=\(service.items.count)")
+        print("清理后条目=\(service.historyCount)")
         return failures == 0 ? 0 : 1
     }
 

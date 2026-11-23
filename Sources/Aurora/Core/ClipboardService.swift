@@ -3,13 +3,14 @@
 //
 //  设计取舍：
 //  · 只在 changeCount 变化时读一次剪贴板，0.6 秒轮询，开销可以忽略；
-//  · 图片与富文本落成文件，JSON 里只存索引，历史再长也不会把偏好写爆；
+//  · 图片与富文本落成文件，SQLite 持久化历史，只有最近 5 条完整记录常驻；
 //  · 记住原始 RTF，粘贴时能保留格式；「粘贴为纯文本」只写 string。
 
 import AppKit
 import Carbon.HIToolbox
 import Combine
 import CryptoKit
+import ImageIO
 
 enum ClipKind: String, Codable, CaseIterable, Identifiable {
     case text, rich, link, image, file, color
@@ -70,6 +71,7 @@ struct ClipItem: Identifiable, Codable, Equatable {
     var sourceBundle: String
     var copies: Int
     var byteCount: Int
+    var storedPreview: String? = nil
     var digest: String
 
     init(
@@ -129,15 +131,17 @@ struct ClipItem: Identifiable, Codable, Equatable {
     var isTextual: Bool { kind == .text || kind == .rich || kind == .link }
 
     var preview: String {
+        if let storedPreview { return storedPreview }
         switch kind {
         case .text, .rich, .link:
-            let flat = text.replacingOccurrences(of: "\n", with: " ")
+            let head = text.drop(while: { $0.isWhitespace }).prefix(201)
+            let flat = String(head.prefix(200)).replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespaces)
-            return flat.count > 200 ? String(flat.prefix(200)) + "…" : flat
+            return head.count > 200 ? flat + "…" : flat
         case .file:
             let names = text.split(separator: "\n").map { ($0 as NSString).lastPathComponent }
-            if names.count == 1 { return names[0] }
-            return TF("%@ 等 %d 个文件", names.first ?? "", names.count - 1)
+            if names.count == 1 { return String(names[0].prefix(200)) }
+            return TF("%@ 等 %d 个文件", String((names.first ?? "").prefix(200)), names.count - 1)
         case .image:
             return T("图片")
         case .color:
@@ -153,7 +157,11 @@ struct ClipItem: Identifiable, Codable, Equatable {
 
 @MainActor
 final class ClipboardService: ObservableObject {
-    @Published private(set) var items: [ClipItem] = []
+    private(set) var recentItems: [ClipItem] = []
+    @Published private(set) var historyRevision = 0
+    @Published private(set) var historyCount = 0
+    @Published private(set) var pinnedCount = 0
+    @Published private(set) var storageFailed = false
     @Published var query: String = ""
     @Published var filter: ClipFilter = .all
     @Published private(set) var isEnabled: Bool
@@ -162,7 +170,14 @@ final class ClipboardService: ObservableObject {
     /// 忽略「下一次」复制（Maccy 的 ignoreOnlyNextEvent）
     @Published var ignoreNextCopy: Bool = false
 
-    @Published var limit: Int { didSet { persistSettings() } }
+    @Published var limit: Int {
+        didSet {
+            persistSettings()
+            if limit < oldValue, !resettingSettings, let store {
+                changeHistory { try store.trim(limit: limit) }
+            }
+        }
+    }
     @Published var dedupe: Bool { didSet { persistSettings() } }
     @Published var captureText: Bool { didSet { persistSettings() } }
     @Published var captureImages: Bool { didSet { persistSettings() } }
@@ -180,7 +195,8 @@ final class ClipboardService: ObservableObject {
     private var moduleEnabled = true
     private var timer: Timer?
     private var lastChangeCount: Int = 0
-    private let storeURL: URL
+    private var store: ClipboardHistoryStore?
+    private var resettingSettings = false
     private let imageDir: URL
     private let rtfDir: URL
     private let thumbCache = NSCache<NSString, NSImage>()
@@ -196,43 +212,20 @@ final class ClipboardService: ObservableObject {
         "net.antelle.keeweb"
     ]
 
-    var filtered: [ClipItem] {
-        var base = items
-        switch filter {
-        case .all:
-            break
-        case .pinned:
-            base = base.filter(\.pinned)
-        case .text:
-            base = base.filter { $0.kind == .text || $0.kind == .rich }
-        case .link:
-            base = base.filter { $0.kind == .link }
-        case .image:
-            base = base.filter { $0.kind == .image }
-        case .file:
-            base = base.filter { $0.kind == .file }
-        case .color:
-            base = base.filter { $0.kind == .color }
+    func summaries(query: String, filter: ClipFilter, pinnedFirst: Bool = true,
+                   limit: Int = 30, offset: Int = 0) -> [ClipItem] {
+        do {
+            return try store?.page(query: query.trimmingCharacters(in: .whitespacesAndNewlines),
+                                   filter: filter, pinnedFirst: pinnedFirst, limit: limit, offset: offset) ?? []
+        } catch {
+            reportStorageError()
+            return []
         }
-        if !query.isEmpty {
-            let needle = query.trimmingCharacters(in: .whitespaces)
-            base = base.filter {
-                $0.text.localizedCaseInsensitiveContains(needle)
-                    || $0.preview.localizedCaseInsensitiveContains(needle)
-                    || ($0.colorHex?.localizedCaseInsensitiveContains(needle) ?? false)
-            }
-        }
-        return base.filter(\.pinned) + base.filter { !$0.pinned }
     }
-
-    var pinnedItems: [ClipItem] { filtered.filter(\.pinned) }
-
-    var pinnedCount: Int { items.filter(\.pinned).count }
 
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Aurora", isDirectory: true)
-        storeURL = support.appendingPathComponent("clipboard.json")
         imageDir = support.appendingPathComponent("clips", isDirectory: true)
         rtfDir = support.appendingPathComponent("clips-rtf", isDirectory: true)
         try? FileManager.default.createDirectory(at: imageDir, withIntermediateDirectories: true)
@@ -251,7 +244,17 @@ final class ClipboardService: ObservableObject {
         ignoredApps = defaults.stringArray(forKey: "clipboard.ignoredApps") ?? []
         ignoredPatterns = defaults.stringArray(forKey: "clipboard.ignoredPatterns") ?? []
 
-        load()
+        thumbCache.totalCostLimit = 2 * 1024 * 1024
+        thumbCache.countLimit = 32
+        do {
+            let db = try ClipboardHistoryStore(url: support.appendingPathComponent("clipboard.sqlite3"))
+            store = db
+            do { try db.migrateLegacy(from: support.appendingPathComponent("clipboard.json")) }
+            catch { reportStorageError() }
+            try refreshHistory(db)
+        } catch {
+            reportStorageError()
+        }
         lastChangeCount = NSPasteboard.general.changeCount
         if isEnabled { start() }
     }
@@ -268,6 +271,8 @@ final class ClipboardService: ObservableObject {
 
     /// 重置所有设置时同步内存状态（偏好已被清空）
     func resetSettings() {
+        resettingSettings = true
+        defer { resettingSettings = false }
         limit = 100
         dedupe = true
         captureText = true
@@ -398,7 +403,7 @@ final class ClipboardService: ObservableObject {
         if let rtfData, rtfData.count > 0 {
             let name = "\(UUID().uuidString).rtf"
             let url = rtfDir.appendingPathComponent(name)
-            try? rtfData.write(to: url)
+            guard (try? rtfData.write(to: url)) != nil else { return }
             insert(
                 kind: .rich,
                 text: plain,
@@ -431,53 +436,21 @@ final class ClipboardService: ObservableObject {
         bundle: String,
         digest: String = ""
     ) {
-        if !text.isEmpty, matchesIgnoredPattern(text) { return }
-
-        if dedupe, let index = items.firstIndex(where: { existing in
-            guard existing.kind == kind else { return false }
-            switch kind {
-            case .image:
-                // 旧记录没有 digest，不能只比空字符串，否则任意图片都会被判成重复
-                return !digest.isEmpty && existing.digest == digest
-            case .color:
-                return existing.colorHex == colorHex
-            case .text, .rich, .link, .file:
-                return existing.text == text
-            }
-        }) {
-            items[index].date = Date()
-            items[index].copies += 1
-            items[index].source = source
-            items[index].sourceBundle = bundle
-            if !items[index].pinned {
-                let moved = items.remove(at: index)
-                items.insert(moved, at: 0)
-            }
-            // 去重时新写入的图片 / RTF 文件不会再被引用，顺手删掉
-            if let imageFile {
-                try? FileManager.default.removeItem(at: imageDir.appendingPathComponent(imageFile))
-            }
-            if let rtfFile {
-                try? FileManager.default.removeItem(at: rtfDir.appendingPathComponent(rtfFile))
-            }
-            save()
+        let item = ClipItem(kind: kind, text: text, imageFile: imageFile, rtfFile: rtfFile, colorHex: colorHex,
+                            source: source, sourceBundle: bundle, byteCount: byteCount, digest: digest)
+        let pending = ClipboardHistoryStore.Attachment(image: imageFile, rtf: rtfFile)
+        guard let store else { removeFiles(pending); return }
+        let change: (duplicate: Bool, removed: [ClipboardHistoryStore.Attachment])
+        do {
+            change = try store.record(item, dedupe: dedupe, limit: limit)
+        } catch {
+            removeFiles(pending)
+            reportStorageError()
             return
         }
-
-        items.insert(ClipItem(
-            kind: kind,
-            text: text,
-            imageFile: imageFile,
-            rtfFile: rtfFile,
-            colorHex: colorHex,
-            pinned: false,
-            source: source,
-            sourceBundle: bundle,
-            byteCount: byteCount,
-            digest: digest
-        ), at: 0)
-        trim()
-        save()
+        if change.duplicate { removeFiles(pending) }
+        for attachment in change.removed { removeFiles(attachment) }
+        do { try refreshHistory(store) } catch { reportStorageError() }
     }
 
     private func matchesIgnoredPattern(_ text: String) -> Bool {
@@ -490,21 +463,11 @@ final class ClipboardService: ObservableObject {
         return false
     }
 
-    private func trim() {
-        byteTotal = items.reduce(0) { $0 + $1.byteCount }
-        guard items.count > limit else { return }
-        var removable = items.filter { !$0.pinned }
-        while items.count > limit, let last = removable.popLast() {
-            guard let index = items.firstIndex(where: { $0.id == last.id }) else { continue }
-            removeFiles(items[index])
-            items.remove(at: index)
-        }
-    }
-
     // MARK: - 操作
 
-    func copy(_ item: ClipItem, plainText: Bool = false) {
-        let current = items.first(where: { $0.id == item.id }) ?? item
+    @discardableResult
+    func copy(_ item: ClipItem, plainText: Bool = false) -> Bool {
+        guard let current = self.item(with: item.id) else { return false }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         switch current.kind {
@@ -529,9 +492,11 @@ final class ClipboardService: ObservableObject {
             }
         }
         if pasteboard.changeCount != lastChangeCount { lastChangeCount = pasteboard.changeCount }
+        return true
     }
 
     func copyPlainText(_ item: ClipItem) {
+        guard let item = self.item(with: item.id) else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(item.text, forType: .string)
@@ -539,7 +504,7 @@ final class ClipboardService: ObservableObject {
     }
 
     func paste(_ item: ClipItem, plainText: Bool = false) {
-        copy(item, plainText: plainText)
+        guard copy(item, plainText: plainText) else { return }
         // 模拟 ⌘V：面板收起动画约 0.18s，等它把 key window 交还给上一个 App 再按
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 260_000_000)
@@ -559,65 +524,62 @@ final class ClipboardService: ObservableObject {
     }
 
     func togglePin(_ item: ClipItem) {
-        guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
-        items[index].pinned.toggle()
-        save()
+        guard let store else { return }
+        changeHistory { try store.setPinned(id: item.id, pinned: !item.pinned, limit: limit) }
     }
 
     func delete(_ item: ClipItem) {
-        guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
-        removeFiles(items[index])
-        items.remove(at: index)
-        byteTotal = items.reduce(0) { $0 + $1.byteCount }
-        save()
+        guard let store else { return }
+        changeHistory { try store.delete(id: item.id) }
     }
 
-    func clearUnpinned() {
-        for item in items where !item.pinned { removeFiles(item) }
-        items.removeAll { !$0.pinned }
-        byteTotal = items.reduce(0) { $0 + $1.byteCount }
-        save()
+    @discardableResult
+    func clearUnpinned() -> Bool {
+        guard let store else { return false }
+        return changeHistory { try store.clear(keepPinned: true) }
     }
 
-    func clearAll() {
-        for item in items { removeFiles(item) }
-        items.removeAll()
-        byteTotal = 0
-        save()
+    @discardableResult
+    func clearAll() -> Bool {
+        guard let store else { return false }
+        return changeHistory { try store.clear(keepPinned: false) }
     }
 
     func updateText(_ text: String, for item: ClipItem) {
-        guard let index = items.firstIndex(where: { $0.id == item.id }) else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        if items[index].kind == .rich, let file = items[index].rtfFile {
-            try? FileManager.default.removeItem(at: rtfDir.appendingPathComponent(file))
-            items[index].rtfFile = nil
+        guard !trimmed.isEmpty, let store, var current = self.item(with: item.id) else { return }
+        let rtf = current.rtfFile
+        current.rtfFile = nil
+        current.kind = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") ? .link : .text
+        current.text = trimmed
+        current.byteCount = trimmed.utf8.count
+        current.date = Date()
+        changeHistory {
+            try store.update(current)
+            recentItems.removeAll { $0.id == current.id }
+            return [.init(image: nil, rtf: rtf)]
         }
-        items[index].kind = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") ? .link : .text
-        items[index].text = trimmed
-        items[index].byteCount = trimmed.utf8.count
-        items[index].date = Date()
-        save()
     }
 
-    func item(with id: UUID) -> ClipItem? { items.first { $0.id == id } }
+    func item(with id: UUID) -> ClipItem? {
+        if let recent = recentItems.first(where: { $0.id == id }) { return recent }
+        do { return try store?.item(id: id) }
+        catch { reportStorageError(); return nil }
+    }
 
-    /// 第 N 个固定项（⌘1–⌘9 用）
+    /// ⌘1–⌘9 follows the pin order of the current filter, including when browsing older pages.
+    func pinnedSummaries() -> [ClipItem] {
+        summaries(query: query, filter: filter, limit: 9).prefix(while: \.pinned).map { $0 }
+    }
+
     func pinnedItem(at index: Int) -> ClipItem? {
-        let pinned = filtered.filter(\.pinned)
-        guard index >= 0, index < pinned.count else { return nil }
-        return pinned[index]
-    }
-
-    func shortcutIndex(for item: ClipItem) -> Int? {
-        guard item.pinned else { return nil }
-        let pinned = filtered.filter(\.pinned)
-        guard let index = pinned.firstIndex(where: { $0.id == item.id }), index < 9 else { return nil }
-        return index + 1
+        let items = pinnedSummaries()
+        guard items.indices.contains(index) else { return nil }
+        return items[index]
     }
 
     func reveal(_ item: ClipItem) {
+        guard let item = self.item(with: item.id) else { return }
         switch item.kind {
         case .file:
             let urls = item.text.split(separator: "\n").map { URL(fileURLWithPath: String($0)) }
@@ -637,8 +599,7 @@ final class ClipboardService: ObservableObject {
         guard !bundle.isEmpty, !ignoredApps.contains(bundle) else { return }
         ignoredApps.append(bundle)
         UserDefaults.standard.set(ignoredApps, forKey: "clipboard.ignoredApps")
-        items.removeAll { $0.sourceBundle == bundle }
-        save()
+        // Ignoring an app is forward-only; it does not implicitly delete history.
     }
 
     func removeIgnoredApp(_ bundle: String) {
@@ -678,21 +639,29 @@ final class ClipboardService: ObservableObject {
         return NSAttributedString(rtf: data, documentAttributes: nil)
     }
 
-    /// 列表缩略图：同一张图会反复渲染，缓存一份避免滚动掉帧
+    /// List thumbnails never hold the full-size image in the cache.
     func thumbnail(for item: ClipItem) -> NSImage? {
         guard let url = imageURL(for: item) else { return nil }
         let key = url.lastPathComponent as NSString
-        if let cached = thumbCache.object(forKey: key) { return cached }
-        guard let image = NSImage(contentsOf: url) else { return nil }
-        thumbCache.setObject(image, forKey: key)
+        if let image = thumbCache.object(forKey: key) { return image }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let bitmap = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true,
+                kCGImageSourceThumbnailMaxPixelSize: 96
+              ] as CFDictionary) else { return nil }
+        let image = NSImage(cgImage: bitmap, size: .zero)
+        thumbCache.setObject(image, forKey: key, cost: bitmap.bytesPerRow * bitmap.height)
         return image
     }
 
-    private func removeFiles(_ item: ClipItem) {
-        if let file = item.imageFile {
+    private func removeFiles(_ attachment: ClipboardHistoryStore.Attachment) {
+        if let file = attachment.image, (file as NSString).lastPathComponent == file, !file.isEmpty {
+            thumbCache.removeObject(forKey: file as NSString)
             try? FileManager.default.removeItem(at: imageDir.appendingPathComponent(file))
         }
-        if let file = item.rtfFile {
+        if let file = attachment.rtf, (file as NSString).lastPathComponent == file, !file.isEmpty {
             try? FileManager.default.removeItem(at: rtfDir.appendingPathComponent(file))
         }
     }
@@ -719,22 +688,34 @@ final class ClipboardService: ObservableObject {
         defaults.set(ignoreConfidential, forKey: "clipboard.ignoreConfidential")
         defaults.set(tapToPaste, forKey: "clipboard.tapToPaste")
         defaults.set(anchorAtCaret, forKey: "clipboard.anchorAtCaret")
-        trim()
-        save()
     }
 
-    private func save() {
-        byteTotal = items.reduce(0) { $0 + $1.byteCount }
-        if let data = try? JSONEncoder().encode(items) {
-            try? data.write(to: storeURL)
+    private func refreshHistory(_ db: ClipboardHistoryStore) throws {
+        let stats = try db.stats()
+        recentItems = try db.recent(keeping: recentItems)
+        historyCount = stats.count
+        pinnedCount = stats.pinned
+        byteTotal = stats.bytes
+        historyRevision &+= 1
+    }
+
+    @discardableResult
+    private func changeHistory(_ change: () throws -> [ClipboardHistoryStore.Attachment]) -> Bool {
+        guard let store else { return false }
+        do {
+            let removed = try change()
+            for attachment in removed { removeFiles(attachment) }
+            try refreshHistory(store)
+            return true
+        } catch {
+            reportStorageError()
+            return false
         }
     }
 
-    private func load() {
-        guard let data = try? Data(contentsOf: storeURL),
-              let decoded = try? JSONDecoder().decode([ClipItem].self, from: data) else { return }
-        items = decoded
-        byteTotal = items.reduce(0) { $0 + $1.byteCount }
+    private func reportStorageError() {
+        if !storageFailed { storageFailed = true }
+        Debug.log("clipboard: local history operation failed")
     }
 }
 

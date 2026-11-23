@@ -5,10 +5,8 @@ import SwiftUI
 
 struct AuroraRootView: View {
     @ObservedObject var state: AppState
-    @ObservedObject private var monitor: SystemMonitor
     /// 捕获状态在 PointerService 上，必须单独订阅，否则提示条不会出现
     @ObservedObject private var pointer: PointerService
-    @State private var appeared = false
     @Environment(\.colorScheme) private var scheme
     /// 内容是否已经滚到标题栏下面：只有这时才铺模糊层，静止时保持通透
     @State private var scrolledUnderHeader = true
@@ -25,7 +23,6 @@ struct AuroraRootView: View {
 
     init(state: AppState) {
         self.state = state
-        self.monitor = state.monitor
         self.pointer = state.pointer
     }
 
@@ -98,7 +95,6 @@ struct AuroraRootView: View {
         // 浅色下给玻璃一层很淡的白色洗底：仍是半透明，但文字对比度够用
         .background(scheme == .light ? Color.white.opacity(0.45) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .opacity(appeared ? 1 : 0)
         .onAppear {
             dragCoordinator.hitModule = { point in
                 let railPoint = railPoint(from: point)
@@ -122,7 +118,6 @@ struct AuroraRootView: View {
             if ProcessInfo.processInfo.environment["AURORA_SHOW_HOTKEYS"] == "1" {
                 state.showHotkeys = true
             }
-            withAnimation(.smooth(duration: 0.25)) { appeared = true }
         }
     }
 
@@ -362,8 +357,7 @@ struct AuroraRootView: View {
 
             Spacer(minLength: 4)
 
-            liveChip(symbol: "cpu", value: Fmt.percent(monitor.cpu))
-            liveChip(symbol: "memorychip", value: Fmt.percent(monitor.memory.usage))
+            ResourceHeaderChips(monitor: state.monitor) { state.select(.overview) }
 
             pinButton
 
@@ -431,28 +425,6 @@ struct AuroraRootView: View {
         .opacity(pointer.isCapturing ? 0.4 : 1)
         .help(state.isPinned ? T("取消固定，回到浮动面板") : T("固定成独立窗口"))
         .accessibilityLabel(T("固定"))
-    }
-
-    private func liveChip(symbol: String, value: String) -> some View {
-        Button {
-            state.select(.overview)
-        } label: {
-            HStack(spacing: 3.5) {
-                Image(systemName: symbol)
-                    .font(.system(size: 8.5, weight: .bold))
-                    .foregroundStyle(AuroraTheme.accent)
-                Text(value)
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.primary.opacity(0.85))
-                    .contentTransition(.numericText())
-            }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(Capsule().fill(Color.primary.opacity(0.055)))
-            .overlay(Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 0.6))
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: - 内容
@@ -613,5 +585,38 @@ private struct RailFrameKey: PreferenceKey {
     static var defaultValue: [String: CGRect] = [:]
     static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
         value.merge(nextValue()) { $1 }
+    }
+}
+
+/// 采样变动只重绘资源徽章，不让整个侧栏和模块容器一起失效。
+private struct ResourceHeaderChips: View {
+    @ObservedObject var monitor: SystemMonitor
+    let showOverview: () -> Void
+
+    var body: some View {
+        HStack(spacing: 9) {
+            liveChip(symbol: "cpu", value: Fmt.percent(monitor.cpu))
+            liveChip(symbol: "memorychip", value: Fmt.percent(monitor.memory.usage))
+        }
+    }
+
+    private func liveChip(symbol: String, value: String) -> some View {
+        Button(action: showOverview) {
+            HStack(spacing: 3.5) {
+                Image(systemName: symbol)
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(AuroraTheme.accent)
+                Text(value)
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .contentTransition(.numericText())
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Color.primary.opacity(0.055)))
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 0.6))
+        }
+        .buttonStyle(.plain)
     }
 }

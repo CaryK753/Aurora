@@ -151,6 +151,30 @@ final class AIUsageService: ObservableObject {
         return icon
     }
 
+
+    /// Calls the visitor once per nonempty JSONL record, without owning the whole file.
+    /// Space for the reader: one 64 KiB chunk plus the longest split record.
+    private nonisolated static func visitLines(_ handle: FileHandle, _ visit: (Data) -> Void) throws {
+        var tail = Data()
+        while try autoreleasepool(invoking: { () throws -> Bool in
+            guard let block = try handle.read(upToCount: 64 * 1024), !block.isEmpty else { return false }
+            var start = block.startIndex
+            while let nl = block[start...].firstIndex(of: 0x0A) {
+                if tail.isEmpty {
+                    if start != nl { visit(block[start..<nl]) }
+                } else {
+                    tail.append(contentsOf: block[start..<nl])
+                    visit(tail)
+                    tail = Data()
+                }
+                start = nl + 1
+            }
+            tail.append(contentsOf: block[start...])
+            return true
+        }) {}
+        if !tail.isEmpty { visit(tail) }
+    }
+
     // MARK: - Codex
 
     private nonisolated static func scanCodex() -> AIProviderUsage {
@@ -177,31 +201,38 @@ final class AIUsageService: ObservableObject {
         for file in files {
             guard let handle = try? FileHandle(forReadingFrom: file) else { continue }
             defer { try? handle.close() }
-            guard let data = try? handle.readToEnd(), !data.isEmpty else { continue }
 
             var fileHasEvents = false
             var previousTotal = 0
-            for line in data.split(separator: 0x0A) {
-                guard line.count > 20,
-                      let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                      let payload = object["payload"] as? [String: Any] else { continue }
-                let stamp = (object["timestamp"] as? String).flatMap { formatter.date(from: $0) } ?? Date()
+            let eventStart = events.count
+            let oldLimits = latestLimits
+            do {
+                try visitLines(handle) { line in
+                    guard line.count > 20,
+                          let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                          let payload = object["payload"] as? [String: Any] else { return }
+                    let stamp = (object["timestamp"] as? String).flatMap { formatter.date(from: $0) } ?? Date()
 
-                // 配额快照：只保留最新的一条
-                if let limits = payload["rate_limits"] as? [String: Any],
-                   !parseRateLimits(limits).isEmpty {
-                    if latestLimits == nil || stamp > latestLimits!.0 {
-                        latestLimits = (stamp, limits)
+                    // 配额快照：只保留最新的一条
+                    if let limits = payload["rate_limits"] as? [String: Any],
+                       !parseRateLimits(limits).isEmpty {
+                        if latestLimits == nil || stamp > latestLimits!.0 {
+                            latestLimits = (stamp, limits)
+                        }
                     }
-                }
 
-                guard (payload["type"] as? String) == "token_count",
-                      let info = payload["info"] as? [String: Any],
-                      let total = info["total_token_usage"] as? [String: Any],
-                      let tokens = total["total_tokens"] as? Int else { continue }
-                let delta = max(0, tokens - previousTotal)
-                previousTotal = tokens
-                if delta > 0 { events.append((stamp, delta)); fileHasEvents = true }
+                    guard (payload["type"] as? String) == "token_count",
+                          let info = payload["info"] as? [String: Any],
+                          let total = info["total_token_usage"] as? [String: Any],
+                          let tokens = total["total_tokens"] as? Int else { return }
+                    let delta = max(0, tokens - previousTotal)
+                    previousTotal = tokens
+                    if delta > 0 { events.append((stamp, delta)); fileHasEvents = true }
+                }
+            } catch {
+                events.removeSubrange(eventStart...)
+                latestLimits = oldLimits
+                continue
             }
             if fileHasEvents { sessions += 1 }
         }
@@ -277,24 +308,29 @@ final class AIUsageService: ObservableObject {
         for file in files {
             guard let handle = try? FileHandle(forReadingFrom: file) else { continue }
             defer { try? handle.close() }
-            guard let data = try? handle.readToEnd(), !data.isEmpty else { continue }
 
             var fileHasEvents = false
-            for line in data.split(separator: 0x0A) {
-                guard line.count > 20,
-                      let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                      let message = object["message"] as? [String: Any],
-                      let usageBlock = message["usage"] as? [String: Any] else { continue }
-                let input = usageBlock["input_tokens"] as? Int ?? 0
-                let output = usageBlock["output_tokens"] as? Int ?? 0
-                let cacheWrite = usageBlock["cache_creation_input_tokens"] as? Int ?? 0
-                let cacheRead = usageBlock["cache_read_input_tokens"] as? Int ?? 0
-                let total = input + output + cacheWrite + cacheRead
-                guard total > 0 else { continue }
-                let stamp = (object["timestamp"] as? String)
-                    .flatMap { formatter.date(from: $0) ?? fallback.date(from: $0) } ?? Date()
-                events.append((stamp, total))
-                fileHasEvents = true
+            let eventStart = events.count
+            do {
+                try visitLines(handle) { line in
+                    guard line.count > 20,
+                          let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                          let message = object["message"] as? [String: Any],
+                          let usageBlock = message["usage"] as? [String: Any] else { return }
+                    let input = usageBlock["input_tokens"] as? Int ?? 0
+                    let output = usageBlock["output_tokens"] as? Int ?? 0
+                    let cacheWrite = usageBlock["cache_creation_input_tokens"] as? Int ?? 0
+                    let cacheRead = usageBlock["cache_read_input_tokens"] as? Int ?? 0
+                    let total = input + output + cacheWrite + cacheRead
+                    guard total > 0 else { return }
+                    let stamp = (object["timestamp"] as? String)
+                        .flatMap { formatter.date(from: $0) ?? fallback.date(from: $0) } ?? Date()
+                    events.append((stamp, total))
+                    fileHasEvents = true
+                }
+            } catch {
+                events.removeSubrange(eventStart...)
+                continue
             }
             if fileHasEvents { sessions += 1 }
         }

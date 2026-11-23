@@ -42,6 +42,7 @@ final class PanelController {
     private let state: AppState
     private weak var anchorButton: NSStatusBarButton?
     private var transitionGeneration = 0
+    private var isOpening = false
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var windowObservers: [NSObjectProtocol] = []
@@ -129,65 +130,101 @@ final class PanelController {
 
     func show(relativeTo button: NSStatusBarButton?) {
         anchorButton = button
-        transitionGeneration += 1
-
-        state.permissions.recheck()
-        state.display.refresh(preserve: true)
-        state.monitor.resume()
-        installMonitors()
 
         if isPinned {
-            panel.alphaValue = 1
             NSApp.activate(ignoringOtherApps: true)
+            if panel.isMiniaturized { panel.deminiaturize(nil) }
+            panel.alphaValue = 1
             panel.makeKeyAndOrderFront(nil)
-            isVisible = true
+            setPanelVisible(true)
             return
         }
 
         guard let origin = originForPanel(button: button) else { return }
         let target = NSRect(origin: origin, size: Self.panelSize)
-        let start = NSRect(x: origin.x, y: origin.y + 10, width: Self.panelSize.width, height: Self.panelSize.height)
-        Debug.log("show at \(origin)")
-        panel.setFrame(start, display: false)
-        panel.alphaValue = 0
-        panel.makeKeyAndOrderFront(nil)
-        // 避免搜索框在面板弹出瞬间抢到键盘焦点
-        panel.makeFirstResponder(nil)
-        isVisible = true
+        // 玻璃窗口只定位一次；移动窗口再渐变会让系统逐帧重做玻璃背后的合成。
+        if panel.frame != target { panel.setFrame(target, display: false) }
+        guard !isVisible || !panel.isVisible else { return }
 
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.26
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            panel.animator().setFrame(target, display: true)
-            panel.animator().alphaValue = 1
+        transitionGeneration += 1
+        let generation = transitionGeneration
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        isOpening = !reduceMotion
+        if !panel.isVisible {
+            panel.alphaValue = reduceMotion ? 1 : 0
+            panel.makeKeyAndOrderFront(nil)
+            // 避免搜索框在面板弹出瞬间抢到键盘焦点
+            panel.makeFirstResponder(nil)
+        } else {
+            // 收起动画中再次打开：从当前透明度反向，不先跳回 0。
+            panel.makeKeyAndOrderFront(nil)
+        }
+        setPanelVisible(true)
+
+        if reduceMotion {
+            panel.alphaValue = 1
+        } else {
+            animateOpacity(to: 1, duration: 0.16, timing: .easeOut) { [weak self] in
+                guard let self, self.transitionGeneration == generation, self.isOpening else { return }
+                self.isOpening = false
+                self.updateDashboardVisibility()
+            }
         }
     }
 
-    /// force=true 用于退出 / 回到欢迎页这类必须收起面板的场合
+    /// force=true 用于截图、欢迎页等需要立即退出画面的操作。
     func hide(reason: String = "unknown", force: Bool = false) {
-        guard isVisible else { return }
-        guard force || !isPinned else {
-            Debug.log("hide ignored, pinned reason=\(reason)")
-            return
-        }
-        Debug.log("hide reason=\(reason)")
-        isVisible = false
+        guard isVisible || (force && panel.isVisible) else { return }
+        guard force || !isPinned else { return }
         transitionGeneration += 1
         let generation = transitionGeneration
-        removeMonitors()
+        setPanelVisible(false)
 
-        var frame = panel.frame
-        frame.origin.y += 8
+        if force || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            panel.alphaValue = 0
+            panel.orderOut(nil)
+            return
+        }
+        animateOpacity(to: 0, duration: 0.12, timing: .easeIn) { [weak self] in
+            guard let self, self.transitionGeneration == generation, !self.isVisible else { return }
+            self.panel.orderOut(nil)
+        }
+    }
+
+    private func animateOpacity(to alpha: CGFloat, duration: TimeInterval, timing: CAMediaTimingFunctionName,
+                                completion: @escaping @MainActor () -> Void) {
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.18
-            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-            panel.animator().setFrame(frame, display: true)
-            panel.animator().alphaValue = 0
-        } completionHandler: { [weak self] in
-            Task { @MainActor in
-                guard let self, !self.isVisible, self.transitionGeneration == generation else { return }
-                self.panel.orderOut(nil)
-            }
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(name: timing)
+            panel.animator().alphaValue = alpha
+        } completionHandler: {
+            Task { @MainActor in completion() }
+        }
+    }
+
+    private func setPanelVisible(_ visible: Bool) {
+        if !visible { isOpening = false }
+        if isVisible != visible {
+            isVisible = visible
+            if visible { installMonitors() } else { removeMonitors() }
+        }
+        updateDashboardVisibility()
+    }
+
+    private var shouldSampleDashboard: Bool {
+        isVisible && !isOpening && panel.isVisible && !panel.isMiniaturized && !NSApp.isHidden
+    }
+
+    private func updateDashboardVisibility() {
+        guard shouldSampleDashboard else {
+            state.monitor.setDashboardVisible(false)
+            return
+        }
+        // 不在窗口排序、AppKit 通知或动画回调中同步采集 CPU / I/O / 进程。
+        let generation = transitionGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.transitionGeneration == generation, self.shouldSampleDashboard else { return }
+            self.state.monitor.setDashboardVisible(true)
         }
     }
 
@@ -204,6 +241,13 @@ final class PanelController {
     private func applyWindowMode() {
         let frame = panel.frame
         transitionGeneration += 1
+        isOpening = false
+        if isVisible {
+            panel.alphaValue = 1
+        } else if panel.isVisible {
+            // 修改窗口形态会取消旧动画回调，不能让已收起的窗口留在桌面。
+            panel.orderOut(nil)
+        }
 
         if isPinned {
             NSApp.setActivationPolicy(.regular)
@@ -273,6 +317,7 @@ final class PanelController {
             }
         }
         panel.invalidateShadow()
+        updateDashboardVisibility()
     }
 
     private func applyCornerRadius(_ radius: CGFloat) {
@@ -365,18 +410,23 @@ final class PanelController {
         windowObservers.append(center.addObserver(
             forName: NSWindow.willCloseNotification, object: panel, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.isVisible = false }
+            MainActor.assumeIsolated { self?.setPanelVisible(false) }
         })
         windowObservers.append(center.addObserver(
             forName: NSWindow.didMiniaturizeNotification, object: panel, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.isVisible = false }
+            MainActor.assumeIsolated { self?.setPanelVisible(false) }
         })
         windowObservers.append(center.addObserver(
             forName: NSWindow.didDeminiaturizeNotification, object: panel, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.isVisible = true }
+            MainActor.assumeIsolated { self?.setPanelVisible(true) }
         })
+        for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
+            windowObservers.append(center.addObserver(forName: name, object: NSApp, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateDashboardVisibility() }
+            })
+        }
         // 拿到焦点 / 尺寸变化时 AppKit 会重排标题栏，红绿灯偏移要跟着补
         windowObservers.append(center.addObserver(
             forName: NSWindow.didResizeNotification, object: panel, queue: .main
