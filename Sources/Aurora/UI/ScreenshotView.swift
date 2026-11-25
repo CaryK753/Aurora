@@ -270,9 +270,7 @@ struct ScreenshotView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 5) {
                     // 配色已由下面的胶囊表示，标题里就不再重复，免得被截断
-                    Text(frames.defaultFrameVariants.count > 1
-                         ? String(frame.device.dropLast(frame.variantLabel.count)).trimmingCharacters(in: .whitespaces)
-                         : frame.device)
+                    Text(frames.defaultFrameVariants.count > 1 ? frame.familyName : frame.device)
                         .font(.system(size: 11, weight: .semibold))
                         .lineLimit(1)
                     Text(T("默认"))

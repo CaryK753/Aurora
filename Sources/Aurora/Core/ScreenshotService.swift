@@ -29,6 +29,13 @@ struct DeviceFrame: Identifiable, Equatable, Codable, Sendable {
     var variantLabel: String {
         device.split(separator: " ").last.map(String.init) ?? device
     }
+
+    /// 去掉配色 / 方向后缀的机型名（"MacBook Pro 14″ 深空黑" → "MacBook Pro 14″"）。
+    /// Studio Display 和 Studio Display XDR 尺寸完全一致，靠它区分「同机型」和「不同机型」。
+    var familyName: String {
+        guard device.hasSuffix(variantLabel) else { return device }
+        return String(device.dropLast(variantLabel.count)).trimmingCharacters(in: .whitespaces)
+    }
 }
 
 // MARK: - 服务
@@ -107,13 +114,14 @@ final class ScreenshotService: ObservableObject {
 
     var isDefaultAuto: Bool { preferredFrameID == nil }
 
-    /// 和默认款同尺寸的其它款式（同机型不同配色 / 方向）——给「换配色」用
+    /// 和默认款同机型、同尺寸的其它款式（换配色 / 换底色）——给「换配色」用
     var defaultFrameVariants: [DeviceFrame] {
         guard let base = defaultFrame else { return [] }
         return frames.filter {
             $0.category == base.category
                 && $0.pixelWidth == base.pixelWidth
                 && $0.screen.size == base.screen.size
+                && $0.familyName == base.familyName
         }
     }
 

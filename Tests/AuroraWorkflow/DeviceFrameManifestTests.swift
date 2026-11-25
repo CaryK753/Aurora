@@ -111,4 +111,18 @@ final class DeviceFrameManifestTests: XCTestCase {
             XCTAssertTrue(seen.insert(device).inserted, "外壳显示名重复：\(device)")
         }
     }
+
+    /// Studio Display 与 Studio Display XDR 尺寸完全一样，不能被当成同一机型的两种配色
+    func testDisplayFamiliesDoNotMix() {
+        func frame(_ id: String, _ device: String) -> DeviceFrame {
+            DeviceFrame(id: id, device: device, category: "mac", pixelWidth: 3400, pixelHeight: 2612,
+                        screen: CGRect(x: 79, y: 79, width: 3242, height: 1818))
+        }
+        let display = frame("studio-display-dark", "Studio Display 深色底")
+        let xdr = frame("studio-display-xdr-dark", "Studio Display XDR 深色底")
+        XCTAssertEqual(display.familyName, "Studio Display")
+        XCTAssertEqual(xdr.familyName, "Studio Display XDR")
+        XCTAssertEqual(display.variantLabel, "深色底")
+        XCTAssertEqual(frame("macbook-pro-14-silver", "MacBook Pro 14″ 银色").familyName, "MacBook Pro 14″")
+    }
 }
