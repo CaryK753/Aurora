@@ -100,6 +100,19 @@ final class UpdateService: ObservableObject {
     private var task: Task<Void, Never>?
     /// 解包好的新版本 .app
     private var stagedApp: URL?
+    private var stagedVersion: String?
+    private var pendingInstall: URL?
+    var requestTermination: (() -> Void)?
+
+    func didLaunch() {
+        let root = Self.updatesDirectory
+        let version = currentVersion
+        let app = Bundle.main.bundleURL
+        Task.detached(priority: .utility) {
+            UpdateCache.prune(in: root, through: version, runningApp: app)
+        }
+        start()
+    }
     /// 用户点过「稍后」的版本：自动检查不再重复打扰，手动检查会重置
     private var declinedVersion: String?
 
@@ -173,14 +186,15 @@ final class UpdateService: ObservableObject {
     /// 用户点「立即更新」
     func install(_ release: AuroraRelease) {
         declinedVersion = nil
-        guard let app = stagedApp, FileManager.default.fileExists(atPath: app.path) else {
-            if let asset = release.asset {
+        guard !phase.isBusy else { return }
+        guard stagedVersion == release.version, let app = stagedApp, FileManager.default.fileExists(atPath: app.path) else {
+            if release.asset != nil {
                 // 还没下载（用户关了自动更新），先下载再问
                 phase = .checking
                 task = Task { [weak self] in
                     guard let self else { return }
                     do {
-                        try await self.download(release, askAfter: true)
+                        try await self.download(release)
                     } catch {
                         self.phase = .failed(error.localizedDescription)
                     }
@@ -196,7 +210,7 @@ final class UpdateService: ObservableObject {
 
     // MARK: - 下载
 
-    func download(_ release: AuroraRelease, askAfter: Bool = false, silent: Bool = false) async throws {
+    func download(_ release: AuroraRelease, silent: Bool = false) async throws {
         guard let asset = release.asset else {
             phase = .ready(release)
             return
@@ -207,10 +221,31 @@ final class UpdateService: ObservableObject {
 
         let directory = Self.updatesDirectory.appendingPathComponent(UpdateSecurity.safeVersion(release.version), isDirectory: true)
         let manager = FileManager.default
-        try? manager.removeItem(at: directory)
+        let runningApp = Bundle.main.bundleURL.resolvingSymlinksInPath().standardizedFileURL
+        guard !runningApp.path.hasPrefix(directory.resolvingSymlinksInPath().standardizedFileURL.path + "/") else {
+            throw UpdateError.unpack
+        }
+        let unpacked = directory.appendingPathComponent("unpacked", isDirectory: true)
+        let cached = await Task.detached(priority: .utility) {
+            Self.verifiedApp(in: unpacked, version: release.version)
+        }.value
+        if let cached {
+            await Task.detached(priority: .utility) {
+                UpdateCache.discardArchives(in: directory)
+                UpdateCache.prune(in: Self.updatesDirectory, through: release.version, keeping: directory, runningApp: runningApp)
+            }.value
+            downloadReady(cached, release: release, silent: silent)
+            return
+        }
+        stagedApp = nil
+        stagedVersion = nil
+        if manager.fileExists(atPath: directory.path) { try manager.removeItem(at: directory) }
         try manager.createDirectory(at: directory, withIntermediateDirectories: true)
 
-        let delegate = ProgressDelegate { progress in
+        var ready = false
+        defer { if !ready { try? manager.removeItem(at: directory) } }
+
+        let delegate = ProgressDelegate { [weak self] progress in
             Task { @MainActor [weak self] in
                 guard let self, case .downloading = self.phase else { return }
                 self.phase = .downloading(progress)
@@ -245,7 +280,7 @@ final class UpdateService: ObservableObject {
         let (sumTemp, sumResponse) = try await URLSession.shared.download(for: sumRequest, delegate: delegate)
         let sumData = try? Data(contentsOf: sumTemp)
         let expected = sumData.flatMap { String(data: $0, encoding: .utf8) }.flatMap(UpdateSecurity.parseSHA256)
-        let actual = try? UpdateSecurity.sha256Hex(of: archive)
+        let actual = await Task.detached(priority: .utility) { try? UpdateSecurity.sha256Hex(of: archive) }.value
         guard let sumHTTP = sumResponse as? HTTPURLResponse, sumHTTP.statusCode == 200,
               UpdateSecurity.allowed(sumResponse.url),
               let expected, actual == expected else {
@@ -253,25 +288,33 @@ final class UpdateService: ObservableObject {
             throw UpdateError.checksum
         }
 
-        let unpacked = directory.appendingPathComponent("unpacked", isDirectory: true)
-        try? manager.removeItem(at: unpacked)
-        try manager.createDirectory(at: unpacked, withIntermediateDirectories: true)
-        try Self.unzip(archive, to: unpacked)
+        let app = try await Task.detached(priority: .utility) {
+            try manager.createDirectory(at: unpacked, withIntermediateDirectories: true)
+            try Self.unzip(archive, to: unpacked)
+            guard let app = Self.verifiedApp(in: unpacked, version: release.version) else { throw UpdateError.signature }
+            try manager.removeItem(at: archive)
+            UpdateCache.prune(in: Self.updatesDirectory, through: release.version, keeping: directory, runningApp: runningApp)
+            return app
+        }.value
+        ready = true
+        downloadReady(app, release: release, silent: silent)
+    }
 
-        guard let app = Self.findApp(in: unpacked) else { throw UpdateError.unpack }
-        guard Self.acceptedBuild(app) else {
-            try? manager.removeItem(at: directory)
-            stagedApp = nil
-            throw UpdateError.signature
-        }
+    private nonisolated static func verifiedApp(in directory: URL, version: String) -> URL? {
+        guard let app = findApp(in: directory),
+              Bundle(url: app)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String == version,
+              acceptedBuild(app) else { return nil }
+        return app
+    }
+
+    private func downloadReady(_ app: URL, release: AuroraRelease, silent: Bool) {
         stagedApp = app
-
+        stagedVersion = release.version
         phase = .ready(release)
         if !silent, declinedVersion != release.version {
             NotificationService.shared.notifyUpdateReady(version: release.version, currentVersion: currentVersion)
             promptInstall(release)
         }
-        _ = askAfter
     }
 
     /// 下载完成后的询问：同意才替换，拒绝就把状态停在「有新版本」
@@ -328,112 +371,34 @@ final class UpdateService: ObservableObject {
             return
         }
 
-        guard Self.acceptedBuild(staged) else {
-            phase = .failed(UpdateError.signature.localizedDescription)
-            return
-        }
-
+        pendingInstall = staged
         phase = .installing
-        let script = Self.installScript()
-        let scriptURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("aurora-update-\(UUID().uuidString).sh")
-        do {
-            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
-        } catch {
-            phase = .failed(error.localizedDescription)
-            return
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = [
-            scriptURL.path,
-            target.path,
-            staged.path,
-            String(ProcessInfo.processInfo.processIdentifier),
-            Self.expectedTeamID
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            phase = .failed(error.localizedDescription)
-            return
-        }
-
-        Debug.log("update: handing over to \(scriptURL.lastPathComponent), quitting")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-            NSApp.terminate(nil)
-        }
+        requestTermination?()
     }
 
-    /// 等 Aurora 退出 → 再验一次签名和 Team ID → 备份旧包 → ditto 新包 → 重新打开。
-    /// 路径只从参数读，不拼进脚本，避免安装包文件名变成 shell。
+    /// 所有可拒绝退出的检查通过后才启动安装器，防止取消退出后仍被旧脚本替换。
+    func handOffPendingInstall() throws {
+        guard let staged = pendingInstall, let version = stagedVersion else { return }
+        let stage = Self.updatesDirectory.appendingPathComponent(UpdateSecurity.safeVersion(version))
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", Self.installScript(), "aurora-update", Bundle.main.bundlePath, staged.path,
+                             String(getpid()), Self.expectedTeamID, UUID().uuidString, stage.path]
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        pendingInstall = nil
+    }
+
+    func cancelPendingInstall(_ error: Error) {
+        guard pendingInstall != nil else { return }
+        pendingInstall = nil
+        phase = .failed(error.localizedDescription)
+    }
+
     nonisolated static func installScript() -> String {
-        let bundleID = expectedBundleID
-        return """
-        #!/bin/sh
-        set -eu
-        LOG=/tmp/aurora-update.log
-        exec >>"$LOG" 2>&1
-        echo "=== $(date) update"
-        APP="$1"
-        SRC="$2"
-        PID="$3"
-        TEAM="$4"
-        finish() {
-          if [ -n "$APP" ] && [ -d "$APP" ]; then
-            open "$APP" || true
-          fi
-        }
-        trap finish EXIT
-        i=0
-        while kill -0 "$PID" 2>/dev/null && [ "$i" -lt 120 ]; do
-          sleep 0.5
-          i=$((i+1))
-        done
-        # 等 FinderSync 扩展也退出，避免替换时 appex 还映射着旧文件
-        pkill -x AuroraFinder 2>/dev/null || true
-        sleep 0.4
-        if [ ! -d "$SRC" ]; then
-          echo "missing source"
-          exit 1
-        fi
-        /usr/bin/codesign --verify --deep --strict "$SRC"
-        BID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SRC/Contents/Info.plist")
-        if [ "$BID" != "\(bundleID)" ]; then
-          echo "unexpected bundle id $BID"
-          exit 1
-        fi
-        ACTUAL=$(/usr/bin/codesign -dv "$SRC" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2; exit}')
-        if [ "$ACTUAL" != "$TEAM" ]; then
-          echo "unexpected team $ACTUAL"
-          exit 1
-        fi
-        xattr -dr com.apple.quarantine "$SRC" 2>/dev/null || true
-        rm -rf "$APP.aurora-old"
-        if mv "$APP" "$APP.aurora-old" 2>/dev/null; then
-          if ditto "$SRC" "$APP"; then
-            xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
-            if /usr/bin/codesign --verify --deep --strict "$APP"; then
-              rm -rf "$APP.aurora-old"
-              echo "replaced ok"
-            else
-              echo "verify failed, rolling back"
-              rm -rf "$APP"
-              mv "$APP.aurora-old" "$APP"
-            fi
-          else
-            echo "copy failed, rolling back"
-            rm -rf "$APP"
-            mv "$APP.aurora-old" "$APP"
-          fi
-        else
-          echo "cannot move old app (permission)"
-        fi
-        """
+        UpdateInstaller.script(bundleID: expectedBundleID)
     }
 
     /// 解压后的包必须是 Aurora，并且由发布团队签名。隔离属性留到替换脚本里再清。
@@ -750,7 +715,7 @@ enum UpdateSecurity {
 
     static func safeVersion(_ version: String) -> String {
         let cleaned = version.filter { $0.isLetter || $0.isNumber || $0 == "." || $0 == "_" || $0 == "-" }
-        if cleaned.isEmpty { return "unknown" }
+        if cleaned.isEmpty || cleaned == "." || cleaned == ".." { return "unknown" }
         return String(cleaned.prefix(64))
     }
 

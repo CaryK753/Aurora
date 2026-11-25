@@ -108,7 +108,7 @@ struct RecorderView: View {
                     }
                 }
 
-                if !permissions.screenRecording {
+                if !permissions.screenRecording && !recorder.mobileSelected {
                     VStack(alignment: .leading, spacing: 5) {
                         HStack(spacing: 6) {
                             Image(systemName: "lock.shield")
@@ -161,15 +161,13 @@ struct RecorderView: View {
                     if recorder.isRecording {
                         recorder.stop()
                     } else {
-                        // 主面板开着会把自己录进去，先收起
-                        auroraDelegate?.panelWillCaptureScreenshot()
-                        recorder.start()
+                        recorder.toggle()
                     }
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: recorder.isRecording ? "stop.fill" : "record.circle")
                             .font(.system(size: 11, weight: .semibold))
-                        Text(recorder.isStarting ? T("正在启动录制…") : recorder.isStopping ? T("正在保存…") : recorder.isRecording ? T("停止录制") : T("开始录制"))
+                        Text(recorder.remaining > 0 ? TF("取消倒计时（%d）", recorder.remaining) : recorder.isStarting ? T("正在启动录制…") : recorder.isStopping ? T("正在保存…") : recorder.isRecording ? T("停止录制") : T("开始录制"))
                             .font(.system(size: 12, weight: .semibold))
                     }
                     .foregroundStyle(.white)
@@ -181,8 +179,8 @@ struct RecorderView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled((!permissions.screenRecording && !recorder.isRecording) || recorder.isStarting || recorder.isStopping)
-                .opacity(!permissions.screenRecording && !recorder.isRecording ? 0.5 : 1)
+                .disabled((!permissions.screenRecording && !recorder.mobileSelected && !recorder.isRecording) || (recorder.isStarting && recorder.remaining == 0) || recorder.isStopping)
+                .opacity(!permissions.screenRecording && !recorder.mobileSelected && !recorder.isRecording ? 0.5 : 1)
 
                 Text(T("录制时屏幕底部会显示控制条，可暂停或丢弃，随时点停止。"))
                     .font(.system(size: 8.5))
@@ -253,6 +251,20 @@ struct RecorderView: View {
                         .foregroundStyle(.tertiary)
                 }
 
+                Toggle(T("录入 Aurora 窗口"), isOn: $recorder.includeAurora)
+                    .toggleStyle(.switch).controlSize(.mini)
+                HStack {
+                    Text(T("USB 移动设备"))
+                    Spacer()
+                    Button(T("查找 iPhone / iPad")) { recorder.findMobileDevices() }
+                        .disabled(recorder.findingMobile)
+                }
+                .font(.caption)
+                Text(T("用 USB 连接设备并解锁，轻点「信任」，再查找并选择设备。"))
+                    .font(.caption2).foregroundStyle(.secondary)
+                if let note = recorder.mobileSearchNote {
+                    Text(note).font(.caption2).foregroundStyle(.secondary)
+                }
                 if recorder.sources.isEmpty {
                     Text(T("没有可录制的屏幕或窗口，请检查权限后刷新"))
                         .font(.system(size: 9.5))
@@ -277,7 +289,7 @@ struct RecorderView: View {
             recorder.selectedSourceID = source.id
         } label: {
             HStack(spacing: 8) {
-                Image(systemName: source.kind == .display ? "display" : "macwindow")
+                Image(systemName: source.kind == .mobile ? "iphone" : source.kind == .display ? "display" : "macwindow")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(selected ? AnyShapeStyle(AuroraTheme.accent) : AnyShapeStyle(.secondary))
                     .frame(width: 18)
@@ -322,97 +334,115 @@ struct RecorderView: View {
                         .font(.system(size: 9)).foregroundStyle(.secondary)
                 }
 
-                optionRow(symbol: "speaker.wave.2", label: T("系统声音"), detail: T("录进 MP4 音轨；窗口录制不支持系统声音")) {
-                    AuroraToggle(isOn: Binding(
-                        get: { recorder.systemAudio && recorder.selectedSource?.supportsSystemAudio == true },
-                        set: { recorder.systemAudio = $0 }
-                    ))
-                    .disabled(recorder.selectedSource?.supportsSystemAudio != true)
-                }
-                Divider().opacity(0.4)
-                optionRow(symbol: "mic", label: T("麦克风"), detail: T("与系统声音合成为同一条音轨，输出一个 MP4 文件")) {
-                    AuroraToggle(isOn: $recorder.recordMic)
-                }
-                Divider().opacity(0.4)
-                optionRow(symbol: "cursorarrow.click", label: T("显示指针"), detail: T("把鼠标指针录进画面")) {
-                    AuroraToggle(isOn: $recorder.showCursor)
-                }
-                Divider().opacity(0.4)
-                optionRow(symbol: "rectangle.landscape.rotate", label: T("Retina 高分辨率"), detail: T("按显示器原生像素录制，文件更大更清晰")) {
-                    AuroraToggle(isOn: $recorder.hiRes)
-                }
-                Divider().opacity(0.4)
-                optionRow(symbol: "cursorarrow.click.2", label: T("点击高亮"), detail: T("录制时在鼠标点击处播放涟漪动画")) {
-                    AuroraToggle(isOn: $recorder.highlightClicks)
-                }
-                Divider().opacity(0.4)
-                optionRow(symbol: "video.fill.badge.plus", label: T("画中画摄像头"), detail: T("屏幕角落显示摄像头气泡；放入录制范围内才会录入画面")) {
-                    AuroraToggle(isOn: $recorder.pipCamera)
-                }
-                if recorder.pipCamera {
-                    cameraOptions
-                }
-                Divider().opacity(0.4)
-                optionRow(symbol: "macbook", label: T("录完自动加壳"), detail: T("停止后把成片套进设备外壳，原片保留；也可以稍后在「最近录像」里手动加壳")) {
-                    AuroraToggle(isOn: $recorder.bezelRecording)
-                }
-                if recorder.bezelRecording {
-                    bezelFrameRow
-                }
-                Divider().opacity(0.4)
-                optionRow(symbol: "keyboard", label: T("显示按键"), detail: T("按下的组合键实时显示在屏幕底部，系统快捷键与功能键也会显示（需要输入监控权限）")) {
-                    AuroraToggle(isOn: $recorder.showKeystrokes)
-                }
-
-                if (recorder.showKeystrokes && !keyAccess) || (recorder.highlightClicks && !overlayAccess) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(AuroraTheme.warn)
-                        Text(recorder.showKeystrokes && !keyAccess
-                             ? T("按键显示要「输入监控」权限才能录到系统快捷键与功能键")
-                             : T("点击高亮要「辅助功能」权限才能录到你自己的点击"))
-                            .font(.system(size: 8.5))
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 4)
-                        Button(T("去授权")) {
-                            if recorder.showKeystrokes && !keyAccess {
-                                OverlayAccess.requestKeyboardAccess()
-                            } else {
-                                OverlayAccess.requestAccessibility()
-                            }
-                        }
-                        .controlSize(.mini)
+                Picker(T("录屏倒计时"), selection: $recorder.countdown) {
+                    ForEach([0, 3, 5, 10], id: \.self) { seconds in
+                        Text(seconds == 0 ? T("关闭") : TF("%d 秒", seconds)).tag(seconds)
                     }
-                }
+                }.pickerStyle(.segmented)
+                if recorder.mobileSelected {
+                    Text(T("录制设备画面和设备提供的声音，保存为 MOV。可在最近录像中编辑和导出。"))
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    optionRow(symbol: "speaker.wave.2", label: T("系统声音"), detail: T("录进 MP4 音轨；窗口录制不支持系统声音")) {
+                        AuroraToggle(isOn: Binding(
+                            get: { recorder.systemAudio && recorder.selectedSource?.supportsSystemAudio == true },
+                            set: { recorder.systemAudio = $0 }
+                        ))
+                        .disabled(recorder.selectedSource?.supportsSystemAudio != true)
+                    }
+                    Divider().opacity(0.4)
+                    optionRow(symbol: "mic", label: T("麦克风"), detail: T("与系统声音合成为同一条音轨，输出一个 MP4 文件")) {
+                        AuroraToggle(isOn: $recorder.recordMic)
+                    }
+                    Divider().opacity(0.4)
+                    optionRow(symbol: "cursorarrow.click", label: T("显示指针"), detail: T("把鼠标指针录进画面")) {
+                        AuroraToggle(isOn: $recorder.showCursor).disabled(recorder.editableCursor)
+                    }
+                    Divider().opacity(0.4)
+                    optionRow(symbol: "rectangle.landscape.rotate", label: T("Retina 高分辨率"), detail: T("按显示器原生像素录制，文件更大更清晰")) {
+                        AuroraToggle(isOn: $recorder.hiRes)
+                    }
+                    Divider().opacity(0.4)
+                    optionRow(symbol: "plus.magnifyingglass", label: T("鼠标跟随缩放"), detail: T("记录点击，在最近录像中预览和编辑缩放")) {
+                        AuroraToggle(isOn: $recorder.trackZoom)
+                    }
+                    Divider().opacity(0.4)
+                    optionRow(symbol: "cursorarrow", label: T("后期编辑光标"), detail: T("只记录位置，在时间线添加光标样式")) {
+                        AuroraToggle(isOn: $recorder.editableCursor)
+                    }
+                    Divider().opacity(0.4)
+                    optionRow(symbol: "cursorarrow.click.2", label: T("点击高亮"), detail: T("录制时在鼠标点击处播放涟漪动画")) {
+                        AuroraToggle(isOn: $recorder.highlightClicks)
+                    }
+                    Divider().opacity(0.4)
+                    optionRow(symbol: "video.fill.badge.plus", label: T("画中画摄像头"), detail: T("屏幕角落显示摄像头气泡；放入录制范围内才会录入画面")) {
+                        AuroraToggle(isOn: $recorder.pipCamera)
+                    }
+                    if recorder.pipCamera {
+                        cameraOptions
+                    }
+                    Divider().opacity(0.4)
+                    optionRow(symbol: "macbook", label: T("录完自动加壳"), detail: T("停止后把成片套进设备外壳，原片保留；也可以稍后在「最近录像」里手动加壳")) {
+                        AuroraToggle(isOn: $recorder.bezelRecording)
+                    }
+                    if recorder.bezelRecording {
+                        bezelFrameRow
+                    }
+                    Divider().opacity(0.4)
+                    optionRow(symbol: "keyboard", label: T("显示按键"), detail: T("按下的组合键实时显示在屏幕底部，系统快捷键与功能键也会显示（需要输入监控权限）")) {
+                        AuroraToggle(isOn: $recorder.showKeystrokes)
+                    }
 
-                Divider().opacity(0.4)
-                HStack(spacing: 8) {
-                    Image(systemName: "speedometer")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 18)
-                    Text(T("帧率"))
-                        .font(.system(size: 10.5, weight: .medium))
-                    Spacer()
-                    segmentPicker(
-                        options: ["30", "60"],
-                        current: recorder.fps >= 60 ? 1 : 0
-                    ) { recorder.fps = ($0 == 1) ? 60 : 30 }
-                }
+                    if (recorder.showKeystrokes && !keyAccess) || (recorder.highlightClicks && !overlayAccess) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(AuroraTheme.warn)
+                            Text(recorder.showKeystrokes && !keyAccess
+                                 ? T("按键显示要「输入监控」权限才能录到系统快捷键与功能键")
+                                 : T("点击高亮要「辅助功能」权限才能录到你自己的点击"))
+                                .font(.system(size: 8.5))
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 4)
+                            Button(T("去授权")) {
+                                if recorder.showKeystrokes && !keyAccess {
+                                    OverlayAccess.requestKeyboardAccess()
+                                } else {
+                                    OverlayAccess.requestAccessibility()
+                                }
+                            }
+                            .controlSize(.mini)
+                        }
+                    }
 
-                HStack(spacing: 8) {
-                    Image(systemName: "video")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 18)
-                    Text(T("编码"))
-                        .font(.system(size: 10.5, weight: .medium))
-                    Spacer()
-                    segmentPicker(
-                        options: [T("H.265（更小）"), T("H.264（兼容）")],
-                        current: recorder.useHEVC ? 0 : 1
-                    ) { recorder.useHEVC = ($0 == 0) }
+                    Divider().opacity(0.4)
+                    HStack(spacing: 8) {
+                        Image(systemName: "speedometer")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 18)
+                        Text(T("帧率"))
+                            .font(.system(size: 10.5, weight: .medium))
+                        Spacer()
+                        segmentPicker(
+                            options: ["30", "60"],
+                            current: recorder.fps >= 60 ? 1 : 0
+                        ) { recorder.fps = ($0 == 1) ? 60 : 30 }
+                    }
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "video")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 18)
+                        Text(T("编码"))
+                            .font(.system(size: 10.5, weight: .medium))
+                        Spacer()
+                        segmentPicker(
+                            options: [T("H.265（更小）"), T("H.264（兼容）")],
+                            current: recorder.useHEVC ? 0 : 1
+                        ) { recorder.useHEVC = ($0 == 0) }
+                    }
                 }
             }
             .disabled(recorder.optionsLocked)
@@ -662,6 +692,11 @@ struct RecorderView: View {
             }
             .buttonStyle(.plain)
 
+            if ["mp4", "mov"].contains(url.pathExtension) {
+                Button(T("缩放时间线")) { ZoomTimelineWindow.open(url) }
+                    .buttonStyle(.plain)
+                    .disabled(recorder.exportingZoom != nil)
+            }
             if !isFramed && url.pathExtension == "mp4" {
                 Button {
                     bezelError = nil

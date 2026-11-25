@@ -95,6 +95,20 @@ final class RecorderService: ObservableObject {
     @Published var selectedSourceID: String {
         didSet { UserDefaults.standard.set(selectedSourceID, forKey: "recorder.source") }
     }
+    @Published var includeAurora = UserDefaults.standard.bool(forKey: "recorder.includeAurora") {
+        didSet { ud.set(includeAurora, forKey: "recorder.includeAurora"); refreshSources() }
+    }
+    @Published var countdown = UserDefaults.standard.object(forKey: "recorder.countdown") as? Int ?? 3 {
+        didSet { ud.set(countdown, forKey: "recorder.countdown") }
+    }
+    @Published private(set) var remaining = 0
+    @Published private(set) var findingMobile = false
+    @Published private(set) var mobileSearchNote: String?
+    private var mobileEnabled = false
+    private var deviceObservers: [NSObjectProtocol] = []
+    private var mobileRecording: USBDeviceRecording?
+    private var startTask: Task<Void, Never>?
+    var mobileSelected: Bool { selectedSourceID.hasPrefix("usb:") }
     @Published private(set) var lastMicrophoneSamples = 0
     @Published private(set) var isRecording = false
     @Published private(set) var isStarting = false
@@ -137,6 +151,44 @@ final class RecorderService: ObservableObject {
     /// 正在合成带壳视频
     @Published private(set) var isWrappingBezel = false
     @Published private(set) var bezelProgress: Double = 0
+
+    @Published var trackZoom = UserDefaults.standard.bool(forKey: "recorder.trackZoom") {
+        didSet { ud.set(trackZoom, forKey: "recorder.trackZoom") }
+    }
+    @Published var editableCursor = UserDefaults.standard.bool(forKey: "recorder.editableCursor") {
+        didSet { ud.set(editableCursor, forKey: "recorder.editableCursor") }
+    }
+    @Published private(set) var exportingZoom: URL?
+    private var cursorEmbeddedInTake = true
+    private var zoomTrace = RecordingZoomTrace()
+    private var zoomFixedBounds = CGRect.zero
+    private var zoomWindowID: CGWindowID?
+    private var zoomOutputSize = CGSize.zero
+    private let zoomMonitor = RecordingZoomMonitor()
+    private var drainingForQuit = false
+
+    func finishForTermination() async {
+        drainingForQuit = true
+        cancelCountdown()
+        defer { drainingForQuit = false }
+        while isStarting { try? await Task.sleep(for: .milliseconds(80)) }
+        if isRecording { stop() }
+        while isStopping || isWrappingBezel || exportingZoom != nil || automaticWrapPending {
+            try? await Task.sleep(for: .milliseconds(80))
+        }
+    }
+
+    private var automaticWrapPending = false
+
+    func exportZoom(_ movie: URL, asset: AVAsset, composition: AVVideoComposition, finished: Bool = false) async -> String? {
+        guard exportingZoom == nil else { return T("正在处理另一段录像") }
+        exportingZoom = movie
+        defer { exportingZoom = nil }
+        do {
+            lastMovieURL = try await RecordingZoom.export(movie, asset: asset, composition: composition, finished: finished)
+            return nil
+        } catch { return error.localizedDescription }
+    }
 
     private let ud = UserDefaults.standard
 
@@ -207,6 +259,7 @@ final class RecorderService: ObservableObject {
         bezelFrameID = ud.string(forKey: "recorder.bezelFrame")
         mediaQueue = DispatchQueue(label: "aurora.recorder.media")
         refreshSources()
+        if mobileSelected && AVCaptureDevice.authorizationStatus(for: .video) == .authorized { findMobileDevices() }
 
         // 气泡上的 ✕ 要回到开关上；权限 / 设备问题只弹提示，
         // 气泡留在屏幕上显示原因（授权后自动恢复），别把开关一巴掌拍灭
@@ -221,6 +274,29 @@ final class RecorderService: ObservableObject {
     private var sourceRefreshInFlight = false
     private var sourceRefreshPending = false
 
+    func findMobileDevices() {
+        guard !findingMobile, !optionsLocked else { return }
+        findingMobile = true
+        mobileSearchNote = nil
+        Task { [self] in
+            defer { findingMobile = false }
+            guard await AVCaptureDevice.requestAccess(for: .video) else {
+                lastError = T("请在系统设置的「隐私与安全性 → 相机」中允许 Aurora 读取移动设备画面")
+                return
+            }
+            lastError = nil
+            mobileEnabled = true
+            if deviceObservers.isEmpty {
+                for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
+                    deviceObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                        Task { @MainActor in self?.refreshSources() }
+                    })
+                }
+            }
+            refreshSources()
+        }
+    }
+
     func refreshSources() {
         guard !sourceRefreshInFlight else { sourceRefreshPending = true; return }
         sourceRefreshInFlight = true
@@ -233,11 +309,8 @@ final class RecorderService: ObservableObject {
                 }
             }
             let granted = await readInBackground { CGPreflightScreenCaptureAccess() }
-            guard granted else {
-                if !sources.isEmpty { sources = [] }
-                return
-            }
-            let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            // The on-screen-only query can omit visible nonactivating Aurora panels.
+            let content = granted ? try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: !includeAurora) : nil
             var list: [RecorderSource] = []
             for display in content?.displays ?? [] {
                 let name = Self.displayName(for: display) ?? T("显示器")
@@ -247,7 +320,7 @@ final class RecorderService: ObservableObject {
                     display: display, window: nil
                 ))
             }
-            for window in content?.windows ?? [] where Self.isRecordableWindow(window) {
+            for window in content?.windows ?? [] where isRecordableWindow(window) {
                 let app = window.owningApplication?.applicationName ?? T("窗口")
                 let title = (window.title?.isEmpty == false) ? window.title! : app
                 list.append(RecorderSource(
@@ -256,19 +329,30 @@ final class RecorderService: ObservableObject {
                     display: nil, window: window
                 ))
             }
+            if mobileEnabled {
+                let mobile = await readInBackground {
+                    USBDeviceRecording.devices().map { RecorderSource(id: "usb:" + $0.uniqueID, kind: .mobile,
+                        title: $0.localizedName, subtitle: T("USB 设备画面及设备音频")) }
+                }
+                mobileSearchNote = mobile.isEmpty ? T("未发现已信任的 USB 设备") : TF("已发现 %d 台 USB 设备", mobile.count)
+                list.append(contentsOf: mobile)
+            }
             self.sources = list
             let hasAreaSelection = self.selectedSourceID == Self.areaSourceID && self.areaRect != nil
-            if !hasAreaSelection && (self.selectedSourceID.isEmpty || !list.contains(where: { $0.id == self.selectedSourceID })) {
+            if !optionsLocked && !mobileSelected && !hasAreaSelection && (self.selectedSourceID.isEmpty || !list.contains(where: { $0.id == self.selectedSourceID })) {
                 self.selectedSourceID = list.first?.id ?? ""
             }
         }
     }
 
-    private nonisolated static func isRecordableWindow(_ window: SCWindow) -> Bool {
+    private func isRecordableWindow(_ window: SCWindow) -> Bool {
         guard let app = window.owningApplication else { return false }
-        if app.bundleIdentifier == Bundle.main.bundleIdentifier { return false }
+        if app.processID == getpid() {
+            guard includeAurora, let local = NSApp.window(withWindowNumber: Int(window.windowID)), local.isVisible, !local.isMiniaturized else { return false }
+            return local is AuroraPanel || local is EditorWindow || (local.level == .normal && local.styleMask.contains(.titled))
+        }
         if window.frame.width < 160 || window.frame.height < 120 { return false }
-        if window.windowLayer != 0 { return false }
+        if !window.isOnScreen || window.windowLayer != 0 { return false }
         return true
     }
 
@@ -301,6 +385,7 @@ final class RecorderService: ObservableObject {
     var targetScreen: NSScreen? {
         guard let source = selectedSource else { return NSScreen.main }
         switch source.kind {
+        case .mobile: return NSScreen.main
         case .display:
             guard let id = source.display?.displayID else { return NSScreen.main }
             return NSScreen.screens.first {
@@ -322,6 +407,7 @@ final class RecorderService: ObservableObject {
     var recordedContentSize: CGSize? {
         guard let source = selectedSource else { return nil }
         switch source.kind {
+        case .mobile: return nil
         case .display:
             guard let display = source.display else { return nil }
             return CGSize(width: display.width, height: display.height)
@@ -385,13 +471,13 @@ final class RecorderService: ObservableObject {
     // MARK: - 区域选择（拖一个矩形只录这块屏幕）
 
     func selectArea() {
-        guard !isSelectingArea, !isRecording else { return }
+        guard !isSelectingArea, !optionsLocked else { return }
         guard hasScreenPermission else {
             lastError = T("需要「屏幕录制」权限才能录屏")
             return
         }
         isSelectingArea = true
-        auroraDelegate?.panelWillCaptureScreenshot()
+        if !includeAurora { auroraDelegate?.panelWillCaptureScreenshot() }
         RecorderBar.shared.hide()
         Task { @MainActor in
             // 需要 SCDisplay 来建区域采集过滤器
@@ -408,7 +494,7 @@ final class RecorderService: ObservableObject {
         }
     }
 
-    private func commitArea(_ rect: NSRect, displays: [SCDisplay]) {
+    func commitArea(_ rect: NSRect, displays: [SCDisplay]) {
         areaOverlays.forEach { $0.orderOut(nil) }
         areaOverlays = []
         isSelectingArea = false
@@ -429,43 +515,116 @@ final class RecorderService: ObservableObject {
     // MARK: - 开始 / 停止
 
     func toggle() {
-        if isRecording { stop() } else { start() }
+        if remaining > 0 { cancelCountdown() } else if isRecording { stop() } else { start() }
     }
 
     func start() {
-        guard !isRecording, !isStarting, !isStopping, !finishing else { return }
+        guard !drainingForQuit, !isRecording, !isStarting, !isStopping, !finishing else { return }
         lastError = nil
-        guard hasScreenPermission else {
+        guard mobileSelected || hasScreenPermission else {
             lastError = T("需要「屏幕录制」权限才能录屏")
             return
         }
-        guard selectedSource != nil else {
-            lastError = T("先选择一个录制源")
+        guard let source = selectedSource else {
+            lastError = mobileSelected ? T("请查找并选择已连接的 USB 设备") : T("先选择一个录制源")
+            return
+        }
+        guard includeAurora || source.window?.owningApplication?.processID != getpid() else {
+            lastError = T("请先开启「录入 Aurora 窗口」")
             return
         }
         lastMicrophoneSamples = 0
         isStarting = true
-        Task { @MainActor in
-            defer { self.isStarting = false }
+        startTask = Task { @MainActor in
+            defer {
+                self.isStarting = false
+                self.startTask = nil
+                self.remaining = 0
+                if let error = self.lastError { auroraDelegate?.state.showToast(error, symbol: "exclamationmark.triangle") }
+            }
             // 麦克风权限要在建 writer 之前敲定：音轨输入必须在 startWriting 前加入
             var micEnabled = false
-            if recordMic {
+            if recordMic && source.kind != .mobile {
                 if hasMicPermission {
                     micEnabled = true
                 } else {
                     micEnabled = await AVCaptureDevice.requestAccess(for: .audio)
                 }
             }
-            guard !recordMic || micEnabled else {
+            guard source.kind == .mobile || !recordMic || micEnabled else {
                 lastError = T("麦克风未获授权，请授权或关闭麦克风后重试")
                 return
             }
-            await self.beginRecording(micEnabled: micEnabled)
+            guard !drainingForQuit else { return }
+            if !includeAurora && source.kind != .mobile { auroraDelegate?.panelWillCaptureScreenshot() }
+            RecorderBar.targetScreen = targetScreen
+            let delay = [3, 5, 10].contains(countdown) ? countdown : 0
+            if delay > 0 {
+                remaining = delay
+                RecorderBar.shared.show()
+                while remaining > 0 {
+                    do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                    remaining -= 1
+                }
+            }
+            guard !Task.isCancelled, !drainingForQuit else { return }
+            if source.kind == .mobile {
+                await beginMobile(source)
+            } else {
+                await self.beginRecording(source: source, micEnabled: micEnabled)
+            }
         }
     }
 
-    private func beginRecording(micEnabled: Bool) async {
-        guard !isRecording, let source = selectedSource else { return }
+    func cancelCountdown() {
+        if remaining > 0 { startTask?.cancel() }
+    }
+
+    private func beginMobile(_ source: RecorderSource) async {
+        let url = outputDirectory.appendingPathComponent("Aurora USB " + Self.fileStamp() + "-" + UUID().uuidString.prefix(6) + ".mov")
+        let capture = USBDeviceRecording { [weak self] url, error in
+            guard let self else { return }
+            let discard = self.discardRequested
+            self.isRecording = false
+            self.isPaused = false
+            self.stopTicker()
+            self.preventSleep(false)
+            RecorderBar.shared.hide()
+            self.mobileRecording = nil
+            self.isStopping = false
+            self.discardRequested = false
+            let saved = (error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool == true
+            if discard { try? FileManager.default.removeItem(at: url) }
+            else if error == nil || saved {
+                self.lastMovieURL = url
+                NotificationService.shared.notifyRecordingSaved(name: url.lastPathComponent)
+            } else if let error {
+                self.lastError = error.localizedDescription
+                NotificationService.shared.notifyRecordingFailed(reason: error.localizedDescription)
+            }
+            self.statusNote = nil
+        }
+        mobileRecording = capture
+        discardRequested = false
+        do {
+            try await capture.start(id: String(source.id.dropFirst(4)), url: url)
+            guard mobileRecording === capture else { return }
+            isRecording = true
+            isPaused = false
+            accumulated = 0
+            segmentStart = Date()
+            startTicker()
+            preventSleep(true)
+            statusNote = nil
+            RecorderBar.shared.show()
+        } catch {
+            mobileRecording = nil
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func beginRecording(source: RecorderSource, micEnabled: Bool) async {
+        guard !isRecording else { return }
         discardRequested = false
         finishing = false
         appendedVideoFrames = 0
@@ -473,26 +632,17 @@ final class RecorderService: ObservableObject {
         loggedWriterFailure = false
 
         let stamp = Self.fileStamp()
-        let url = outputDirectory.appendingPathComponent("Aurora \(stamp).mp4")
+        var url = outputDirectory.appendingPathComponent("Aurora \(stamp).mp4")
         // AVAssetWriter 要求目标文件不存在，同秒重录会撞名
-        try? FileManager.default.removeItem(at: url)
-        let writer = try? AVAssetWriter(outputURL: url, fileType: .mp4)
-        guard let writer else {
-            lastError = T("无法创建录制文件")
-            return
+        if FileManager.default.fileExists(atPath: url.path) {
+            url = outputDirectory.appendingPathComponent("Aurora \(stamp)-\(UUID().uuidString.prefix(8)).mp4")
         }
-        self.movieURL = url
-        self.writer = writer
-
         let conf = SCStreamConfiguration()
         let filter: SCContentFilter
         var areaSourceRect: CGRect?
         var windowSourceRect: CGRect?
 
-        // Aurora 自己的面板、控制条不该出现在录像里。做法与 Snapzy 一致：
-        // 整块应用排除，再把要录进去的覆盖层（摄像头气泡 / 按键胶囊 / 点击涟漪）
-        // 用 exceptingWindows 单独「例外包含」回来。
-        // 覆盖层窗口必须先建出来，否则拿不到它们的 window ID。
+        // 先取得覆盖层的窗口 ID，再把启用的效果纳入录制过滤器。
         var overlayWindowIDs: [CGWindowID] = []
         var activeOverlayIDs: [CGWindowID] = []   // 这次录制真的会画出来的覆盖层
         if let id = CameraBubble.shared.prepare(on: targetScreen) {
@@ -508,21 +658,30 @@ final class RecorderService: ObservableObject {
             if highlightClicks { activeOverlayIDs.append(id) }
         }
 
-        let shareable = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        let ownApps = shareable?.applications.filter {
-            guard let bundleID = Bundle.main.bundleIdentifier else { return false }
-            return $0.bundleIdentifier == bundleID
-        } ?? []
-        let overlayWindows = shareable?.windows.filter { overlayWindowIDs.contains($0.windowID) } ?? []
+        let barID = RecorderBar.shared.prepareWindowID()
+        guard let shareable = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) else {
+            lastError = T("无法读取录制窗口，请检查屏幕录制权限")
+            return
+        }
+        let ownApps = shareable.applications.filter { $0.processID == getpid() }
+        let overlayWindows = shareable.windows.filter { overlayWindowIDs.contains($0.windowID) }
 
+        func displayFilter(_ display: SCDisplay) -> SCContentFilter {
+            if includeAurora {
+                let controls = shareable.windows.filter { $0.windowID == barID }
+                return SCContentFilter(display: display, excludingWindows: controls)
+            }
+            return SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: overlayWindows)
+        }
+        if includeAurora && source.kind != .window && !shareable.windows.contains(where: { $0.windowID == barID }) {
+            lastError = T("无法从画面排除录制控制条，请重试")
+            return
+        }
         switch source.kind {
+        case .mobile: return
         case .display:
             guard let display = source.display else { return }
-            filter = SCContentFilter(
-                display: display,
-                excludingApplications: ownApps,
-                exceptingWindows: overlayWindows
-            )
+            filter = displayFilter(display)
         case .window:
             guard let window = source.window else { return }
             // 覆盖层落在窗口所在的屏幕上时，改成「显示器 + 只包含这个窗口和覆盖层」，
@@ -544,14 +703,13 @@ final class RecorderService: ObservableObject {
                 )
             } else {
                 filter = SCContentFilter(desktopIndependentWindow: window)
+                conf.ignoreShadowsSingleWindow = true
+                conf.preservesAspectRatio = true
+                conf.scalesToFit = true
             }
         case .area:
             guard let rect = source.rect, let display = areaDisplay else { return }
-            filter = SCContentFilter(
-                display: display,
-                excludingApplications: ownApps,
-                exceptingWindows: overlayWindows
-            )
+            filter = displayFilter(display)
             // 全局 NS 坐标 → 该显示屏局部坐标（SC 左上原点）
             let mid = CGPoint(x: rect.midX, y: rect.midY)
             let screen = NSScreen.screens.first { $0.frame.contains(mid) } ?? NSScreen.main
@@ -588,7 +746,9 @@ final class RecorderService: ObservableObject {
 
         conf.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         conf.queueDepth = 8
-        conf.showsCursor = showCursor
+        let recordsEditablePointer = editableCursor
+        let recordsPointer = trackZoom || recordsEditablePointer
+        conf.showsCursor = showCursor && !recordsEditablePointer
         conf.pixelFormat = kCVPixelFormatType_32BGRA
         conf.colorSpaceName = CGColorSpace.sRGB
         conf.capturesAudio = systemAudio && source.supportsSystemAudio
@@ -609,6 +769,14 @@ final class RecorderService: ObservableObject {
                 AVVideoProfileLevelKey: useHEVC ? kVTProfileLevel_HEVC_Main_AutoLevel : kVTProfileLevel_H264_High_AutoLevel
             ]
         ]
+        let writer = try? AVAssetWriter(outputURL: url, fileType: .mp4)
+        guard let writer else {
+            lastError = T("无法创建录制文件")
+            return
+        }
+        self.movieURL = url
+        self.writer = writer
+
         let video = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         video.expectsMediaDataInRealTime = true
         writer.add(video)
@@ -661,6 +829,22 @@ final class RecorderService: ObservableObject {
         }
         self.stream = stream
 
+        zoomTrace = RecordingZoomTrace()
+        zoomFixedBounds = .zero
+        zoomWindowID = nil
+        zoomOutputSize = CGSize(width: conf.width, height: conf.height)
+        cursorEmbeddedInTake = conf.showsCursor
+        if recordsPointer {
+            if let rect = source.rect, let screen = NSScreen.screens.first {
+                zoomFixedBounds = CGRect(x: rect.minX, y: screen.frame.maxY - rect.maxY, width: rect.width, height: rect.height)
+            } else if let window = source.window {
+                zoomFixedBounds = window.frame
+                if windowSourceRect == nil { zoomWindowID = window.windowID }
+            } else if let display = source.display {
+                zoomFixedBounds = display.frame
+            }
+        }
+        zoomTrace.bounds = zoomFixedBounds
         writer.startWriting()
         // 会话起点要等首个视频帧的时间戳（见 appendVideo），这里不能直接定 .zero
         sessionStarted = false
@@ -686,6 +870,7 @@ final class RecorderService: ObservableObject {
         isPaused = false
         accumulated = 0
         segmentStart = Date()
+        startZoomMonitor()
         startTicker()
         preventSleep(true)
         statusNote = nil
@@ -700,11 +885,12 @@ final class RecorderService: ObservableObject {
 
     /// 停止；discard = 直接删掉这段（Recordly 的垃圾桶）
     func stop(discard: Bool = false) {
-        guard !isStopping, writer != nil || stream != nil else { return }
+        guard !isStopping, writer != nil || stream != nil || mobileRecording != nil else { return }
         isStopping = true
         discardRequested = discard
         isRecording = false
         isPaused = false
+        zoomMonitor.stop()
         stopTicker()
         preventSleep(false)
         RecorderBar.shared.hide()
@@ -712,6 +898,7 @@ final class RecorderService: ObservableObject {
         if !pipCamera { CameraBubble.shared.hide() }
         statusNote = discard ? T("正在丢弃…") : T("正在保存…")
 
+        if let mobileRecording { mobileRecording.stop(); return }
         ClickHighlightService.shared.stop()
         KeystrokeOverlayService.shared.stop()
         stream?.stopCapture { [weak self] _ in
@@ -720,17 +907,33 @@ final class RecorderService: ObservableObject {
         // stream 保留到 cleanup：removeStreamOutput 还需要它
     }
 
+    private func startZoomMonitor() {
+        zoomMonitor.start(enabled: !zoomFixedBounds.isEmpty) { [weak self] point, click, time in
+            guard let self else { return }
+            self.mediaQueue.async {
+                guard let mapped = self.pauseTimeline.outputTime(for: time) else { return }
+                self.zoomTrace.sample(point, at: mapped, click: click)
+            }
+        }
+    }
+
     /// 暂停：时间轴记下暂停点（之后的样本被裁掉），计时同步停走
     func togglePause() {
         guard isRecording else { return }
         if isPaused {
-            mediaQueue.async { [weak self] in self?.pauseTimeline.resume() }
+            if let mobileRecording { mobileRecording.pause(false) } else {
+                mediaQueue.async { [weak self] in self?.pauseTimeline.resume() }
+                startZoomMonitor()
+            }
             segmentStart = Date()
             isPaused = false
         } else {
             if let segmentStart { accumulated += Date().timeIntervalSince(segmentStart) }
             self.segmentStart = nil
-            mediaQueue.async { [weak self] in self?.pauseTimeline.pause() }
+            zoomMonitor.stop()
+            if let mobileRecording { mobileRecording.pause(true) } else {
+                mediaQueue.async { [weak self] in self?.pauseTimeline.pause() }
+            }
             isPaused = true
             updateElapsed()
         }
@@ -772,6 +975,14 @@ final class RecorderService: ObservableObject {
                     self.lastMicrophoneSamples = microphoneSamples
                     if writer.status == .completed, !discard, let url {
                         do {
+                            let pointer = RecordingPointerData(points: self.zoomTrace.points, embeddedCursor: self.cursorEmbeddedInTake)
+                            if !pointer.points.isEmpty {
+                                do {
+                                    try await Task.detached(priority: .utility) {
+                                        try JSONEncoder().encode(pointer).write(to: RecordingZoom.metadata(url), options: .atomic)
+                                    }.value
+                                } catch { self.lastError = error.localizedDescription }
+                            }
                             self.statusNote = T("正在合成录屏声音…")
                             try await RecordingAudioMixer.mixIfNeeded(at: url)
                         } catch {
@@ -898,8 +1109,10 @@ final class RecorderService: ObservableObject {
             statusNote = T("跨屏区域录制没有加外壳")
             return
         }
+        automaticWrapPending = true
         Task { [weak self] in
             guard let self else { return }
+            defer { self.automaticWrapPending = false }
             if let reason = await self.wrapRecording(url) {
                 NotificationService.shared.notifyRecordingFailed(reason: reason)
                 self.lastError = reason
@@ -935,12 +1148,25 @@ final class RecorderService: ObservableObject {
     private func appendVideo(_ sampleBuffer: CMSampleBuffer) {
         guard !finishing else { return }
         guard let writer, let videoInput else { return }
-        guard CMSampleBufferDataIsReady(sampleBuffer), writer.status == .writing else { return }
+        guard CMSampleBufferDataIsReady(sampleBuffer), CMSampleBufferGetImageBuffer(sampleBuffer) != nil,
+              writer.status == .writing else { return }
+        let attachments = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?.first
+        if let raw = attachments?[.status] as? Int, let status = SCFrameStatus(rawValue: raw),
+           status != .complete && status != .started { return }
+        if zoomWindowID != nil,
+           let info = attachments,
+           let screen = info[.screenRect] as? NSDictionary, let frame = CGRect(dictionaryRepresentation: screen),
+           let content = info[.contentRect] as? NSDictionary, let drawn = CGRect(dictionaryRepresentation: content),
+           let factor = info[.scaleFactor] as? CGFloat, !drawn.isEmpty, factor > 0 {
+            zoomTrace.visibleBounds = frame
+            zoomTrace.bounds = ZoomSegment.virtualFrame(screen: frame, content: drawn, pixelScale: factor, output: zoomOutputSize)
+        }
         let source = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         // 首个视频帧到达时才建会话：把它当作时间轴零点，
         // 否则 PTS 带着开机时长，成片时长会离谱
         if !sessionStarted {
             Debug.log("recorder: video origin=\(CMTimeGetSeconds(source))")
+            zoomTrace.origin = source
             writer.startSession(atSourceTime: source)
             sessionStarted = true
         }
@@ -1006,8 +1232,9 @@ final class RecorderService: ObservableObject {
         var total = accumulated
         if let segmentStart { total += Date().timeIntervalSince(segmentStart) }
         let seconds = max(0, Int(total))
-        elapsedText = String(format: "%d:%02d", seconds / 60, seconds % 60)
-        RecorderBar.shared.update(text: elapsedText)
+        let text = String(format: "%d:%02d", seconds / 60, seconds % 60)
+        if text != elapsedText { elapsedText = text }
+
     }
 
     private func startTicker() {

@@ -140,9 +140,10 @@ final class AppState: ObservableObject {
     }
 
     /// 统一的退出入口：默认先问一句，用户勾了「不再询问」就直接退出
+    var onConfirmedQuit: (() -> Void)?
     func requestQuit() {
         guard AuroraAlert.confirmQuit() else { return }
-        NSApp.terminate(nil)
+        onConfirmedQuit?()
     }
     @Published private(set) var toast: String?
     @Published private(set) var toastSymbol: String = "checkmark.circle.fill"

@@ -2,7 +2,7 @@
 # Aurora 构建脚本：编译 Swift 包并打包成 .app
 #
 # 常用环境变量：
-#   AURORA_VERSION   版本号（默认取最近的 git tag，其次 1.1.0）
+#   AURORA_VERSION   版本号（默认取 CHANGELOG.md 首个版本，其次取最近的 git tag）
 #   AURORA_BUILD     CFBundleVersion（默认取提交数）
 #   AURORA_UNIVERSAL 1 = 同时编译 arm64 与 x86_64 并合并为通用二进制
 #   AURORA_INSTALL   1 = 打包后安装到 /Applications（默认 1）
@@ -20,6 +20,9 @@ CONFIG="${1:-release}"
 MIN_MACOS="26.0"
 
 VERSION="${AURORA_VERSION:-}"
+if [[ -z "$VERSION" && -f CHANGELOG.md ]]; then
+  VERSION="$(awk '/^## v[0-9]+\.[0-9]+\.[0-9]+$/ { print substr($2, 2); exit }' CHANGELOG.md)"
+fi
 if [[ -z "$VERSION" ]]; then
   VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)"
 fi
@@ -92,7 +95,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <key>NSMicrophoneUsageDescription</key>
     <string>Aurora 在你开启录屏麦克风时采集声音，音频仅保存到本机录像中。</string>
     <key>NSCameraUsageDescription</key>
-    <string>Aurora 在录屏时显示画中画摄像头预览，画面只写进本机的 MP4，不会上传。</string>
+    <string>Aurora 用相机权限显示画中画预览，并读取已信任的 USB iPhone 或 iPad 屏幕。录像保存在本机。</string>
     <key>NSSystemExtensionUsageDescription</key>
     <string>Aurora 用网络扩展在系统设置的 VPN 列表里提供规则、直连和全局代理。</string>
 </dict>

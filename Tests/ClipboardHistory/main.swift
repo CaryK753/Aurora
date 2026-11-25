@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 let sqlite = directory.appendingPathComponent("clipboard.sqlite3")
@@ -87,3 +87,38 @@ var migrationFailed = false
 do { try failedDB.migrateLegacy(from: broken) } catch { migrationFailed = true }
 try check("failed migration leaves original untouched", migrationFailed && Data(contentsOf: broken) == bytes
           && failedDB.stats().count == 0)
+
+MainActor.assumeIsolated {
+    let suite = "aurora-test-" + UUID().uuidString
+    let board = NSPasteboard(name: .init(suite))
+    let defaults = UserDefaults(suiteName: suite)!
+    let support = directory.appendingPathComponent("capture-test")
+    defer {
+        board.releaseGlobally()
+        defaults.removePersistentDomain(forName: suite)
+        try? FileManager.default.removeItem(at: support)
+    }
+    let service = ClipboardService(pasteboard: board, defaults: defaults, supportDirectory: support)
+    service.setEnabled(false)
+    board.clearContents()
+    board.setString("paused copy", forType: .string)
+    service.setEnabled(true)
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.85))
+    check("paused copy stays out of history after resume", service.historyCount == 0)
+    board.clearContents()
+    board.setString("new copy", forType: .string)
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.85))
+    check("first new copy after resume is captured", service.recentItems.first?.text == "new copy")
+    service.setEnabled(false)
+
+    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8,
+                                  samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                  bytesPerRow: 16, bitsPerPixel: 32)!
+    let png = bitmap.representation(using: .png, properties: [:])!
+    board.clearContents()
+    board.setData(png, forType: .png)
+    check("existing PNG bytes are preserved", ClipboardService.imagePNG(from: board) == png)
+    board.clearContents()
+    board.setData(bitmap.tiffRepresentation!, forType: .tiff)
+    check("TIFF clipboard images still convert to PNG", ClipboardService.imagePNG(from: board)?.starts(with: [137, 80, 78, 71]) == true)
+}

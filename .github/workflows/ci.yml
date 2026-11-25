@@ -43,6 +43,7 @@ jobs:
           bash Tests/Permissions/run.sh
           bash Tests/Panel/run.sh
           bash Tests/ClipboardHistory/run.sh
+          python3 Tests/Update/run.py
 
       - name: 打包 .app
         env:

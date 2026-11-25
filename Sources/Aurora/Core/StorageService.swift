@@ -44,6 +44,10 @@ struct StorageItem: Identifiable, Sendable {
     var isCleanable: Bool { policy != .readOnly && available && bytes > 0 }
     /// 废纸篓再往废纸篓搬没有意义：这一类是真的删除
     var permanentlyDeletes: Bool { id == "trash" }
+
+    static func cleanupOrder(_ items: [StorageItem]) -> [StorageItem] {
+        items.filter(\.permanentlyDeletes) + items.filter { !$0.permanentlyDeletes }
+    }
 }
 
 struct StorageBigFile: Identifiable, Sendable {
@@ -201,10 +205,12 @@ final class StorageService: ObservableObject {
 
         var moved = 0
         var failed = 0
+        var emptiedCount = 0
         var commandRuns: [String] = []
         let targets = items.filter { selection.contains($0.id) && $0.policy != .readOnly }
 
-        for item in targets {
+        // 先清理原有废纸篓，再移入本次可恢复的项目。
+        for item in StorageItem.cleanupOrder(targets) {
             if let command = item.command {
                 cleaningLabel = item.title
                 let result = await CommandRunner.run(command[0], Array(command.dropFirst()), timeout: 120)
@@ -218,6 +224,7 @@ final class StorageService: ObservableObject {
                 let outcome = await Task.detached(priority: .userInitiated) {
                     permanent ? Self.removeChildren(of: path) : Self.trashChildren(of: path)
                 }.value
+                if permanent { emptiedCount += outcome.moved }
                 moved += outcome.moved
                 failed += outcome.failed
             }
@@ -241,7 +248,7 @@ final class StorageService: ObservableObject {
         volume = await readInBackground { Self.readVolume() }
         let emptied = targets.contains(where: \.permanentlyDeletes)
         status = failed == 0
-            ? (emptied ? TF("已清空 %d 项（废纸篓中的项目无法恢复）", moved)
+            ? (emptied ? TF("已清空废纸篓中的 %d 项，另有 %d 项已移入废纸篓", emptiedCount, moved - emptiedCount)
                        : TF("已把 %d 项移到废纸篓，随时可以在废纸篓里放回", moved))
             : TF("已处理 %d 项，%d 项失败（可能正在被使用）", moved, failed)
         lastScan = Date()

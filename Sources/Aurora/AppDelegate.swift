@@ -14,6 +14,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var fileLockNoticeController: FileLockNoticeWindowController?
     private var logitechSetupController: LogitechSetupWindowController?
     private var workspaceObservers: [NSObjectProtocol] = []
+    private lazy var termination = ApplicationTermination(prepare: { [unowned self] in
+        let wasVisible = panelController.isVisible
+        panelController.hide(reason: "quit", force: true)
+        do {
+            try await state.systemProxy.restoreForTermination()
+            await RecorderService.shared.finishForTermination()
+            try ZoomTimelineWindow.savePendingEdits()
+            try state.updates.handOffPendingInstall()
+        } catch {
+            state.updates.cancelPendingInstall(error)
+            if wasVisible { panelController.show(relativeTo: statusItem.button) }
+            throw error
+        }
+        await state.logitech.shutdownForTermination()
+    }, reportError: { error in
+        let alert = NSAlert()
+        alert.messageText = T("暂时无法退出 Aurora")
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: T("好"))
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    })
     let state = AppState()
     private lazy var contextMenu: NSMenu = {
         let menu = NSMenu()
@@ -116,7 +138,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // 每小时检查一次更新（已发过 release 才有意义，拉不到就静默失败）
-        state.updates.start()
+        state.onConfirmedQuit = { [weak self] in self?.termination.begin() }
+        state.updates.requestTermination = state.onConfirmedQuit
+        state.updates.didLaunch()
 
         // 节能定时结束后给一条系统通知
         NotificationCenter.default.addObserver(
@@ -190,6 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        UpdateInstaller.acknowledgeLaunch()
     }
 
     private func observeSystemSleep() {
@@ -362,21 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        Task { @MainActor in
-            do {
-                try await state.systemProxy.restoreForTermination()
-                sender.reply(toApplicationShouldTerminate: true)
-            } catch {
-                let alert = NSAlert()
-                alert.messageText = T("暂时无法退出 Aurora")
-                alert.informativeText = T("请先完成网络操作或恢复原代理配置，避免退出后无法联网。")
-                alert.addButton(withTitle: T("好"))
-                sender.activate(ignoringOtherApps: true)
-                alert.runModal()
-                sender.reply(toApplicationShouldTerminate: false)
-            }
-        }
-        return .terminateLater
+        termination.systemRequest()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -384,7 +395,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         workspaceObservers.forEach(center.removeObserver)
         workspaceObservers.removeAll()
         // 拆除按应用音量的 tap，避免退出瞬间把正在播放的声音吞掉
-        state.logitech.shutdown()
         state.appAudio.shutdown()
         // 还原软件调光，别把桌面留在被压暗的状态
         state.display.shutdown()

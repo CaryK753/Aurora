@@ -2,7 +2,7 @@ import AppKit
 import ScreenCaptureKit
 
 struct RecorderSource: Identifiable, Equatable {
-    enum Kind: String { case display, window, area }
+    enum Kind: String { case display, window, area, mobile }
     let id: String
     let kind: Kind
     let title: String
@@ -12,5 +12,5 @@ struct RecorderSource: Identifiable, Equatable {
     /// 区域录制：全局 NS 坐标矩形
     var rect: CGRect?
 
-    var supportsSystemAudio: Bool { kind != .window }
+    var supportsSystemAudio: Bool { kind == .display || kind == .area }
 }

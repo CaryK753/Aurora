@@ -25,7 +25,7 @@ final class NotificationService: ObservableObject {
         }
     }
 
-    private var canUseSystemAPI: Bool { Bundle.main.bundleIdentifier != nil }
+    private var canUseSystemAPI: Bool { Bundle.main.bundleURL.pathExtension == "app" && Bundle.main.bundleIdentifier != nil }
 
     private init() {
         enabled = UserDefaults.standard.object(forKey: "notify.enabled") as? Bool ?? true

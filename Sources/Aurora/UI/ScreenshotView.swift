@@ -44,7 +44,7 @@ struct ScreenshotView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(T("截图"))
                             .font(.system(size: 13, weight: .semibold))
-                        Text(T("选区标注、马赛克、滚动长截图、Apple 官方设备外壳"))
+                        Text(T("选区标注、马赛克、滚动长截图、设备外壳"))
                             .font(.system(size: 9.5))
                             .foregroundStyle(.secondary)
                     }
@@ -77,6 +77,9 @@ struct ScreenshotView: View {
                             .fill(AuroraTheme.warn.opacity(0.1))
                     }
                 }
+
+                Toggle(T("截图包含 Aurora 窗口"), isOn: $frames.includeAurora)
+                    .toggleStyle(.switch).controlSize(.small)
 
                 HStack(spacing: 8) {
                     captureButton(
@@ -121,6 +124,48 @@ struct ScreenshotView: View {
         .buttonStyle(.plain)
     }
 
+    private func importForFraming() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            let image = await Task.detached { ScreenshotService.importImage(url) }.value
+            guard let image else {
+                NSAlert(error: CocoaError(.fileReadCorruptFile)).runModal()
+                return
+            }
+            ScreenshotSession.shared.presentEditor(image: image, chooseFrame: true)
+        }
+    }
+
+    private func importDeviceFrame() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.png]
+        panel.allowsMultipleSelection = true
+        panel.message = T("选择带透明屏幕开孔的外壳 PNG")
+        guard panel.runModal() == .OK else { return }
+        let urls = panel.urls
+        Task {
+            let (added, failed) = await Task.detached {
+                var added: [DeviceFrame] = []
+                var failed: [String] = []
+                for url in urls {
+                    do { added.append(try autoreleasepool { try ImportedDeviceFrames.importPNG(url) }) }
+                    catch { failed.append(url.lastPathComponent) }
+                }
+                return (added, failed)
+            }.value
+            for frame in added { frames.registerImportedFrame(frame) }
+            if !added.isEmpty { showsAllFrames = true }
+            if !failed.isEmpty {
+                let alert = NSAlert()
+                alert.messageText = T("无法导入外壳 PNG")
+                alert.informativeText = failed.joined(separator: "\n")
+                alert.runModal()
+            }
+        }
+    }
+
     // MARK: 外壳库
 
     private var framesCard: some View {
@@ -134,6 +179,14 @@ struct ScreenshotView: View {
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
+
+                HStack {
+                    Button(T("打开图片并套壳…")) { importForFraming() }
+                    Button(T("导入外壳 PNG…")) { importDeviceFrame() }
+                    Link(T("Apple 产品外壳"), destination: URL(string: "https://developer.apple.com/design/resources/#product-bezels")!)
+                        .font(.caption)
+                }
+                .buttonStyle(SoftButtonStyle())
 
                 if frames.frames.isEmpty {
                     Text(T("没有内置外壳，请检查应用完整性"))
@@ -189,8 +242,7 @@ struct ScreenshotView: View {
                     .fill(Color.primary.opacity(0.07))
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.8)
-                if let url = ScreenshotService.resourceURL(frame.id + ".png"),
-                   let thumb = NSImage(contentsOf: url) {
+                if let thumb = frames.thumbnail(frame) {
                     Image(nsImage: thumb)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
@@ -274,8 +326,7 @@ struct ScreenshotView: View {
 
     private func frameCard(_ frame: DeviceFrame) -> some View {
         VStack(spacing: 5) {
-            if let url = ScreenshotService.resourceURL(frame.id + ".png"),
-               let thumb = NSImage(contentsOf: url) {
+            if let thumb = frames.thumbnail(frame) {
                 Image(nsImage: thumb)
                     .resizable()
                     .aspectRatio(contentMode: .fit)

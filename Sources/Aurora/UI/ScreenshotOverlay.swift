@@ -18,6 +18,7 @@ final class ScreenshotSession {
     private var editor: EditorWindow?
     /// 长截图：固定捕获区域 + 已捕获的分段
     private var stitchRect: CGRect?
+    private var includeAurora = false
     private var segments: [CGImage] = []
     /// 覆盖层显示期间的 Esc 监听：边框窗口不一定会成为 key window，
     /// 只靠 NSWindow.keyDown 收不到 Esc（这是之前「按 Esc 没反应」的主因）
@@ -41,7 +42,7 @@ final class ScreenshotSession {
         hidePanelIfVisible()
         Task { @MainActor in
             // 先取一次可选窗口列表（点窗口直接截整个 App 窗口）
-            let windows = await ScreenshotService.selectableWindows()
+            let windows = await ScreenshotService.selectableWindows(includeAurora: includeAurora)
             guard isCapturing == false else { return }
             installEscapeMonitor()
             overlays = NSScreen.screens.map { screen in
@@ -72,14 +73,15 @@ final class ScreenshotSession {
         Task { @MainActor in
             // 等主面板收起、覆盖层消失
             try? await Task.sleep(nanoseconds: 320_000_000)
-            guard let image = await ScreenshotService.capture(rect: screen.frame) else { return }
+            guard let image = await ScreenshotService.capture(rect: screen.frame, includeAurora: includeAurora) else { return }
             self.presentEditor(image: image)
         }
     }
 
     private func hidePanelIfVisible() {
         // 主面板开着的时候截图，会把自己截进去
-        auroraDelegate?.panelWillCaptureScreenshot()
+        includeAurora = ScreenshotService.shared.includeAurora
+        if !includeAurora { auroraDelegate?.panelWillCaptureScreenshot() }
     }
 
     private func commitSelection(_ rect: CGRect, longMode: Bool) {
@@ -89,7 +91,7 @@ final class ScreenshotSession {
         // 等覆盖层真正离开屏幕再采
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 260_000_000)
-            guard let image = await ScreenshotService.capture(rect: rect) else {
+            guard let image = await ScreenshotService.capture(rect: rect, includeAurora: includeAurora) else {
                 self.cancel()
                 return
             }
@@ -154,7 +156,7 @@ final class ScreenshotSession {
         stitchBar = nil
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 300_000_000)
-            guard let image = await ScreenshotService.capture(rect: rect) else { return }
+            guard let image = await ScreenshotService.capture(rect: rect, includeAurora: includeAurora) else { return }
             self.segments.append(image)
             self.showStitchBar()
         }
@@ -178,9 +180,9 @@ final class ScreenshotSession {
 
     // MARK: 编辑器
 
-    func presentEditor(image: CGImage) {
+    func presentEditor(image: CGImage, chooseFrame: Bool = false) {
         editor?.close()
-        let window = EditorWindow(image: image)
+        let window = EditorWindow(image: image, chooseFrame: chooseFrame)
         editor = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -282,7 +284,10 @@ struct SelectionOverlayView: View {
         let scPoint = CGPoint(x: windowFrame.minX + local.x, y: screenSCTop + local.y)
         let hit = windows
             .filter { $0.frame.contains(scPoint) }
-            .min { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+            .min { lhs, rhs in
+                if lhs.layer != rhs.layer { return lhs.layer > rhs.layer }
+                return lhs.frame.width * lhs.frame.height < rhs.frame.width * rhs.frame.height
+            }
         guard let hit else { return nil }
         let rect = CGRect(
             x: hit.frame.minX - windowFrame.minX,

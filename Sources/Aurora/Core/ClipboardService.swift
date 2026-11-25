@@ -192,6 +192,8 @@ final class ClipboardService: ObservableObject {
     @Published private(set) var ignoredPatterns: [String] = []
     @Published private(set) var byteTotal: Int = 0
 
+    private let pasteboard: NSPasteboard
+    private let defaults: UserDefaults
     private var moduleEnabled = true
     private var timer: Timer?
     private var lastChangeCount: Int = 0
@@ -235,8 +237,10 @@ final class ClipboardService: ObservableObject {
         }
     }
 
-    init() {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    init(pasteboard: NSPasteboard = .general, defaults: UserDefaults = .standard, supportDirectory: URL? = nil) {
+        self.pasteboard = pasteboard
+        self.defaults = defaults
+        let support = supportDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Aurora", isDirectory: true)
         historyURL = support.appendingPathComponent("clipboard.sqlite3")
         imageDir = support.appendingPathComponent("clips", isDirectory: true)
@@ -244,7 +248,6 @@ final class ClipboardService: ObservableObject {
         try? FileManager.default.createDirectory(at: imageDir, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: rtfDir, withIntermediateDirectories: true)
 
-        let defaults = UserDefaults.standard
         isEnabled = defaults.object(forKey: "clipboard.enabled") as? Bool ?? true
         limit = defaults.object(forKey: "clipboard.limit") as? Int ?? 100
         dedupe = defaults.object(forKey: "clipboard.dedupe") as? Bool ?? true
@@ -268,7 +271,7 @@ final class ClipboardService: ObservableObject {
         } catch {
             reportStorageError()
         }
-        lastChangeCount = NSPasteboard.general.changeCount
+        lastChangeCount = pasteboard.changeCount
         if isEnabled { start() }
     }
 
@@ -277,8 +280,9 @@ final class ClipboardService: ObservableObject {
     // MARK: - 轮询
 
     func setEnabled(_ enabled: Bool) {
+        if enabled && !isEnabled { lastChangeCount = pasteboard.changeCount }
         isEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "clipboard.enabled")
+        defaults.set(enabled, forKey: "clipboard.enabled")
         if enabled && moduleEnabled { start() } else { timer?.invalidate(); timer = nil }
     }
 
@@ -303,7 +307,7 @@ final class ClipboardService: ObservableObject {
 
     func setModuleEnabled(_ enabled: Bool) {
         moduleEnabled = enabled
-        lastChangeCount = NSPasteboard.general.changeCount
+        lastChangeCount = pasteboard.changeCount
         if enabled && isEnabled { start() } else { timer?.invalidate(); timer = nil }
     }
 
@@ -320,10 +324,9 @@ final class ClipboardService: ObservableObject {
         if secure != isPausedBySecureInput { isPausedBySecureInput = secure }
         guard !secure else {
             // 安全输入期间只同步 changeCount，不落库
-            lastChangeCount = NSPasteboard.general.changeCount
+            lastChangeCount = pasteboard.changeCount
             return
         }
-        let pasteboard = NSPasteboard.general
         guard pasteboard.changeCount != lastChangeCount else { return }
         lastChangeCount = pasteboard.changeCount
         capture(from: pasteboard)
@@ -361,10 +364,7 @@ final class ClipboardService: ObservableObject {
         }
 
         // 图片
-        if captureImages,
-           let data = pasteboard.data(forType: .png) ?? pasteboard.data(forType: .tiff),
-           let image = NSImage(data: data) {
-            guard let png = pngData(from: image) else { return }
+        if captureImages, let png = Self.imagePNG(from: pasteboard) {
             let name = "\(UUID().uuidString).png"
             let url = imageDir.appendingPathComponent(name)
             guard (try? png.write(to: url)) != nil else { return }
@@ -481,7 +481,6 @@ final class ClipboardService: ObservableObject {
     @discardableResult
     func copy(_ item: ClipItem, plainText: Bool = false) -> Bool {
         guard let current = self.item(with: item.id) else { return false }
-        let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         switch current.kind {
         case .text, .link:
@@ -510,7 +509,6 @@ final class ClipboardService: ObservableObject {
 
     func copyPlainText(_ item: ClipItem) {
         guard let item = self.item(with: item.id) else { return }
-        let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(item.text, forType: .string)
         lastChangeCount = pasteboard.changeCount
@@ -600,13 +598,13 @@ final class ClipboardService: ObservableObject {
     func ignoreApp(bundle: String, name: String) {
         guard !bundle.isEmpty, !ignoredApps.contains(bundle) else { return }
         ignoredApps.append(bundle)
-        UserDefaults.standard.set(ignoredApps, forKey: "clipboard.ignoredApps")
+        defaults.set(ignoredApps, forKey: "clipboard.ignoredApps")
         // Ignoring an app is forward-only; it does not implicitly delete history.
     }
 
     func removeIgnoredApp(_ bundle: String) {
         ignoredApps.removeAll { $0 == bundle }
-        UserDefaults.standard.set(ignoredApps, forKey: "clipboard.ignoredApps")
+        defaults.set(ignoredApps, forKey: "clipboard.ignoredApps")
     }
 
     @discardableResult
@@ -615,13 +613,13 @@ final class ClipboardService: ObservableObject {
         guard !trimmed.isEmpty, (try? NSRegularExpression(pattern: trimmed)) != nil else { return false }
         guard !ignoredPatterns.contains(trimmed) else { return true }
         ignoredPatterns.append(trimmed)
-        UserDefaults.standard.set(ignoredPatterns, forKey: "clipboard.ignoredPatterns")
+        defaults.set(ignoredPatterns, forKey: "clipboard.ignoredPatterns")
         return true
     }
 
     func removeIgnorePattern(_ pattern: String) {
         ignoredPatterns.removeAll { $0 == pattern }
-        UserDefaults.standard.set(ignoredPatterns, forKey: "clipboard.ignoredPatterns")
+        defaults.set(ignoredPatterns, forKey: "clipboard.ignoredPatterns")
     }
 
     // MARK: - 文件
@@ -674,10 +672,15 @@ final class ClipboardService: ObservableObject {
         }
     }
 
-    private func pngData(from image: NSImage) -> Data? {
-        guard let tiff = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff) else { return nil }
-        return rep.representation(using: .png, properties: [:])
+    static func imagePNG(from pasteboard: NSPasteboard) -> Data? {
+        if let png = pasteboard.data(forType: .png),
+           let source = CGImageSourceCreateWithData(png as CFData, nil),
+           CGImageSourceGetType(source) as String? == "public.png", CGImageSourceGetCount(source) > 0 {
+            return png
+        }
+        guard let tiff = pasteboard.data(forType: .tiff),
+              let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
+        return bitmap.representation(using: .png, properties: [:])
     }
 
     private func sha256(_ data: Data) -> String {
@@ -687,7 +690,6 @@ final class ClipboardService: ObservableObject {
     // MARK: - 持久化
 
     private func persistSettings() {
-        let defaults = UserDefaults.standard
         defaults.set(limit, forKey: "clipboard.limit")
         defaults.set(dedupe, forKey: "clipboard.dedupe")
         defaults.set(captureText, forKey: "clipboard.captureText")

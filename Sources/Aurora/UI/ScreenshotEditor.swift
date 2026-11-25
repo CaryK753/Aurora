@@ -1,6 +1,6 @@
 //  ScreenshotEditor.swift
 //  Aurora — 截图编辑器：画笔 / 箭头 / 矩形 / 椭圆 / 文字 / 马赛克，
-//  复制 / 保存 / 带壳截图（Apple 官方外壳，按设备自动推荐）。
+//  复制 / 保存 / 带壳截图（按设备自动推荐）。
 //
 //  渲染全部走 SwiftUI Canvas（含像素化马赛克），导出用 ImageRenderer 按
 //  原图像素密度重绘，所见即所得。
@@ -11,12 +11,13 @@ import SwiftUI
 // MARK: - 窗口
 
 final class EditorWindow: NSWindow {
-    init(image: CGImage) {
+    init(image: CGImage, chooseFrame: Bool = false) {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let maxW = screen.width * 0.82
         let maxH = (screen.height - 120) * 0.92
         let scale = min(maxW / CGFloat(image.width), maxH / CGFloat(image.height), 1)
-        let size = CGSize(width: CGFloat(image.width) * scale, height: CGFloat(image.height) * scale)
+        let size = CGSize(width: min(maxW, max(480, CGFloat(image.width) * scale)),
+                          height: min(maxH, max(320, CGFloat(image.height) * scale)))
 
         super.init(
             contentRect: NSRect(origin: .zero, size: size),
@@ -37,7 +38,7 @@ final class EditorWindow: NSWindow {
         glass.tintColor = NSColor.white.withAlphaComponent(0.03)
         glass.autoresizingMask = [.width, .height]
 
-        let hosting = TransparentHostingView(rootView: ScreenshotEditorView(image: image, window: self))
+        let hosting = TransparentHostingView(rootView: ScreenshotEditorView(image: image, window: self, chooseFrame: chooseFrame))
         hosting.safeAreaRegions = []
         hosting.frame = bounds
         hosting.autoresizingMask = [.width, .height]
@@ -91,6 +92,8 @@ enum AnnotationTool: String, CaseIterable, Identifiable {
         case .text: return T("文字")
         }
     }
+
+    var supportsSquare: Bool { self == .ellipse || self == .rect || self == .filledRect }
 
     /// 需要按住拖拽来绘制的工具（其余是点击放置或选择）
     var isDrawingTool: Bool {
@@ -146,6 +149,7 @@ struct ScreenshotEditorView: View {
     @State private var pendingTextPoint: CGPoint?
     @State private var draftText = ""
     @State private var showFramePicker = false
+    @State private var showImportedFramePicker = false
     @State private var showContinuity = false
     /// 正在绘制的草稿（AppKit 鼠标跟踪回传，画布实时渲染）
     @State private var draft: Annotation?
@@ -156,10 +160,11 @@ struct ScreenshotEditorView: View {
     /// 高斯模糊底图（首次用到模糊工具时生成）
     @State private var blurred: CGImage?
 
-    init(image: CGImage, window: NSWindow) {
+    init(image: CGImage, window: NSWindow, chooseFrame: Bool = false) {
+        _showImportedFramePicker = State(initialValue: chooseFrame)
         self.image = image
         self.window = window
-        _pixelated = State(initialValue: Self.pixelate(image, factor: 14))
+
     }
 
     var body: some View {
@@ -176,6 +181,13 @@ struct ScreenshotEditorView: View {
                 .keyboardShortcut("z", modifiers: .command)
             Button { redo() } label: { EmptyView() }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
+        }
+        .sheet(isPresented: $showImportedFramePicker) {
+            VStack {
+                framePicker
+                Button(T("取消")) { showImportedFramePicker = false }
+                    .keyboardShortcut(.cancelAction)
+            }.padding(.bottom)
         }
         .onExitCommand { window?.close() }
     }
@@ -277,8 +289,13 @@ struct ScreenshotEditorView: View {
             HStack(spacing: 7) {
                 ForEach(AnnotationTool.allCases) { candidate in
                     Button {
+                        if candidate == .mosaic && pixelated == nil {
+                            pixelated = Self.pixelate(image, factor: 14)
+                            guard pixelated != nil else { return }
+                        }
+                        if candidate == .blur { ensureBlurred(); guard blurred != nil else { return } }
                         tool = candidate
-                        if candidate == .blur { ensureBlurred() }
+
                     } label: {
                         Image(systemName: candidate.symbol)
                             .font(.system(size: 11, weight: .medium))
@@ -290,7 +307,7 @@ struct ScreenshotEditorView: View {
                             }
                     }
                     .buttonStyle(.plain)
-                    .help(candidate.title)
+                    .help(candidate.supportsSquare ? candidate.title + " · " + T("按住 Shift 锁定宽高比") : candidate.title)
                     .accessibilityLabel(candidate.title)
                 }
 
@@ -337,10 +354,10 @@ struct ScreenshotEditorView: View {
             } label: {
                 Image(systemName: "arrow.uturn.backward")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(annotations.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.secondary))
+                    .foregroundStyle(undoStack.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.secondary))
             }
             .buttonStyle(.plain)
-            .disabled(annotations.isEmpty)
+            .disabled(undoStack.isEmpty)
             .help(T("撤销"))
 
             Button {
@@ -408,6 +425,8 @@ struct ScreenshotEditorView: View {
                 .background(Capsule().fill(Color.primary.opacity(0.06)))
             }
             .buttonStyle(.plain)
+
+            .keyboardShortcut("s", modifiers: .command)
 
             Button {
                 copyToPasteboard()
@@ -496,9 +515,7 @@ struct ScreenshotEditorView: View {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("Aurora Markup \(Int(Date().timeIntervalSince1970)).png")
         guard let composed = renderComposed(),
-              let tiff = composed.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: .png, properties: [:]) else { return }
+              let png = NSBitmapImageRep(cgImage: composed).representation(using: .png, properties: [:]) else { return }
         do {
             try png.write(to: url)
         } catch { return }
@@ -521,9 +538,6 @@ struct ScreenshotEditorView: View {
             HStack(spacing: 5) {
                 SectionLabel(text: T("设备外壳"), symbol: "iphone.gen3")
                 Spacer()
-                Text(T("Apple 官方 Product Bezels"))
-                    .font(.system(size: 8))
-                    .foregroundStyle(.tertiary)
             }
 
             let frames = ScreenshotService.shared.frames
@@ -555,12 +569,12 @@ struct ScreenshotEditorView: View {
 
     private func frameRow(_ frame: DeviceFrame, badge: String?) -> some View {
         Button {
-            applyFrame(frame)
             showFramePicker = false
+            showImportedFramePicker = false
+            applyFrame(frame)
         } label: {
             HStack(spacing: 8) {
-                if let url = ScreenshotService.resourceURL(frame.id + ".png"),
-                   let thumb = NSImage(contentsOf: url) {
+                if let thumb = ScreenshotService.shared.thumbnail(frame) {
                     Image(nsImage: thumb)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
@@ -651,30 +665,31 @@ struct ScreenshotEditorView: View {
     }
 
     /// 当前画布（底图 + 标注）渲染为原图分辨率
-    private func renderComposed() -> NSImage? {
+    private func renderComposed() -> CGImage? {
+        if annotations.isEmpty { return image }
         let view = EditorCanvasView(
             image: image,
             pixelated: pixelated,
             blurred: blurred,
             annotations: annotations,
             draft: nil,
-            selectedID: nil
+            selectedID: nil,
+            showsBorder: false
         )
         let renderer = ImageRenderer(content: view.aspectRatio(aspectRatio, contentMode: .fit))
         renderer.scale = CGFloat(image.width) / max(1, 900)
         renderer.proposedSize = ProposedViewSize(width: 900, height: 900 / aspectRatio)
-        return renderer.nsImage
+        return renderer.cgImage
     }
 
     private func copyToPasteboard() {
         guard let composed = renderComposed() else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.writeObjects([composed])
+        guard NSPasteboard.general.writeObjects([NSImage(cgImage: composed, size: .zero)]) else { return }
         auroraDelegate?.state.showToast(T("已复制到剪贴板"), symbol: "checkmark.circle.fill")
     }
 
     private func save() {
-        guard let composed = renderComposed() else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         let formatter = DateFormatter()
@@ -682,20 +697,23 @@ struct ScreenshotEditorView: View {
         panel.nameFieldStringValue = "Aurora 截图 \(formatter.string(from: Date())).png"
         panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let tiff = composed.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: .png, properties: [:]) else { return }
-        try? png.write(to: url)
+        guard let composed = renderComposed(),
+              let png = NSBitmapImageRep(cgImage: composed).representation(using: .png, properties: [:]) else {
+            NSAlert(error: CocoaError(.fileWriteUnknown)).runModal()
+            return
+        }
+        do { try png.write(to: url, options: .atomic) }
+        catch {
+            NSAlert(error: error).runModal()
+            return
+        }
         auroraDelegate?.state.showToast(TF("已保存 · %@", url.lastPathComponent), symbol: "square.and.arrow.down.fill")
         NotificationService.shared.notifyScreenshotSaved(name: url.lastPathComponent)
     }
 
     private func applyFrame(_ frame: DeviceFrame) {
         guard let composed = renderComposed() else { return }
-        guard let tiff = composed.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let cg = rep.cgImage,
-              let framed = ScreenshotService.compose(image: cg, frame: frame) else { return }
+        guard let framed = ScreenshotService.compose(image: composed, frame: frame) else { return }
         annotations = []
         undoStack = []
         redoStack = []
@@ -705,16 +723,16 @@ struct ScreenshotEditorView: View {
         ScreenshotSession.shared.presentEditor(image: framed)
     }
 
-    /// 首次使用模糊工具时生成高斯模糊底图（CIGaussianClamp，边缘不泛白）
+    /// 首次使用模糊工具时生成高斯模糊底图（CIGaussianBlur，边缘不泛白）
     private func ensureBlurred() {
         guard blurred == nil, let blurredImage = Self.gaussianBlur(image, radius: 12) else { return }
         blurred = blurredImage
     }
 
-    nonisolated private static func gaussianBlur(_ image: CGImage, radius: Double) -> CGImage? {
+    nonisolated static func gaussianBlur(_ image: CGImage, radius: Double) -> CGImage? {
         let ciImage = CIImage(cgImage: image)
-        guard let filter = CIFilter(name: "CIGaussianClamp") else { return nil }
-        filter.setValue(ciImage, forKey: kCIInputImageKey)
+        guard let filter = CIFilter(name: "CIGaussianBlur") else { return nil }
+        filter.setValue(ciImage.clampedToExtent(), forKey: kCIInputImageKey)
         filter.setValue(radius, forKey: kCIInputRadiusKey)
         guard let output = filter.outputImage else { return nil }
         let context = CIContext(options: [.useSoftwareRenderer: false])
@@ -755,6 +773,7 @@ struct EditorCanvasView: View {
     var draft: Annotation? = nil
     /// 选择模式下高亮的标注（导出传 nil）
     var selectedID: UUID? = nil
+    var showsBorder = true
 
     var body: some View {
         GeometryReader { geo in
@@ -813,7 +832,7 @@ struct EditorCanvasView: View {
             }
             .clipShape(Rectangle())
             .overlay {
-                Rectangle().strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.7)
+                if showsBorder { Rectangle().strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.7) }
             }
         }
         .aspectRatio(CGFloat(image.width) / CGFloat(image.height), contentMode: .fit)
@@ -962,8 +981,9 @@ struct EditorCanvasView: View {
 
     /// 两点工具（矩形 / 模糊 / 聚光灯）的矩形区域
     private func regionRect(_ stroke: Stroke, in size: CGSize) -> CGRect {
-        let a = CGPoint(x: stroke.points[0].x * size.width, y: stroke.points[0].y * size.height)
-        let b = CGPoint(x: stroke.points[1].x * size.width, y: stroke.points[1].y * size.height)
+        guard let first = stroke.points.first, let last = stroke.points.last else { return .zero }
+        let a = CGPoint(x: first.x * size.width, y: first.y * size.height)
+        let b = CGPoint(x: last.x * size.width, y: last.y * size.height)
         return CGRect(
             x: min(a.x, b.x), y: min(a.y, b.y),
             width: abs(b.x - a.x), height: abs(b.y - a.y)
@@ -1088,6 +1108,17 @@ final class CanvasMouseNSView: NSView {
         }
     }
 
+    nonisolated static func squareEnd(from start: CGPoint, toward end: CGPoint, size: CGSize) -> CGPoint {
+        guard size.width > 0, size.height > 0 else { return start }
+        let dx = (end.x - start.x) * size.width
+        let dy = (end.y - start.y) * size.height
+        let roomX = (dx < 0 ? start.x : 1 - start.x) * size.width
+        let roomY = (dy < 0 ? start.y : 1 - start.y) * size.height
+        let side = min(max(abs(dx), abs(dy)), roomX, roomY)
+        return CGPoint(x: start.x + (dx < 0 ? -side : side) / size.width,
+                       y: start.y + (dy < 0 ? -side : side) / size.height)
+    }
+
     override func mouseDragged(with event: NSEvent) {
         guard let rep = representable else { return }
         let p = convert(event.locationInWindow, from: nil)
@@ -1095,13 +1126,18 @@ final class CanvasMouseNSView: NSView {
         switch drag {
         case .drawing:
             switch rep.tool {
-            case .pen, .highlighter, .mosaic, .blur, .spotlight:
+            case .pen, .highlighter, .mosaic:
                 // 手绘：原地微抖不加点，笔画才顺滑
                 if let last = livePoints.last, hypot(n.x - last.x, n.y - last.y) < 0.0015 { return }
                 livePoints.append(n)
             default:
                 // 直线 / 箭头 / 矩形 / 椭圆：始终是 [起点, 当前点]
-                livePoints = [livePoints[0], n]
+                let start = livePoints[0]
+                if rep.tool.supportsSquare && event.modifierFlags.contains(.shift) {
+                    livePoints = [start, Self.squareEnd(from: start, toward: n, size: bounds.size)]
+                } else {
+                    livePoints = [start, n]
+                }
             }
             rep.onDraft(.stroke(Stroke(
                 kind: rep.tool, points: livePoints, color: rep.color, width: rep.strokeWidth
@@ -1171,7 +1207,7 @@ final class CanvasMouseNSView: NSView {
             let center = first
             let radius = 14 + stroke.width + 5
             return hypot(p.x - center.x, p.y - center.y) <= radius
-        case .rect, .filledRect, .ellipse, .spotlight:
+        case .rect, .filledRect, .ellipse, .blur, .spotlight:
             guard points.count > 1 else { return false }
             let a = points[0], b = points[1]
             let rect = CGRect(x: min(a.x, b.x), y: min(a.y, b.y),

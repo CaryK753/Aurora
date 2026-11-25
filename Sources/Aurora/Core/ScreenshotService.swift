@@ -2,7 +2,7 @@
 //  Aurora — 截图：区域捕获、长截图拼接、带壳合成
 //
 //  采集用 CGWindowListCreateImage（需要屏幕录制权限）；长截图是「滚动 + 逐屏
-//  捕获 + 重叠行匹配拼接」；带壳用 Apple 官方 Product Bezels（PNG + 屏幕
+//  捕获 + 重叠行匹配拼接」；带壳用设备外壳（PNG + 屏幕
 //  矩形清单内置在 Resources/DeviceFrames），按截图比例与 Mac 型号自动推荐。
 
 import AppKit
@@ -13,7 +13,7 @@ import ImageIO
 
 // MARK: - 设备外壳
 
-struct DeviceFrame: Identifiable, Equatable {
+struct DeviceFrame: Identifiable, Equatable, Codable, Sendable {
     let id: String          // 文件名去扩展名
     let device: String      // 显示名
     let category: String    // mac / iphone
@@ -36,6 +36,10 @@ struct DeviceFrame: Identifiable, Equatable {
 @MainActor
 final class ScreenshotService: ObservableObject {
     static let shared = ScreenshotService()
+
+    @Published var includeAurora = UserDefaults.standard.bool(forKey: "screenshot.includeAurora") {
+        didSet { UserDefaults.standard.set(includeAurora, forKey: "screenshot.includeAurora") }
+    }
 
     // MARK: 外壳库
 
@@ -141,7 +145,27 @@ final class ScreenshotService: ObservableObject {
                 screen: CGRect(x: rect[0], y: rect[1], width: rect[2], height: rect[3])
             )
         }
+        frames += ImportedDeviceFrames.list()
         Debug.log("device frames: \(frames.count) 款（清单 \(list.count) 项）")
+    }
+
+    func registerImportedFrame(_ frame: DeviceFrame) {
+        if !frames.contains(where: { $0.id == frame.id }) { frames.append(frame) }
+    }
+
+    private let thumbnails = NSCache<NSString, NSImage>()
+
+    func thumbnail(_ frame: DeviceFrame) -> NSImage? {
+        let key = frame.id as NSString
+        if let cached = thumbnails.object(forKey: key) { return cached }
+        guard let url = Self.resourceURL(frame.id + ".png"),
+              let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 300
+              ] as CFDictionary) else { return nil }
+        let image = NSImage(cgImage: cg, size: .zero)
+        thumbnails.setObject(image, forKey: key)
+        return image
     }
 
     /// 主 bundle 里的资源（开发期也兼容仓库 Resources 目录）
@@ -152,6 +176,7 @@ final class ScreenshotService: ObservableObject {
     nonisolated static func resourceURL(_ name: String) -> URL? {
         let base = (name as NSString).deletingPathExtension
         let ext = (name as NSString).pathExtension
+        if ext == "png", let imported = ImportedDeviceFrames.imageURL(base) { return imported }
         if let url = Bundle.main.url(forResource: base, withExtension: ext, subdirectory: framesDirectoryName) {
             return url
         }
@@ -250,26 +275,26 @@ final class ScreenshotService: ObservableObject {
         /// 全局坐标（左上原点，与 ScreenCaptureKit 一致）
         let frame: CGRect
         let title: String
+        let layer: Int
         let appName: String
 
         var label: String { title.isEmpty ? appName : "\(appName) — \(title)" }
     }
 
     /// 屏幕上的可选窗口（排除自己、过小窗口与非普通层）
-    nonisolated static func selectableWindows() async -> [SelectableWindow] {
+    nonisolated static func selectableWindows(includeAurora: Bool = false) async -> [SelectableWindow] {
         guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else {
             return []
         }
-        let ownBundle = Bundle.main.bundleIdentifier
         return content.windows.compactMap { window in
-            guard window.windowLayer == 0,
-                  let app = window.owningApplication,
-                  app.bundleIdentifier != ownBundle,
+            guard let app = window.owningApplication,
+                  app.processID == getpid() ? includeAurora : window.windowLayer == 0,
                   window.frame.width >= 120, window.frame.height >= 80 else { return nil }
             return SelectableWindow(
                 id: window.windowID,
                 frame: window.frame,
                 title: window.title ?? "",
+                layer: window.windowLayer,
                 appName: app.applicationName
             )
         }
@@ -277,7 +302,7 @@ final class ScreenshotService: ObservableObject {
 
     /// 捕获屏幕的一个矩形（全局 NS 坐标）。
     /// macOS 15 起 CGWindowListCreateImage 被移除，这里走 ScreenCaptureKit 单帧截图。
-    nonisolated static func capture(rect: CGRect) async -> CGImage? {
+    nonisolated static func capture(rect: CGRect, includeAurora: Bool = false) async -> CGImage? {
         let primaryHeight = NSScreen.screens.first { $0.frame.origin == .zero }?.frame.height
             ?? NSScreen.main?.frame.height ?? 0
         // NS（左下原点）→ CG（左上原点，全屏桌面空间）
@@ -299,7 +324,8 @@ final class ScreenshotService: ObservableObject {
             ?? content.displays.first
         guard let display else { return nil }
 
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let excluded = includeAurora ? [] : content.applications.filter { $0.processID == getpid() }
+        let filter = SCContentFilter(display: display, excludingApplications: excluded, exceptingWindows: [])
         let config = SCStreamConfiguration()
         // sourceRect 是显示器内坐标（点）
         config.sourceRect = CGRect(
@@ -427,6 +453,17 @@ final class ScreenshotService: ObservableObject {
 
     /// 把截图塞进外壳屏幕孔洞：截图等比 fit 进孔洞（居中），外壳盖上。
     /// 全程 CoreGraphics、像素尺寸精确（避免 NSImage lockFocus 被 2x 缩放搞糊）。
+    nonisolated static func importImage(_ url: URL) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int,
+              let height = props[kCGImagePropertyPixelHeight] as? Int else { return nil }
+        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                       kCGImageSourceCreateThumbnailWithTransform: true,
+                                       kCGImageSourceThumbnailMaxPixelSize: max(width, height)]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+    }
+
     nonisolated static func compose(image: CGImage, frame: DeviceFrame) -> CGImage? {
         guard let frameURL = resourceURL(frame.id + ".png"),
               let frameProvider = CGImageSourceCreateWithURL(frameURL as CFURL, nil),

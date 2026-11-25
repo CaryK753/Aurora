@@ -298,12 +298,29 @@ public final class LogitechDeviceService: ObservableObject {
         if moduleEnabled && isAvailable { refreshKnownDevices(); connect() }
     }
 
-    public func shutdown() {
-        timer?.invalidate(); generation += 1; owned.removeAll()
+    private func disconnectForShutdown() -> DispatchGroup {
+        timer?.invalidate()
+        generation += 1
+        moduleEnabled = false
+        owned.removeAll()
         let worker = worker
-        let done = DispatchSemaphore(value: 0)
-        worker.queue.async { worker.disconnect(); done.signal() }
-        _ = done.wait(timeout: .now() + 3)
+        let group = DispatchGroup()
+        worker.queue.async(group: group) { worker.disconnect() }
+        return group
+    }
+
+    public func shutdown() {
+        _ = disconnectForShutdown().wait(timeout: .now() + 3)
+    }
+
+    public func shutdownForTermination() async {
+        let group = disconnectForShutdown()
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                _ = group.wait(timeout: .now() + 3)
+                continuation.resume()
+            }
+        }
     }
     public func refresh() {
         perform { worker in _ = worker.refresh() }
