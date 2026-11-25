@@ -3,36 +3,66 @@ import ImageIO
 import XCTest
 @testable import Aurora
 
-/// 设备外壳清单的完整性：清单里列到的每一张 PNG 都要在仓库里，尺寸要对得上，
-/// 屏幕孔洞要落在画布内。少一张 = 装机后少一款外壳（Bundle 不递归找子目录）。
+/// 设备外壳清单：内置款的 PNG 要在 `Resources/DeviceFrames/`，
+/// 按需下载款的整图要在仓库 `FrameLibrary/`（装机后从这个目录下载），
+/// 两款都要有 320px 缩略图，清单里的尺寸和孔洞要对得上。
 final class DeviceFrameManifestTests: XCTestCase {
-    private var directory: URL {
+    private var repo: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // AuroraWorkflow
             .deletingLastPathComponent()   // Tests
             .deletingLastPathComponent()   // 仓库根
-            .appendingPathComponent("Resources/DeviceFrames", isDirectory: true)
     }
+
+    private var directory: URL { repo.appendingPathComponent("Resources/DeviceFrames", isDirectory: true) }
+    private var library: URL { repo.appendingPathComponent("FrameLibrary", isDirectory: true) }
 
     private func entries() throws -> [[String: Any]] {
         let data = try Data(contentsOf: directory.appendingPathComponent("frames.json"))
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
     }
 
-    func testEveryManifestEntryHasItsImage() throws {
+    private func image(at url: URL) throws -> CGImage {
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil), "读不到 \(url.lastPathComponent)")
+        return try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil), "解不开 \(url.lastPathComponent)")
+    }
+
+    func testEveryManifestEntryHasAnImage() throws {
         let list = try entries()
         XCTAssertGreaterThanOrEqual(list.count, 20, "外壳库应该覆盖 Apple 全系列")
         var missing: [String] = []
         for entry in list {
-            guard let file = entry["file"] as? String else {
-                XCTFail("清单条目缺少 file：\(entry)")
-                continue
-            }
-            if !FileManager.default.fileExists(atPath: directory.appendingPathComponent(file).path) {
-                missing.append(file)
+            let file = try XCTUnwrap(entry["file"] as? String)
+            let remote = entry["remote"] as? Bool ?? false
+            let url = (remote ? library : directory).appendingPathComponent(file)
+            if !FileManager.default.fileExists(atPath: url.path) {
+                missing.append(remote ? "FrameLibrary/\(file)" : file)
             }
         }
-        XCTAssertTrue(missing.isEmpty, "清单里有 PNG 没进仓库：\(missing.joined(separator: "、"))")
+        XCTAssertTrue(missing.isEmpty, "清单里的图找不到：\(missing.joined(separator: "、"))")
+    }
+
+    /// 大图留在仓库里按需下载，包内只带缩略图 —— 这条守住「别又把 30MB 全塞回包里」
+    func testBulkFramesStayOutOfTheBundle() throws {
+        let list = try entries()
+        let remote = list.filter { $0["remote"] as? Bool ?? false }
+        XCTAssertFalse(remote.isEmpty, "全部打成内置会让安装包涨到 60MB")
+        let bundled = list
+            .filter { !($0["remote"] as? Bool ?? false) }
+            .compactMap { $0["file"] as? String }
+        XCTAssertFalse(bundled.contains("imac-24-blue.png"), "大尺寸机型应该按需下载")
+        XCTAssertTrue(bundled.contains("macbook-pro-14-space-black.png"), "最常见机型要能离线直接用")
+    }
+
+    func testThumbnailsExistAndStaySmall() throws {
+        for entry in try entries() {
+            let file = try XCTUnwrap(entry["file"] as? String)
+            let url = directory.appendingPathComponent("thumbs").appendingPathComponent(file)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "缺缩略图：\(file)")
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            let thumb = try image(at: url)
+            XCTAssertLessThanOrEqual(max(thumb.width, thumb.height), 400, "\(file) 的缩略图太大")
+        }
     }
 
     func testManifestSizesAndScreenOpening() throws {
@@ -49,9 +79,9 @@ final class DeviceFrameManifestTests: XCTestCase {
             let id = (file as NSString).deletingPathExtension
             XCTAssertTrue(ids.insert(id).inserted, "外壳 id 重复：\(id)")
 
-            let url = directory.appendingPathComponent(file)
-            let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil), "读不到 \(file)")
-            let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil), "解不开 \(file)")
+            let remote = entry["remote"] as? Bool ?? false
+            let url = (remote ? library : directory).appendingPathComponent(file)
+            let image = try image(at: url)
             XCTAssertEqual(image.width, width, "\(file) 的清单宽度和实际不符")
             XCTAssertEqual(image.height, height, "\(file) 的清单高度和实际不符")
 
@@ -74,7 +104,7 @@ final class DeviceFrameManifestTests: XCTestCase {
     }
 
     /// 型号名不能重名，否则「换配色」会挑错兄弟款
-    func testDeviceNamesAreUniquePerGeometry() throws {
+    func testDeviceNamesAreUnique() throws {
         var seen = Set<String>()
         for entry in try entries() {
             let device = try XCTUnwrap(entry["device"] as? String)

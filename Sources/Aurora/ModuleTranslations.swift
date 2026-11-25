@@ -773,5 +773,11 @@ enum ModuleTranslations {
         "功能键设置没有写进系统，可改用系统设置里的同名开关": "The function-key setting didn't reach the system — use the same switch in System Settings",
             "系统当前：F1–F12 为标准功能键（已回读确认）": "System: F1–F12 are standard function keys (verified)",
         "系统当前：F1–F12 为亮度、音量等快捷键": "System: F1–F12 act as brightness/volume shortcuts",
+        "正在下载外壳…": "Downloading device frame…",
+        "下载这台机器的外壳": "Download this Mac's frame",
+        "外壳图按需下载，约 1–3 MB": "Frames download on demand, about 1–3 MB",
+        "下载失败，检查网络后重试": "Download failed. Check your network and try again.",
+        "首次使用需下载": "Downloads on first use",
+        "需下载": "Download needed",
     ]
 }

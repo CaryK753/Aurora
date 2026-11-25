@@ -44,6 +44,12 @@ final class ScreenshotService: ObservableObject {
     // MARK: 外壳库
 
     @Published private(set) var frames: [DeviceFrame] = []
+    /// 清单里标了 remote 的外壳：大图不在包里，第一次用的时候从仓库下载
+    @Published private(set) var remoteIDs: Set<String> = []
+    /// 正在下载的外壳 id
+    @Published private(set) var downloadingIDs: Set<String> = []
+    /// 最近一次下载失败的原因（界面给一句人话，不抛异常给用户看）
+    @Published private(set) var downloadFailure: String?
     /// 用户指定的默认外壳；nil 表示跟着本机自动识别
     @Published var preferredFrameID: String? {
         didSet {
@@ -131,17 +137,20 @@ final class ScreenshotService: ObservableObject {
         }
         var loaded: [DeviceFrame] = []
         var missing: [String] = []
+        var remote: Set<String> = []
         for entry in list {
             guard let file = entry["file"] as? String,
                   let w = entry["w"] as? Int,
                   let h = entry["h"] as? Int,
                   let rect = entry["screen"] as? [Int], rect.count == 4 else { continue }
-            // 清单里有、包里却没有：打包时漏了 PNG（Bundle 不递归子目录），这里明确报出来
-            guard Self.resourceURL(file) != nil else {
+            let id = (file as NSString).deletingPathExtension
+            let isRemote = entry["remote"] as? Bool ?? false
+            // 本地外壳必须真的有 PNG；远程外壳只要清单在，缺图就等下载
+            guard isRemote || Self.resourceURL(file) != nil else {
                 missing.append(file)
                 continue
             }
-            let id = (file as NSString).deletingPathExtension
+            if isRemote { remote.insert(id) }
             loaded.append(DeviceFrame(
                 id: id,
                 device: entry["device"] as? String ?? id,
@@ -152,9 +161,53 @@ final class ScreenshotService: ObservableObject {
             ))
         }
         frames = loaded + ImportedDeviceFrames.list()
-        Debug.log("device frames: \(frames.count) 款（清单 \(list.count) 项）")
+        remoteIDs = remote
+        Debug.log("device frames: \(frames.count) 款（清单 \(list.count) 项，远程 \(remote.count) 款）")
         if !missing.isEmpty {
             Debug.log("device frames missing png: \(missing.joined(separator: ", "))")
+        }
+    }
+
+    // MARK: 按需下载
+
+    /// 大图不在包里、也还没下载过
+    func needsDownload(_ frame: DeviceFrame) -> Bool {
+        guard remoteIDs.contains(frame.id) else { return false }
+        return DeviceFrameDownload.cachedURL(frame.id + ".png") == nil
+    }
+
+    func isDownloading(_ frame: DeviceFrame) -> Bool {
+        downloadingIDs.contains(frame.id)
+    }
+
+    /// 能不能马上拿到像素：导入的外壳 / 包内外壳 / 已下载的远程外壳
+    func isReady(_ frame: DeviceFrame) -> Bool {
+        Self.resourceURL(frame.id + ".png") != nil
+    }
+
+    /// 保证外壳可用；需要的话下载一次。返回是否可用
+    @discardableResult
+    func ensureDownloaded(_ frame: DeviceFrame) async -> Bool {
+        if isReady(frame) { return true }
+        guard remoteIDs.contains(frame.id) else { return false }
+        if downloadingIDs.contains(frame.id) {
+            // 同款正在下载，等它落地（缩略图/卡片和编辑器可能同时触发）
+            for _ in 0..<200 where downloadingIDs.contains(frame.id) {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            return isReady(frame)
+        }
+        downloadingIDs.insert(frame.id)
+        downloadFailure = nil
+        defer { downloadingIDs.remove(frame.id) }
+        do {
+            try await DeviceFrameDownload.download(frame.id + ".png")
+            thumbnails.removeObject(forKey: (frame.id + "-thumb") as NSString)
+            return isReady(frame)
+        } catch {
+            downloadFailure = T("下载失败，检查网络后重试")
+            Debug.log("device frame download failed \(frame.id): \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -165,16 +218,19 @@ final class ScreenshotService: ObservableObject {
     private let thumbnails = NSCache<NSString, NSImage>()
 
     func thumbnail(_ frame: DeviceFrame) -> NSImage? {
-        let key = frame.id as NSString
+        let key = (frame.id + "-thumb") as NSString
         if let cached = thumbnails.object(forKey: key) { return cached }
-        guard let url = Self.resourceURL(frame.id + ".png"),
-              let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
-                  kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 300
-              ] as CFDictionary) else { return nil }
-        let image = NSImage(cgImage: cg, size: .zero)
-        thumbnails.setObject(image, forKey: key)
-        return image
+        // 包里的 320px 小图优先：远程外壳没下载也能显示机型，还省掉解码几千像素的大图
+        if let url = Self.thumbnailURL(frame.id) ?? Self.resourceURL(frame.id + ".png"),
+           let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+           let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+               kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 300
+           ] as CFDictionary) {
+            let image = NSImage(cgImage: cg, size: .zero)
+            thumbnails.setObject(image, forKey: key)
+            return image
+        }
+        return nil
     }
 
     /// 主 bundle 里的资源（开发期也兼容仓库 Resources 目录）
@@ -185,7 +241,11 @@ final class ScreenshotService: ObservableObject {
     nonisolated static func resourceURL(_ name: String) -> URL? {
         let base = (name as NSString).deletingPathExtension
         let ext = (name as NSString).pathExtension
-        if ext == "png", let imported = ImportedDeviceFrames.imageURL(base) { return imported }
+        if ext == "png" {
+            if let imported = ImportedDeviceFrames.imageURL(base) { return imported }
+            // 远程外壳下过一次就落在缓存里，之后和包内的一样用
+            if let cached = DeviceFrameDownload.cachedURL(name) { return cached }
+        }
         if let url = Bundle.main.url(forResource: base, withExtension: ext, subdirectory: framesDirectoryName) {
             return url
         }
@@ -197,13 +257,32 @@ final class ScreenshotService: ObservableObject {
             let direct = root.appendingPathComponent("\(framesDirectoryName)/\(name)")
             if FileManager.default.fileExists(atPath: direct.path) { return direct }
         }
-        // swift run / 调试时的仓库路径兜底
+        // swift run / 调试时的仓库路径兜底（只有包内那几款在仓库的这个位置）
         let candidate = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()     // Core
             .deletingLastPathComponent()     // Aurora
             .deletingLastPathComponent()     // Sources
             .deletingLastPathComponent()     // 仓库根
             .appendingPathComponent("Resources/\(framesDirectoryName)/\(name)")
+        return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
+    }
+
+    /// 包内自带的 320px 缩略图：远程外壳没下载前，外壳库靠它显示机型
+    nonisolated static func thumbnailURL(_ base: String) -> URL? {
+        let directory = "\(framesDirectoryName)/thumbs"
+        if let url = Bundle.main.url(forResource: base, withExtension: "png", subdirectory: directory) {
+            return url
+        }
+        if let root = Bundle.main.resourceURL {
+            let direct = root.appendingPathComponent("\(directory)/\(base).png")
+            if FileManager.default.fileExists(atPath: direct.path) { return direct }
+        }
+        let candidate = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/\(directory)/\(base).png")
         return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
     }
 

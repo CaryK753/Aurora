@@ -22,7 +22,13 @@ struct ScreenshotView: View {
             framesCard
 
         }
-        .onAppear { frames.reloadIfNeeded() }
+        .onAppear {
+            frames.reloadIfNeeded()
+            // 升级前就指定过外壳的用户：那张图可能在云端，进来先补下
+            if let `default` = frames.defaultFrame, frames.needsDownload(`default`), !frames.isDefaultAuto {
+                Task { await frames.ensureDownloaded(`default`) }
+            }
+        }
     }
 
     // MARK: 捕获
@@ -236,6 +242,14 @@ struct ScreenshotView: View {
         }
     }
 
+    /// 选中一款外壳：远程外壳先把大图下下来，落好了再设为默认
+    private func choose(_ frame: DeviceFrame) {
+        Task {
+            if frames.needsDownload(frame), await frames.ensureDownloaded(frame) == false { return }
+            frames.preferredFrameID = frame.id
+        }
+    }
+
     /// 默认外壳：大图 + 名称 + 自动识别标记 + 恢复自动
     private func defaultFrameCard(_ frame: DeviceFrame) -> some View {
         HStack(alignment: .center, spacing: 12) {
@@ -272,6 +286,32 @@ struct ScreenshotView: View {
                     .font(.system(size: 8.5, design: .rounded))
                     .foregroundStyle(.tertiary)
 
+                // 外壳大图不在安装包里（29 款全带太重），第一次用这个机型时下一下
+                if frames.needsDownload(frame) {
+                    HStack(spacing: 6) {
+                        if frames.isDownloading(frame) {
+                            ProgressView().controlSize(.small)
+                            Text(T("正在下载外壳…"))
+                                .font(.system(size: 8.5))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Button { choose(frame) } label: {
+                                Text(T("下载这台机器的外壳"))
+                                    .font(.system(size: 8.5, weight: .medium))
+                                    .foregroundStyle(AuroraTheme.accent)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(AuroraTheme.accent.opacity(0.14)))
+                            }
+                            .buttonStyle(.plain)
+                            Text(frames.downloadFailure ?? T("外壳图按需下载，约 1–3 MB"))
+                                .font(.system(size: 8))
+                                .foregroundStyle(frames.downloadFailure == nil ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Color.orange))
+                                .lineLimit(2)
+                        }
+                    }
+                }
+
                 // 系统读不到机身配色（ioreg 与 system_profiler 都没有这项），
                 // 同尺寸的深空黑 / 银色只能让用户点一下，别假装能识别
                 let variants = frames.defaultFrameVariants
@@ -279,7 +319,7 @@ struct ScreenshotView: View {
                     HStack(spacing: 4) {
                         ForEach(variants) { variant in
                             Button {
-                                frames.preferredFrameID = variant.id
+                                choose(variant)
                             } label: {
                                 Text(variant.variantLabel)
                                     .font(.system(size: 8, weight: variant.id == frame.id ? .semibold : .regular))
@@ -328,15 +368,31 @@ struct ScreenshotView: View {
 
     private func frameCard(_ frame: DeviceFrame) -> some View {
         VStack(spacing: 5) {
-            if let thumb = frames.thumbnail(frame) {
-                Image(nsImage: thumb)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(height: 56)
-            } else {
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.primary.opacity(0.06))
-                    .frame(height: 56)
+            ZStack(alignment: .topTrailing) {
+                Group {
+                    if let thumb = frames.thumbnail(frame) {
+                        Image(nsImage: thumb)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(height: 56)
+                    } else {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.primary.opacity(0.06))
+                            .frame(height: 56)
+                    }
+                }
+                .opacity(frames.needsDownload(frame) ? 0.55 : 1)
+
+                if frames.isDownloading(frame) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(4)
+                } else if frames.needsDownload(frame) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .padding(3)
+                }
             }
 
             VStack(spacing: 1) {
@@ -350,9 +406,9 @@ struct ScreenshotView: View {
             }
 
             Button {
-                frames.preferredFrameID = frame.id
+                choose(frame)
             } label: {
-                Text(T("设为默认"))
+                Text(frames.needsDownload(frame) ? T("下载") : T("设为默认"))
                     .font(.system(size: 8, weight: .medium))
                     .foregroundStyle(AuroraTheme.accent)
                     .padding(.horizontal, 7)
@@ -360,6 +416,7 @@ struct ScreenshotView: View {
                     .background(Capsule().fill(AuroraTheme.accent.opacity(0.12)))
             }
             .buttonStyle(.plain)
+            .disabled(frames.isDownloading(frame))
         }
         .padding(8)
         .frame(maxWidth: .infinity)

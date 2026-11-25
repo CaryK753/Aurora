@@ -571,7 +571,12 @@ struct ScreenshotEditorView: View {
         Button {
             showFramePicker = false
             showImportedFramePicker = false
-            applyFrame(frame)
+            // 远程外壳第一次用要先把大图下下来，下不到就保持原样
+            Task {
+                if ScreenshotService.shared.needsDownload(frame),
+                   await ScreenshotService.shared.ensureDownloaded(frame) == false { return }
+                applyFrame(frame)
+            }
         } label: {
             HStack(spacing: 8) {
                 if let thumb = ScreenshotService.shared.thumbnail(frame) {
@@ -579,6 +584,7 @@ struct ScreenshotEditorView: View {
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 44, height: 34)
+                        .opacity(ScreenshotService.shared.needsDownload(frame) ? 0.5 : 1)
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 4) {
@@ -595,9 +601,23 @@ struct ScreenshotEditorView: View {
                                 .background(Capsule().fill(AuroraTheme.accent.opacity(0.14)))
                         }
                     }
-                    Text("\(frame.screen.width) × \(frame.screen.height)")
-                        .font(.system(size: 8, design: .rounded))
-                        .foregroundStyle(.tertiary)
+                    HStack(spacing: 3) {
+                        if ScreenshotService.shared.isDownloading(frame) {
+                            ProgressView().controlSize(.mini)
+                            Text(T("正在下载外壳…"))
+                                .font(.system(size: 8))
+                                .foregroundStyle(.secondary)
+                        } else if ScreenshotService.shared.needsDownload(frame) {
+                            Image(systemName: "arrow.down.circle")
+                                .font(.system(size: 8))
+                            Text(T("首次使用需下载"))
+                                .font(.system(size: 8))
+                        } else {
+                            Text("\(frame.screen.width) × \(frame.screen.height)")
+                                .font(.system(size: 8, design: .rounded))
+                        }
+                    }
+                    .foregroundStyle(.tertiary)
                 }
                 Spacer()
                 Image(systemName: "chevron.right")

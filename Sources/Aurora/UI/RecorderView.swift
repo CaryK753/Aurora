@@ -574,11 +574,20 @@ struct RecorderView: View {
             Spacer(minLength: 4)
             Picker("", selection: Binding(
                 get: { recorder.bezelFrameID },
-                set: { recorder.bezelFrameID = $0 }
+                set: { id in
+                    recorder.bezelFrameID = id
+                    // 远程外壳选中就先下下来，录完自动套壳时才拿得到像素
+                    if let id, let frame = frames.frames.first(where: { $0.id == id }) {
+                        Task { await frames.ensureDownloaded(frame) }
+                    }
+                }
             )) {
                 Text(T("自动识别")).tag(String?.none)
                 ForEach(frames.frames) { frame in
-                    Text(frame.device).tag(Optional(frame.id))
+                    Text(frames.needsDownload(frame)
+                         ? "\(frame.device) · \(T("需下载"))"
+                         : frame.device)
+                        .tag(Optional(frame.id))
                 }
             }
             .labelsHidden()

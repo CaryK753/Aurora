@@ -459,13 +459,19 @@ final class RecorderService: ObservableObject {
 
     /// 按宽高比挑外壳：内建屏从笔记本里挑，外接屏从显示器 / iMac 里挑
     func suggestedBezelFrame(for content: CGSize) -> DeviceFrame? {
-        let frames = ScreenshotService.shared.frames.filter { $0.category == "mac" }
+        let service = ScreenshotService.shared
+        let frames = service.frames.filter { $0.category == "mac" }
         guard !frames.isEmpty, content.width > 1, content.height > 1 else { return nil }
         let aspect = content.width / content.height
         let wantsLaptop = targetScreenIsBuiltIn
         let pool = frames.filter { $0.device.contains("MacBook") == wantsLaptop }
         let candidates = pool.isEmpty ? frames : pool
-        return candidates.min { abs($0.screenAspect - aspect) < abs($1.screenAspect - aspect) }
+        func best(in pool: [DeviceFrame]) -> DeviceFrame? {
+            pool.min { abs($0.screenAspect - aspect) < abs($1.screenAspect - aspect) }
+        }
+        // 远程外壳还没下载时拿不到像素，先挑一款已就绪的
+        if let ready = best(in: candidates.filter { service.isReady($0) }) { return ready }
+        return best(in: candidates)
     }
 
     // MARK: - 区域选择（拖一个矩形只录这块屏幕）
@@ -1037,15 +1043,21 @@ final class RecorderService: ObservableObject {
     // MARK: - 带壳
 
     /// 当前会用的外壳：用户选定优先，否则按录制内容的宽高比 + 屏幕类型自动匹配
+    /// 远程外壳没下载时不算数，免得到导出阶段才发现拿不到像素
     var resolvedBezelFrame: DeviceFrame? {
         let service = ScreenshotService.shared
-        if let bezelFrameID, let frame = service.frames.first(where: { $0.id == bezelFrameID }) {
+        if let bezelFrameID, let frame = service.frames.first(where: { $0.id == bezelFrameID }),
+           service.isReady(frame) {
             return frame
         }
-        if let content = recordedContentSize, let matched = suggestedBezelFrame(for: content) {
+        if let content = recordedContentSize, let matched = suggestedBezelFrame(for: content),
+           service.isReady(matched) {
             return matched
         }
-        return service.defaultFrame
+        if let fallback = service.defaultFrame, service.isReady(fallback) {
+            return fallback
+        }
+        return nil
     }
 
     /// 给一段已有录像加壳（录制结束后自动调用，也可以在「最近录像」里手动点）。
@@ -1056,13 +1068,19 @@ final class RecorderService: ObservableObject {
         guard FileManager.default.fileExists(atPath: url.path) else { return T("找不到这段录像") }
 
         // 手动给旧录像加壳时没有「当前录制源」的上下文，直接按视频自己的比例挑
-        let frame: DeviceFrame?
-        if let bezelFrameID, let chosen = ScreenshotService.shared.frames.first(where: { $0.id == bezelFrameID }) {
+        let service = ScreenshotService.shared
+        var frame: DeviceFrame?
+        if let bezelFrameID, let chosen = service.frames.first(where: { $0.id == bezelFrameID }),
+           await service.ensureDownloaded(chosen) {
             frame = chosen
-        } else if let size = await Self.videoPixelSize(url), let matched = suggestedBezelFrame(for: size) {
+        }
+        if frame == nil, let size = await Self.videoPixelSize(url),
+           let matched = suggestedBezelFrame(for: size),
+           await service.ensureDownloaded(matched) {
             frame = matched
-        } else {
-            frame = ScreenshotService.shared.defaultFrame
+        }
+        if frame == nil, let fallback = service.defaultFrame, await service.ensureDownloaded(fallback) {
+            frame = fallback
         }
         guard let frame else { return T("没有可用的设备外壳") }
 

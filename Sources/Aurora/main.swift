@@ -604,30 +604,74 @@ if CommandLine.arguments.contains("--frames-report") {
         let service = ScreenshotService.shared
         let frames = service.frames
         let directory = ScreenshotService.resourceURL("frames.json")?.deletingLastPathComponent().path ?? "未找到"
+        let downloaded = frames.filter { $0.id.hasPrefix("imported-") == false && service.remoteIDs.contains($0.id) && service.isReady($0) }
         print("清单：\(directory)")
-        print("设备外壳 \(frames.count) 款（导入 \(frames.filter { $0.id.hasPrefix("imported-") }.count) 款）")
+        print("设备外壳 \(frames.count) 款（导入 \(frames.filter { $0.id.hasPrefix("imported-") }.count) 款 · 远程 \(service.remoteIDs.count) 款，已下载 \(downloaded.count) 款）")
         for frame in frames {
-            print("  · \(frame.id) — \(frame.device) · \(Int(frame.pixelWidth))×\(Int(frame.pixelHeight)) · 孔洞 \(Int(frame.screen.width))×\(Int(frame.screen.height))")
+            let state = service.remoteIDs.contains(frame.id)
+                ? (service.isReady(frame) ? "已下载" : "需下载")
+                : "内置"
+            print("  · \(frame.id) — \(frame.device) · \(Int(frame.pixelWidth))×\(Int(frame.pixelHeight)) · 孔洞 \(Int(frame.screen.width))×\(Int(frame.screen.height)) · \(state)")
         }
-        // 清单里列了、包里没有的 PNG：打包漏了才会出现，直接列出来
+        // 内置外壳的 PNG 必须在包里；远程的按需下载，缺了不算错
         let missing = checkMissingFrameFiles(in: directory)
         if !missing.isEmpty {
-            print("✗ 清单里有 \(missing.count) 张 PNG 没打进来：\(missing.joined(separator: "、"))")
+            print("✗ 有 \(missing.count) 张内置 PNG 没打进来：\(missing.joined(separator: "、"))")
         }
         print("默认外壳：\(service.defaultFrame.map { "\($0.device)（\(service.isDefaultAuto ? "自动识别" : "手动指定")）" } ?? "无")")
         print("同款配色：\(service.defaultFrameVariants.map(\.device).joined(separator: "、"))")
+        print("缓存占用：\(ByteCountFormatter.string(fromByteCount: DeviceFrameDownload.cachedSize(), countStyle: .file))")
         if frames.isEmpty { print("✗ 没读到最后壳资源，检查 Contents/Resources/DeviceFrames") }
         code = frames.isEmpty || !missing.isEmpty ? 1 : 0
     }
     exit(code)
 }
 
-/// frames.json 里列到、但包内找不到的 PNG
+/// 按需下载自检：`--download-frame imac-24-blue`
+if let index = CommandLine.arguments.firstIndex(of: "--download-frame") {
+    let args = CommandLine.arguments
+    guard index + 1 < args.count else {
+        print("用法：--download-frame <外壳 id>")
+        exit(2)
+    }
+    let wanted = args[index + 1]
+    let box = ResultBox()
+    Task { @MainActor in
+        guard let frame = ScreenshotService.shared.frames.first(where: { $0.id == wanted }) else {
+            print("✗ 没有这款外壳：\(wanted)")
+            box.code = 1
+            box.done = true
+            return
+        }
+        let ok = await ScreenshotService.shared.ensureDownloaded(frame)
+        print(ok ? "✓ 已就绪：\(frame.device)" : "✗ 下载失败：\(ScreenshotService.shared.downloadFailure ?? "未知原因")")
+        print("缓存：\(DeviceFrameDownload.cacheDirectory.path)")
+        box.code = ok ? 0 : 1
+        box.done = true
+    }
+    // 等下载落地（自检用，超时 60 秒就放弃）
+    let deadline = Date().addingTimeInterval(60)
+    while !box.done && Date() < deadline {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    if !box.done { print("✗ 下载超时") }
+    exit(box.done ? box.code : 1)
+}
+
+/// 命令行自检里异步任务回传结果用
+final class ResultBox {
+    var code: Int32 = 0
+    var done = false
+}
+
+/// frames.json 里标了内置、但包内找不到的 PNG
 func checkMissingFrameFiles(in directory: String) -> [String] {
     let manifest = URL(fileURLWithPath: directory).appendingPathComponent("frames.json")
     guard let data = try? Data(contentsOf: manifest),
           let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
-    return list.compactMap { $0["file"] as? String }.filter { ScreenshotService.resourceURL($0) == nil }
+    return list.filter { ($0["remote"] as? Bool) != true }
+        .compactMap { $0["file"] as? String }
+        .filter { ScreenshotService.resourceURL($0) == nil }
 }
 
 /// 更新说明解析自检：打印当前版本的结构化说明，顺带跑一段截图里那种 HTML 的回归用例

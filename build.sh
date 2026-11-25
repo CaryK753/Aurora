@@ -111,25 +111,39 @@ if [ -f "$ROOT/CHANGELOG.md" ]; then
   cp "$ROOT/CHANGELOG.md" "$APP_DIR/Contents/Resources/CHANGELOG.md"
 fi
 
-# 截图模块的 Apple 官方设备外壳（PNG + 屏幕矩形清单）
-# 清单里列到的每一张 PNG 都必须进包：Bundle 的资源查找不递归子目录，漏一张那款外壳装机后就直接消失。
+# 截图模块的 Apple 设备外壳：包内只放常用几款整图 + 全部 320px 缩略图，
+# 其余整图在仓库 FrameLibrary/ 里按需下载（下载地址按版本 tag 拼，所以那里也得有）。
 if [ -d "$ROOT/Resources/DeviceFrames" ]; then
   FRAMES_DIR="$APP_DIR/Contents/Resources/DeviceFrames"
+  rm -rf "$FRAMES_DIR"
   mkdir -p "$FRAMES_DIR"
-  cp "$ROOT/Resources/DeviceFrames/"* "$FRAMES_DIR/"
-  python3 - "$FRAMES_DIR" <<'PY'
+  cp -R "$ROOT/Resources/DeviceFrames/"* "$FRAMES_DIR/"
+  python3 - "$FRAMES_DIR" "$ROOT/FrameLibrary" <<'PY'
 import json, os, sys
-root = sys.argv[1]
-manifest = json.load(open(os.path.join(root, "frames.json"), encoding="utf-8"))
-missing = [entry["file"] for entry in manifest if not os.path.isfile(os.path.join(root, entry["file"]))]
-extra = [name for name in os.listdir(root)
-         if name.endswith(".png") and name not in {entry["file"] for entry in manifest}]
-if missing:
-    print("✗ 外壳清单里有 %d 张 PNG 没打进来：%s" % (len(missing), "、".join(missing)))
+frames_dir, library = sys.argv[1], sys.argv[2]
+manifest = json.load(open(os.path.join(frames_dir, "frames.json"), encoding="utf-8"))
+missing_bundled, missing_remote, missing_thumb = [], [], []
+for entry in manifest:
+    name = entry["file"]
+    base = os.path.splitext(name)[0]
+    if entry.get("remote"):
+        if not os.path.isfile(os.path.join(library, name)):
+            missing_remote.append(name)
+    elif not os.path.isfile(os.path.join(frames_dir, name)):
+        missing_bundled.append(name)
+    if not os.path.isfile(os.path.join(frames_dir, "thumbs", name)):
+        missing_thumb.append(name)
+fail = False
+if missing_bundled:
+    print("✗ 内置外壳的 PNG 没打进来：%s" % "、".join(missing_bundled)); fail = True
+if missing_remote:
+    print("✗ FrameLibrary/ 里缺这些整图（装机后下载会 404）：%s" % "、".join(missing_remote)); fail = True
+if missing_thumb:
+    print("✗ 缺缩略图（外壳库会显示空白）：%s" % "、".join(missing_thumb)); fail = True
+if fail:
     sys.exit(1)
-print("▸ 设备外壳 %d 款已打包" % len(manifest))
-for name in extra:
-    print("  提示：%s 不在清单里，装了也不会显示" % name)
+bundled = sum(1 for e in manifest if not e.get("remote"))
+print("▸ 设备外壳 %d 款（内置 %d · 按需下载 %d）" % (len(manifest), bundled, len(manifest) - bundled))
 PY
 fi
 

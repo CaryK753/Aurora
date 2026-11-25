@@ -42,8 +42,16 @@ struct RecordingAppearanceView: View {
                     Text(T("外壳已移除")).tag(Optional(id))
                 }
                 ForEach(screenshots.frames) { frame in
-                    Text(frame.device).tag(Optional(frame.id))
+                    Text(screenshots.needsDownload(frame)
+                         ? "\(frame.device) · \(T("需下载"))"
+                         : frame.device)
+                        .tag(Optional(frame.id))
                 }
+            }
+            // 远程外壳要等大图下完才导得出，选中的时候就下
+            .onChange(of: appearance.frameID) { _, id in
+                guard let id, let frame = screenshots.frames.first(where: { $0.id == id }) else { return }
+                Task { await screenshots.ensureDownloaded(frame) }
             }
             Section(T("光标")) {
                 Picker(T("光标样式"), selection: $appearance.cursor) {
