@@ -20,7 +20,7 @@ struct ScreenshotView: View {
         VStack(spacing: 12) {
             captureCard
             framesCard
-            tipCard
+
         }
         .onAppear { frames.reloadIfNeeded() }
     }
@@ -78,10 +78,7 @@ struct ScreenshotView: View {
                     }
                 }
 
-                Toggle(T("截图包含 Aurora 窗口"), isOn: $frames.includeAurora)
-                    .toggleStyle(.switch).controlSize(.small)
-
-                HStack(spacing: 8) {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                     captureButton(
                         title: T("区域截图"),
                         symbol: "viewfinder",
@@ -97,8 +94,14 @@ struct ScreenshotView: View {
                     }
                     captureButton(title: T("长截图"), symbol: "arrow.down.forward.and.arrow.up.backward") {
                         ScreenshotSession.shared.startRegionCapture(longMode: true)
-                    }
-                }
+                    }.help(T("长截图：选中区域后滚动页面，点「下一屏」逐段捕获，最后「拼接」自动对齐重叠部分。"))
+                }.disabled(!permissions.screenRecording)
+                Divider()
+                Toggle(T("截图包含 Aurora 窗口"), isOn: $frames.includeAurora)
+                    .toggleStyle(.switch).controlSize(.small)
+                Button { importForFraming() } label: {
+                    Label(T("打开图片并套壳…"), systemImage: "photo")
+                }.buttonStyle(SoftButtonStyle())
             }
         }
     }
@@ -181,7 +184,6 @@ struct ScreenshotView: View {
                 }
 
                 HStack {
-                    Button(T("打开图片并套壳…")) { importForFraming() }
                     Button(T("导入外壳 PNG…")) { importDeviceFrame() }
                     Link(T("Apple 产品外壳"), destination: URL(string: "https://developer.apple.com/design/resources/#product-bezels")!)
                         .font(.caption)
@@ -367,25 +369,4 @@ struct ScreenshotView: View {
         }
     }
 
-    private var tipCard: some View {
-        GlassCard(padding: 12) {
-            HStack(spacing: 6) {
-                Image(systemName: "info.circle")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(T("保存与复制在编辑器里完成：标注支持撤销 / 重做，马赛克按原图像素化。"))
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                    Text(T("长截图：选中区域后滚动页面，点「下一屏」逐段捕获，最后「拼接」自动对齐重叠部分。"))
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                    Text(T("设备外壳使用 Apple Design Resources 官方素材，仅用于展示你自己的截图。"))
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer(minLength: 0)
-            }
-        }
-    }
 }

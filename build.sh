@@ -112,9 +112,25 @@ if [ -f "$ROOT/CHANGELOG.md" ]; then
 fi
 
 # 截图模块的 Apple 官方设备外壳（PNG + 屏幕矩形清单）
+# 清单里列到的每一张 PNG 都必须进包：Bundle 的资源查找不递归子目录，漏一张那款外壳装机后就直接消失。
 if [ -d "$ROOT/Resources/DeviceFrames" ]; then
-  mkdir -p "$APP_DIR/Contents/Resources/DeviceFrames"
-  cp "$ROOT/Resources/DeviceFrames/"* "$APP_DIR/Contents/Resources/DeviceFrames/"
+  FRAMES_DIR="$APP_DIR/Contents/Resources/DeviceFrames"
+  mkdir -p "$FRAMES_DIR"
+  cp "$ROOT/Resources/DeviceFrames/"* "$FRAMES_DIR/"
+  python3 - "$FRAMES_DIR" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+manifest = json.load(open(os.path.join(root, "frames.json"), encoding="utf-8"))
+missing = [entry["file"] for entry in manifest if not os.path.isfile(os.path.join(root, entry["file"]))]
+extra = [name for name in os.listdir(root)
+         if name.endswith(".png") and name not in {entry["file"] for entry in manifest}]
+if missing:
+    print("✗ 外壳清单里有 %d 张 PNG 没打进来：%s" % (len(missing), "、".join(missing)))
+    sys.exit(1)
+print("▸ 设备外壳 %d 款已打包" % len(manifest))
+for name in extra:
+    print("  提示：%s 不在清单里，装了也不会显示" % name)
+PY
 fi
 
 printf 'APPL????' > "$APP_DIR/Contents/PkgInfo"

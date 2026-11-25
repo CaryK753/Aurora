@@ -22,15 +22,27 @@ struct AppAboutView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            identity
-            divider
-            updateSection
-            divider
-            whatsNewSection
-            divider
-            linksSection
-            divider
-            maintenanceSection
+            GlassCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    identity
+                    Divider()
+                    updateSection
+                }
+            }
+            GlassCard { whatsNewSection }
+            GlassCard {
+                VStack(alignment: .leading, spacing: 10) {
+                    linksSection
+                    Divider()
+                    DisclosureGroup(T("参考项目")) {
+                        Text(verbatim: "LinearMouse · MonitorControl · Stats · Mos · RClick · Maccy · KeepingYouAwake · switchaudio-osx · CodexBar · QuickRecorder · Recordly · Snapzy · InputSourcePro")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 4)
+                    }
+                }
+            }
+            GlassCard { maintenanceSection }
         }
         .onAppear {
             // previewContent 在开发态（可执行文件没有 Info.plist）也能取到最新一版说明
@@ -59,7 +71,7 @@ struct AppAboutView: View {
                     }
                 }
                 Text("\(T("版本")) \(settings.version) (\(settings.build)) · \(settings.systemVersion)")
-                    .font(.system(size: 9.5))
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(T("一站式 Mac 优化与增强工具：显示、鼠标、触控板、键盘、剪贴板、声音、节能，以及截图、录屏与动态壁纸，全部收进菜单栏。"))
                     .font(.system(size: 10))
@@ -79,10 +91,10 @@ struct AppAboutView: View {
 
             HStack(spacing: 8) {
                 Text(statusText)
-                    .font(.system(size: 9))
+                    .font(.caption)
                     .foregroundStyle(statusColor)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
                 Spacer(minLength: 6)
                 if case .downloading = updates.phase {
                     ProgressView().controlSize(.mini).scaleEffect(0.7).frame(width: 10, height: 10)
@@ -95,26 +107,15 @@ struct AppAboutView: View {
                         updates.check(manual: true)
                     }
                 }
-                .buttonStyle(SoftButtonStyle())
+                .controlSize(.small)
+                .fixedSize()
                 .disabled(updates.phase.isBusy)
             }
 
-            HStack(spacing: 9) {
-                Image(systemName: "clock.arrow.2.circlepath")
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 16)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(T("自动检查新版本"))
-                        .font(.system(size: 11, weight: .medium))
-                    Text(updates.autoUpdate
-                         ? T("每小时检查一次，下载完成后由你确认再安装")
-                         : T("只在你手动检查时提示新版本"))
-                        .font(.system(size: 8.5))
-                        .foregroundStyle(.tertiary)
-                }
-                Spacer(minLength: 4)
-                AuroraToggle(isOn: $updates.autoUpdate)
+            SettingRow(title: T("自动检查新版本"), subtitle: updates.autoUpdate
+                       ? T("每小时检查一次，下载完成后由你确认再安装") : T("只在你手动检查时提示新版本")) {
+                Toggle(T("自动检查新版本"), isOn: $updates.autoUpdate)
+                    .labelsHidden().toggleStyle(.switch).controlSize(.small)
             }
         }
     }
@@ -125,46 +126,13 @@ struct AppAboutView: View {
         VStack(alignment: .leading, spacing: 8) {
             sectionLabel(T("新功能"), symbol: "sparkles")
 
-            // 整块都能点：摘要、要点、底部胶囊是一个点击目标
-            VStack(alignment: .leading, spacing: 6) {
-                Text(whatsNewSummary)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if let notes, !notes.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(notes.allItems.prefix(3).enumerated()), id: \.offset) { _, item in
-                            HStack(alignment: .top, spacing: 6) {
-                                Circle()
-                                    .fill(Color.accentColor.opacity(0.55))
-                                    .frame(width: 4, height: 4)
-                                    .padding(.top, 5)
-                                Text(item.summary)
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                Spacer(minLength: 0)
-                            }
-                        }
-                    }
-                }
-
-                HStack(spacing: 5) {
-                    Text(T("查看这一版的新功能"))
-                        .font(.system(size: 10, weight: .medium))
-                    Image(systemName: "arrow.up.forward.app")
-                        .font(.system(size: 8.5, weight: .semibold))
-                }
-                .foregroundStyle(Color.accentColor)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Color.accentColor.opacity(0.10)))
-                .padding(.top, 1)
+            Text(whatsNewSummary)
+                .font(.subheadline).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(T("查看这一版的新功能"), systemImage: "arrow.up.forward.app") {
+                state.openWhatsNew()
             }
-            .contentShape(Rectangle())
-            .onTapGesture { state.openWhatsNew() }
-            .help(T("查看这一版的更新说明"))
+            .controlSize(.small)
         }
     }
 
@@ -205,14 +173,14 @@ struct AppAboutView: View {
                 Text(title).font(.system(size: 10.5, weight: .medium))
                 Spacer(minLength: 4)
                 Text(detail)
-                    .font(.system(size: 8.5))
-                    .foregroundStyle(.tertiary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Image(systemName: "arrow.up.right")
                     .font(.system(size: 8, weight: .semibold))
                     .foregroundStyle(.quaternary)
             }
-            .padding(.vertical, 4)
+            .padding(.vertical, 7)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -225,8 +193,8 @@ struct AppAboutView: View {
             sectionLabel(T("维护"), symbol: "wrench.and.screwdriver")
             HStack(spacing: 8) {
                 Text(T("会清空全部偏好与历史"))
-                    .font(.system(size: 8.5))
-                    .foregroundStyle(.tertiary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer(minLength: 4)
                 Button {
                     guard AuroraAlert.confirmReset() else { return }
@@ -251,15 +219,7 @@ struct AppAboutView: View {
     // MARK: - 小组件
 
     private func sectionLabel(_ text: String, symbol: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: symbol)
-                .font(.system(size: 8.5, weight: .semibold))
-                .foregroundStyle(.tertiary)
-            Text(text.uppercased())
-                .font(.system(size: 8.5, weight: .semibold))
-                .tracking(0.5)
-                .foregroundStyle(.tertiary)
-        }
+        Label(text, systemImage: symbol).font(.headline)
     }
 
     private var updateButtonTitle: String {
@@ -301,7 +261,4 @@ struct AppAboutView: View {
         }
     }
 
-    private var divider: some View {
-        Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 0.6)
-    }
 }

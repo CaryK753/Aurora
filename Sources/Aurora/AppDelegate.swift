@@ -295,6 +295,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ScreenshotSession.shared.startRegionCapture()
             case .recorder:
                 RecorderService.shared.toggle()
+            case .screenshotWindow:
+                ScreenshotSession.shared.startRegionCapture(windowOnly: true)
+            case .screenshotFullscreen:
+                ScreenshotSession.shared.startFullscreenCapture()
+            case .screenshotLong:
+                ScreenshotSession.shared.startRegionCapture(longMode: true)
+            case .recorderPause:
+                RecorderService.shared.togglePause()
+            case .recorderBar:
+                RecorderBar.shared.toggle()
             }
         }
         state.hotkeys.registerAll()

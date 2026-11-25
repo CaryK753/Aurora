@@ -129,24 +129,33 @@ final class ScreenshotService: ObservableObject {
             Debug.log("device frames manifest missing")
             return
         }
-        frames = list.compactMap { entry in
+        var loaded: [DeviceFrame] = []
+        var missing: [String] = []
+        for entry in list {
             guard let file = entry["file"] as? String,
                   let w = entry["w"] as? Int,
                   let h = entry["h"] as? Int,
-                  let rect = entry["screen"] as? [Int], rect.count == 4 else { return nil }
+                  let rect = entry["screen"] as? [Int], rect.count == 4 else { continue }
+            // 清单里有、包里却没有：打包时漏了 PNG（Bundle 不递归子目录），这里明确报出来
+            guard Self.resourceURL(file) != nil else {
+                missing.append(file)
+                continue
+            }
             let id = (file as NSString).deletingPathExtension
-            guard Self.resourceURL(file) != nil else { return nil }
-            return DeviceFrame(
+            loaded.append(DeviceFrame(
                 id: id,
                 device: entry["device"] as? String ?? id,
                 category: entry["category"] as? String ?? "mac",
                 pixelWidth: w,
                 pixelHeight: h,
                 screen: CGRect(x: rect[0], y: rect[1], width: rect[2], height: rect[3])
-            )
+            ))
         }
-        frames += ImportedDeviceFrames.list()
+        frames = loaded + ImportedDeviceFrames.list()
         Debug.log("device frames: \(frames.count) 款（清单 \(list.count) 项）")
+        if !missing.isEmpty {
+            Debug.log("device frames missing png: \(missing.joined(separator: ", "))")
+        }
     }
 
     func registerImportedFrame(_ frame: DeviceFrame) {

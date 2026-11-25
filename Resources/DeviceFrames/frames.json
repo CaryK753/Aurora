@@ -1,6 +1,32 @@
 [
   {
     "category": "mac",
+    "device": "MacBook Pro 16″ 深空黑",
+    "file": "macbook-pro-16-space-black.png",
+    "h": 2840,
+    "screen": [
+      402,
+      303,
+      3456,
+      2234
+    ],
+    "w": 4260
+  },
+  {
+    "category": "mac",
+    "device": "MacBook Pro 16″ 银色",
+    "file": "macbook-pro-16-silver.png",
+    "h": 2840,
+    "screen": [
+      402,
+      303,
+      3456,
+      2234
+    ],
+    "w": 4260
+  },
+  {
+    "category": "mac",
     "device": "MacBook Pro 14″ 深空黑",
     "file": "macbook-pro-14-space-black.png",
     "h": 2540,
@@ -27,29 +53,302 @@
   },
   {
     "category": "mac",
-    "device": "MacBook Pro 16″ 深空黑",
-    "file": "macbook-pro-16-space-black.png",
-    "h": 2840,
+    "device": "MacBook Air 15″ 午夜色",
+    "file": "macbook-air-15-midnight.png",
+    "h": 2065,
     "screen": [
-      402,
-      303,
-      3456,
-      2234
+      309,
+      60,
+      2785,
+      1798
     ],
-    "w": 4260
+    "w": 3400
   },
   {
     "category": "mac",
-    "device": "MacBook Pro 16″ 银色",
-    "file": "macbook-pro-16-silver.png",
-    "h": 2840,
+    "device": "MacBook Air 15″ 银色",
+    "file": "macbook-air-15-silver.png",
+    "h": 2065,
     "screen": [
-      402,
-      303,
-      3456,
-      2234
+      309,
+      60,
+      2785,
+      1798
     ],
-    "w": 4260
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "MacBook Air 15″ 天蓝色",
+    "file": "macbook-air-15-sky-blue.png",
+    "h": 2065,
+    "screen": [
+      309,
+      60,
+      2785,
+      1798
+    ],
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "MacBook Air 15″ 星光色",
+    "file": "macbook-air-15-starlight.png",
+    "h": 2065,
+    "screen": [
+      309,
+      60,
+      2785,
+      1798
+    ],
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "MacBook Air 13″ 午夜色",
+    "file": "macbook-air-13-midnight.png",
+    "h": 1941,
+    "screen": [
+      328,
+      63,
+      2550,
+      1660
+    ],
+    "w": 3205
+  },
+  {
+    "category": "mac",
+    "device": "MacBook Air 13″ 银色",
+    "file": "macbook-air-13-silver.png",
+    "h": 1941,
+    "screen": [
+      328,
+      63,
+      2550,
+      1660
+    ],
+    "w": 3205
+  },
+  {
+    "category": "mac",
+    "device": "MacBook Air 13″ 天蓝色",
+    "file": "macbook-air-13-sky-blue.png",
+    "h": 1941,
+    "screen": [
+      328,
+      63,
+      2550,
+      1660
+    ],
+    "w": 3205
+  },
+  {
+    "category": "mac",
+    "device": "MacBook Air 13″ 星光色",
+    "file": "macbook-air-13-starlight.png",
+    "h": 1941,
+    "screen": [
+      328,
+      63,
+      2550,
+      1660
+    ],
+    "w": 3205
+  },
+  {
+    "category": "mac",
+    "device": "MacBook Neo 腮红",
+    "file": "macbook-neo-blush.png",
+    "h": 1824,
+    "screen": [
+      295,
+      85,
+      2402,
+      1498
+    ],
+    "w": 2991
+  },
+  {
+    "category": "mac",
+    "device": "MacBook Neo 柑橘色",
+    "file": "macbook-neo-citrus.png",
+    "h": 1824,
+    "screen": [
+      295,
+      85,
+      2402,
+      1498
+    ],
+    "w": 2991
+  },
+  {
+    "category": "mac",
+    "device": "MacBook Neo 靛蓝色",
+    "file": "macbook-neo-indigo.png",
+    "h": 1824,
+    "screen": [
+      295,
+      85,
+      2402,
+      1498
+    ],
+    "w": 2991
+  },
+  {
+    "category": "mac",
+    "device": "MacBook Neo 银色",
+    "file": "macbook-neo-silver.png",
+    "h": 1824,
+    "screen": [
+      295,
+      85,
+      2402,
+      1498
+    ],
+    "w": 2991
+  },
+  {
+    "category": "mac",
+    "device": "iMac 24″ 蓝色",
+    "file": "imac-24-blue.png",
+    "h": 2865,
+    "screen": [
+      92,
+      91,
+      3217,
+      1811
+    ],
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "iMac 24″ 绿色",
+    "file": "imac-24-green.png",
+    "h": 2865,
+    "screen": [
+      92,
+      91,
+      3217,
+      1811
+    ],
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "iMac 24″ 橙色",
+    "file": "imac-24-orange.png",
+    "h": 2865,
+    "screen": [
+      90,
+      91,
+      3217,
+      1811
+    ],
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "iMac 24″ 粉色",
+    "file": "imac-24-pink.png",
+    "h": 2865,
+    "screen": [
+      92,
+      91,
+      3217,
+      1811
+    ],
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "iMac 24″ 紫色",
+    "file": "imac-24-purple.png",
+    "h": 2865,
+    "screen": [
+      92,
+      91,
+      3217,
+      1811
+    ],
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "iMac 24″ 银色",
+    "file": "imac-24-silver.png",
+    "h": 2865,
+    "screen": [
+      92,
+      91,
+      3217,
+      1811
+    ],
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "iMac 24″ 黄色",
+    "file": "imac-24-yellow.png",
+    "h": 2865,
+    "screen": [
+      92,
+      91,
+      3217,
+      1811
+    ],
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "Studio Display 深色底",
+    "file": "studio-display-dark.png",
+    "h": 2612,
+    "screen": [
+      79,
+      79,
+      3242,
+      1818
+    ],
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "Studio Display 浅色底",
+    "file": "studio-display-light.png",
+    "h": 2612,
+    "screen": [
+      79,
+      79,
+      3242,
+      1818
+    ],
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "Studio Display XDR 深色底",
+    "file": "studio-display-xdr-dark.png",
+    "h": 2612,
+    "screen": [
+      79,
+      79,
+      3242,
+      1818
+    ],
+    "w": 3400
+  },
+  {
+    "category": "mac",
+    "device": "Studio Display XDR 浅色底",
+    "file": "studio-display-xdr-light.png",
+    "h": 2612,
+    "screen": [
+      79,
+      79,
+      3242,
+      1818
+    ],
+    "w": 3400
   },
   {
     "category": "iphone",

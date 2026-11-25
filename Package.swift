@@ -20,7 +20,8 @@ let package = Package(
                 swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(name: "LanguageLayoutPluginTests", dependencies: ["LanguageLayoutPlugin"],
                     path: "Modules/LanguageLayoutPlugin/Tests"),
-        .testTarget(name: "AuroraWorkflowTests", dependencies: ["Aurora"], path: "Tests/AuroraWorkflow"),
+        .testTarget(name: "AuroraWorkflowTests", dependencies: ["Aurora"], path: "Tests/AuroraWorkflow",
+                    resources: [.copy("Fixtures/clip-colors.mp4")]),
         .executableTarget(
             name: "Aurora",
             dependencies: ["LogitechPlugin", "NetworkProxyKit", "LanguageLayoutPlugin"],

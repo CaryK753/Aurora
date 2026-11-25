@@ -45,6 +45,13 @@ final class RecorderBar {
         installStateObserverIfNeeded()
     }
 
+    func toggle() {
+        if panel?.isVisible == true { hide() } else {
+            Self.targetScreen = RecorderService.shared.targetScreen
+            show()
+        }
+    }
+
     func hide() {
         guard let panel, panel.isVisible else { return }
         panel.orderOut(nil)
@@ -115,11 +122,15 @@ struct RecorderBarView: View {
     @ObservedObject private var recorder = RecorderService.shared
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "circle.grid.2x3.fill")
-                .font(.caption).foregroundStyle(.secondary)
-                .frame(width: 16, height: 40)
-                .overlay(WindowDragHandle())
-                .help(T("拖动移动控制条"))
+            Canvas { context, _ in
+                for row in 0..<3 {
+                    for column in 0..<2 {
+                        let dot = CGRect(x: 3 + 6 * column, y: 10 + 6 * row, width: 3, height: 3)
+                        context.fill(Path(ellipseIn: dot), with: .color(.white.opacity(0.70)))
+                    }
+                }
+            }.frame(width: 16, height: 35)
+                .overlay(WindowDragHandle()).help(T("拖动移动控制条"))
             if recorder.isRecording {
                 action("stop.fill", T("停止并保存"), accent: true) { recorder.stop() }
                 Text(recorder.elapsedText).font(.system(.body, design: .monospaced).bold())
@@ -131,14 +142,17 @@ struct RecorderBarView: View {
                 }
                 Menu {
                     Button(T("丢弃这段录制"), role: .destructive) { recorder.stop(discard: true) }
-                } label: { glyph("trash") }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                } label: { Image(systemName: "trash") }
+                .modifier(RecorderCircleMenu()).accessibilityLabel(T("丢弃这段录制"))
             } else if recorder.isStarting {
                 Image(systemName: "timer").foregroundStyle(.orange)
                 Text(recorder.remaining > 0 ? TF("%d 秒后开始录制", recorder.remaining) : T("正在启动录制…"))
                     .monospacedDigit()
-                if recorder.remaining > 0 { Button(T("取消")) { recorder.cancelCountdown() } }
+                if recorder.remaining > 0 { action("xmark", T("取消倒计时")) { recorder.cancelCountdown() } }
             } else {
                 sourceMenu
+                Text(recorder.selectedSource?.title ?? T("选择录制源"))
+                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: .infinity, alignment: .leading)
                 divider
                 if !recorder.mobileSelected {
                     action(recorder.recordMic ? "mic.fill" : "mic.slash", T("麦克风"), active: recorder.recordMic) { recorder.recordMic.toggle() }
@@ -151,8 +165,8 @@ struct RecorderBarView: View {
                         ForEach([0, 3, 5, 10], id: \.self) { n in Text(n == 0 ? T("关闭") : TF("%d 秒", n)).tag(n) }
                     }
                     Toggle(T("录入 Aurora 窗口"), isOn: $recorder.includeAurora)
-                } label: { glyph("timer") }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help(T("录制设置"))
-                Spacer(minLength: 0)
+                } label: { Image(systemName: "timer") }
+                .modifier(RecorderCircleMenu()).help(T("录制设置")).accessibilityLabel(T("录制设置"))
                 action("record.circle", T("开始录制"), accent: true) { recorder.start() }
                 action("xmark", T("关闭控制条")) { RecorderBar.shared.hide() }
             }
@@ -187,29 +201,34 @@ struct RecorderBarView: View {
             Button(T("查找 iPhone / iPad")) { recorder.findMobileDevices() }
             Button(T("刷新列表")) { recorder.refreshSources() }
         } label: {
-            HStack(spacing: 5) {
-                Image(systemName: recorder.mobileSelected ? "iphone" : "macwindow")
-                Text(recorder.selectedSource?.title ?? T("选择录制源")).lineLimit(1).truncationMode(.middle)
-                Image(systemName: "chevron.down").font(.system(size: 8))
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Image(systemName: recorder.mobileSelected ? "iphone" : recorder.selectedSource?.kind == .area ? "viewfinder" : "macwindow")
         }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden)
+        .modifier(RecorderCircleMenu())
+        .help(T("选择录制源")).accessibilityLabel(T("选择录制源"))
     }
 
     private var divider: some View { Rectangle().fill(.white.opacity(0.18)).frame(width: 1, height: 21) }
 
-    private func glyph(_ symbol: String) -> some View {
-        Image(systemName: symbol).frame(width: 23, height: 30).contentShape(Rectangle())
+    private func glyph(_ symbol: String, active: Bool = false, accent: Bool = false) -> some View {
+        Image(systemName: symbol)
+            .frame(width: 32, height: 32)
+            .foregroundStyle(accent || active ? Color.white : Color.white.opacity(0.82))
+            .background(Circle().fill(accent ? Color.red : .white.opacity(active ? 0.22 : 0.09)))
+            .contentShape(Circle())
     }
 
     private func action(_ symbol: String, _ name: String, active: Bool = false, accent: Bool = false,
                         perform: @escaping () -> Void) -> some View {
-        Button(action: perform) {
-            glyph(symbol)
-                .frame(width: accent ? 32 : 26, height: 32)
-                .foregroundStyle(accent || active ? Color.white : Color.white.opacity(0.72))
-                .background(Capsule().fill(accent ? Color.red : .white.opacity(active ? 0.22 : 0.06)))
-        }.accessibilityLabel(name).help(name)
+        Button(action: perform) { glyph(symbol, active: active, accent: accent) }
+            .accessibilityLabel(name).help(name)
+    }
+}
+
+private struct RecorderCircleMenu: ViewModifier {
+    func body(content: Content) -> some View {
+        content.menuStyle(.borderlessButton).menuIndicator(.hidden)
+            .frame(width: 32, height: 32)
+            .background(Circle().fill(.white.opacity(0.09)))
+            .contentShape(Circle())
     }
 }

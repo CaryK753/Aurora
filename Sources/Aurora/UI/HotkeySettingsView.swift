@@ -13,9 +13,13 @@ struct HotkeySettingsView: View {
     var body: some View {
         VStack(spacing: 12) {
             introCard
-            rowsCard
+            rowsCard(T("通用"), symbol: "command", actions: [.panel, .miniClipboard])
+            rowsCard(T("截图"), symbol: "camera.viewfinder", actions: [.screenshot, .screenshotWindow, .screenshotFullscreen, .screenshotLong])
+            rowsCard(T("录屏"), symbol: "record.circle", actions: [.recorder, .recorderPause, .recorderBar])
             tipCard
         }
+        .onDisappear { hotkeys.endRecording() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in hotkeys.endRecording() }
         .onExitCommand { hotkeys.endRecording() }
     }
 
@@ -48,12 +52,12 @@ struct HotkeySettingsView: View {
 
     // MARK: 动作列表
 
-    private var rowsCard: some View {
+    private func rowsCard(_ title: String, symbol: String, actions: [HotkeyService.Action]) -> some View {
         GlassCard(padding: 12) {
             VStack(alignment: .leading, spacing: 9) {
-                SectionLabel(text: T("快捷键"), symbol: "keyboard")
+                SectionLabel(text: title, symbol: symbol)
 
-                ForEach(Array(HotkeyService.Action.allCases.enumerated()), id: \.element.id) { index, action in
+                ForEach(Array(actions.enumerated()), id: \.element.id) { index, action in
                     if index > 0 {
                         Rectangle().fill(Color.primary.opacity(0.06)).frame(height: 0.6)
                     }
@@ -66,7 +70,7 @@ struct HotkeySettingsView: View {
     private func row(_ action: HotkeyService.Action) -> some View {
         let config = hotkeys.config(for: action)
         let recording = hotkeys.recording == action
-        let conflict = hotkeys.recording == nil ? hotkeys.conflict(of: config, excluding: action) : nil
+        let error = hotkeys.editErrors[action].map { TF("未更改：%@", $0) } ?? hotkeys.registrationErrors[action]
 
         return HStack(spacing: 10) {
             Image(systemName: action.symbol)
@@ -78,8 +82,8 @@ struct HotkeySettingsView: View {
                 Text(action.title)
                     .font(.system(size: 11.5, weight: .medium))
                     .lineLimit(1)
-                if let conflict {
-                    Text(TF("与「%@」冲突", conflict.title))
+                if let error {
+                    Text(error)
                         .font(.system(size: 8))
                         .foregroundStyle(AuroraTheme.danger)
                 }
@@ -120,8 +124,8 @@ struct HotkeySettingsView: View {
                     .frame(width: 20, height: 20)
             }
             .buttonStyle(.plain)
-            .disabled(config == action.defaultConfig)
-            .opacity(config == action.defaultConfig ? 0.35 : 1)
+            .disabled(config == action.defaultConfig && error == nil)
+            .opacity(config == action.defaultConfig && error == nil ? 0.35 : 1)
             .help(T("恢复默认"))
         }
     }

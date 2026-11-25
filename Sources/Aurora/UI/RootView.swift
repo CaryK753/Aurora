@@ -429,7 +429,16 @@ struct AuroraRootView: View {
 
     // MARK: - 内容
 
-    private var content: some View {
+    @ViewBuilder private var content: some View {
+        if state.module == .settings && !state.showHotkeys && !state.showLanguageCoach {
+            SettingsView(state: state)
+                .padding(.top, 54)
+        } else {
+            scrollingContent
+        }
+    }
+
+    private var scrollingContent: some View {
         ScrollView(.vertical) {
             VStack(spacing: 12) {
                 if state.showHotkeys {
@@ -471,7 +480,7 @@ struct AuroraRootView: View {
                     case .ai:
                         AIView(state: state)
                     case .settings:
-                        SettingsView(state: state)
+                        EmptyView() // 设置页的分类栏固定在滚动区外。
                     }
                 }
             }

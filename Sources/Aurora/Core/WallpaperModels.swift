@@ -92,7 +92,7 @@ enum WallpaperFill: String, Codable, CaseIterable, Identifiable {
 
 // MARK: - 壁纸条目
 
-struct WallpaperItem: Identifiable, Codable, Equatable, Hashable {
+struct WallpaperItem: Identifiable, Codable, Equatable, Hashable, Sendable {
     var id: String
     var name: String
     var path: String

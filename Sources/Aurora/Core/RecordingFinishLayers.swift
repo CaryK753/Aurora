@@ -7,6 +7,8 @@ struct RecordingFinishLayers {
     private let bezel: CIImage?
     private let cursor: CIImage?
     private let cursorSize: CGFloat
+    private let effect: RecordingAppearance.CursorEffect?
+    private let ripple: CIImage?
     private let arrow: Bool
     private let screenRect: CGRect
 
@@ -28,6 +30,10 @@ struct RecordingFinishLayers {
             bezel = nil
             screenRect = appearance.hasBackdrop ? canvas.insetBy(dx: canvas.width * 0.08, dy: canvas.height * 0.08) : canvas
         }
+        effect = appearance.cursorEffect
+        var ring = appearance
+        ring.cursor = .ring
+        ripple = effect == .ripple ? try Self.cursorGraphic(ring) : nil
         cursor = try Self.cursorGraphic(appearance)
         cursorSize = max(10, min(64, min(canvas.width, canvas.height) * 0.032)) * appearance.cursorSize
         arrow = appearance.cursor == .arrow || appearance.cursor == .image
@@ -43,17 +49,38 @@ struct RecordingFinishLayers {
         let video = Self.place(screen.cropped(to: crop), in: screenRect, fill: false)
         let black = CIImage(color: .black).cropped(to: screenRect)
         result = video.composited(over: black).composited(over: result)
-        if let cursor, let position = trace.cursor(at: time) {
-            let sourcePoint = CGPoint(x: screen.extent.minX + screen.extent.width * position.x,
-                                      y: screen.extent.minY + screen.extent.height * position.y)
-            if crop.contains(sourcePoint) {
+        if let cursor {
+            func overlay(_ image: CIImage, at position: CGPoint, size: CGFloat, opacity: Double, anchored: Bool) {
+                let point = CGPoint(x: screen.extent.minX + screen.extent.width * position.x,
+                                    y: screen.extent.minY + screen.extent.height * position.y)
+                guard crop.contains(point) else { return }
                 let extent = video.extent
-                let x = extent.minX + (sourcePoint.x - crop.minX) / crop.width * extent.width
-                let y = extent.minY + (sourcePoint.y - crop.minY) / crop.height * extent.height
-                let artwork = Self.place(cursor, in: CGRect(x: arrow ? x : x - cursorSize / 2,
-                                                            y: arrow ? y - cursorSize : y - cursorSize / 2,
-                                                            width: cursorSize, height: cursorSize), fill: false)
+                let x = extent.minX + (point.x - crop.minX) / crop.width * extent.width
+                let y = extent.minY + (point.y - crop.minY) / crop.height * extent.height
+                var artwork = Self.place(image, in: CGRect(x: anchored ? x : x - size / 2,
+                                                           y: anchored ? y - size : y - size / 2,
+                                                           width: size, height: size), fill: false)
+                if opacity < 1 {
+                    artwork = artwork.applyingFilter("CIColorMatrix", parameters: [
+                        "inputAVector": CIVector(x: 0, y: 0, z: 0, w: opacity)
+                    ])
+                }
                 result = artwork.cropped(to: extent).composited(over: result)
+            }
+            if effect == .ripple, let ripple, let click = trace.recentClick(at: time, within: 0.5) {
+                let progress = (time - click.time) / 0.5
+                overlay(ripple, at: CGPoint(x: click.x, y: click.y), size: cursorSize * (1.2 + 2 * progress),
+                        opacity: 0.8 * (1 - progress), anchored: false)
+            }
+            if let position = trace.cursor(at: time) {
+                if effect == .trail {
+                    for step in (1...4).reversed() {
+                        if let prior = trace.cursor(at: time - Double(step) * 0.035), prior != position {
+                            overlay(cursor, at: prior, size: cursorSize, opacity: 0.43 - Double(step) * 0.075, anchored: arrow)
+                        }
+                    }
+                }
+                overlay(cursor, at: position, size: cursorSize, opacity: 1, anchored: arrow)
             }
         }
         return (bezel?.composited(over: result) ?? result).cropped(to: canvas)
@@ -99,6 +126,30 @@ struct RecordingFinishLayers {
             ctx.setFillColor(color)
             ctx.setStrokeColor(outline)
             ctx.drawPath(using: .fillStroke)
+        } else if [.crosshair, .beam, .diamond].contains(style.cursor) {
+            let path = CGMutablePath()
+            switch style.cursor {
+            case .diamond:
+                path.move(to: CGPoint(x: 32, y: 59))
+                path.addLines(between: [.init(x: 54, y: 32), .init(x: 32, y: 5), .init(x: 10, y: 32)])
+                path.closeSubpath()
+            case .beam:
+                for pair in [[CGPoint(x: 20, y: 8), CGPoint(x: 44, y: 8)],
+                             [.init(x: 32, y: 8), .init(x: 32, y: 56)],
+                             [.init(x: 20, y: 56), .init(x: 44, y: 56)]] {
+                    path.move(to: pair[0]); path.addLine(to: pair[1])
+                }
+            default:
+                path.move(to: .init(x: 32, y: 5)); path.addLine(to: .init(x: 32, y: 59))
+                path.move(to: .init(x: 5, y: 32)); path.addLine(to: .init(x: 59, y: 32))
+            }
+            ctx.setLineCap(.round)
+            for (width, ink) in [(CGFloat(8), outline), (CGFloat(4), color)] {
+                ctx.addPath(path)
+                ctx.setLineWidth(width)
+                ctx.setStrokeColor(ink)
+                ctx.strokePath()
+            }
         } else {
             let oval = CGRect(x: 10, y: 10, width: 44, height: 44)
             ctx.setStrokeColor(outline)

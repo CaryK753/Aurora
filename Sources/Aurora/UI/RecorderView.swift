@@ -25,6 +25,8 @@ struct RecorderView: View {
     /// 按键显示走「输入监控」，和点击高亮的辅助功能是两项权限
     @State private var keyAccess = false
     @State private var accessRevision = 0
+    @State private var showsLibrary = false
+    @State private var sourceQuery = ""
     @State private var bezelError: String?
 
     init(state: AppState) {
@@ -35,9 +37,14 @@ struct RecorderView: View {
     var body: some View {
         VStack(spacing: 12) {
             controlCard
-            if !recorder.isRecording { sourceCard.disabled(recorder.optionsLocked) }
-            optionsCard
-            recentCard
+            Picker(T("录屏"), selection: $showsLibrary) {
+                Text(T("录制设置")).tag(false)
+                Text(T("最近录像")).tag(true)
+            }.pickerStyle(.segmented).labelsHidden()
+            if showsLibrary { recentCard } else {
+                if !recorder.isRecording { sourceCard.disabled(recorder.optionsLocked) }
+                optionsCard
+            }
         }
         .onAppear { recorder.refreshSources() }
         .task(id: recorder.lastMovieURL) { await reloadRecent() }
@@ -89,7 +96,7 @@ struct RecorderView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(T("录屏"))
                             .font(.system(size: 13, weight: .semibold))
-                        Text(T("屏幕或窗口录制，系统声音与麦克风，MP4 保存"))
+                        Text(recorder.selectedSource?.title ?? T("请选择录制源")).lineLimit(1)
                             .font(.system(size: 9.5))
                             .foregroundStyle(.secondary)
                     }
@@ -157,54 +164,53 @@ struct RecorderView: View {
                     }
                 }
 
-                Button {
-                    if recorder.isRecording {
-                        recorder.stop()
-                    } else {
-                        recorder.toggle()
+                HStack(spacing: 8) {
+                    Button {
+                        if recorder.isRecording {
+                            recorder.stop()
+                        } else {
+                            recorder.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: recorder.isRecording ? "stop.fill" : "record.circle")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text(recorder.remaining > 0 ? TF("取消倒计时（%d）", recorder.remaining) : recorder.isStarting ? T("正在启动录制…") : recorder.isStopping ? T("正在保存…") : recorder.isRecording ? T("停止录制") : T("开始录制"))
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(recorder.isRecording ? AnyShapeStyle(Color.red) : AnyShapeStyle(AuroraTheme.accentGradient))
+                        }
                     }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: recorder.isRecording ? "stop.fill" : "record.circle")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text(recorder.remaining > 0 ? TF("取消倒计时（%d）", recorder.remaining) : recorder.isStarting ? T("正在启动录制…") : recorder.isStopping ? T("正在保存…") : recorder.isRecording ? T("停止录制") : T("开始录制"))
-                            .font(.system(size: 12, weight: .semibold))
-                    }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(recorder.isRecording ? AnyShapeStyle(Color.red) : AnyShapeStyle(AuroraTheme.accentGradient))
-                    }
-                }
-                .buttonStyle(.plain)
-                .disabled((!permissions.screenRecording && !recorder.mobileSelected && !recorder.isRecording) || (recorder.isStarting && recorder.remaining == 0) || recorder.isStopping)
-                .opacity(!permissions.screenRecording && !recorder.mobileSelected && !recorder.isRecording ? 0.5 : 1)
+                    .buttonStyle(.plain)
+                    .disabled((!permissions.screenRecording && !recorder.mobileSelected && !recorder.isRecording) || (recorder.isStarting && recorder.remaining == 0) || recorder.isStopping)
+                    .opacity(!permissions.screenRecording && !recorder.mobileSelected && !recorder.isRecording ? 0.5 : 1)
 
-                Text(T("录制时屏幕底部会显示控制条，可暂停或丢弃，随时点停止。"))
-                    .font(.system(size: 8.5))
-                    .foregroundStyle(.tertiary)
 
-                Button {
-                    RecorderBar.targetScreen = recorder.targetScreen
-                    RecorderBar.shared.show()
-                } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "menubar.dock.rectangle.badge.record")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text(T("打开悬浮控制条"))
-                            .font(.system(size: 10.5, weight: .semibold))
+                    Button {
+                        RecorderBar.targetScreen = recorder.targetScreen
+                        RecorderBar.shared.show()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "menubar.dock.rectangle.badge.record")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text(T("悬浮条"))
+                                .font(.system(size: 10.5, weight: .semibold))
+                        }
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 9)
+                        .background {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Color.primary.opacity(0.05))
+                        }
                     }
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 7)
-                    .background {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.primary.opacity(0.05))
-                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
     }
@@ -270,9 +276,13 @@ struct RecorderView: View {
                         .font(.system(size: 9.5))
                         .foregroundStyle(.tertiary)
                 } else {
+                    TextField(T("搜索屏幕、窗口或设备"), text: $sourceQuery)
+                        .textFieldStyle(.roundedBorder).controlSize(.small)
+                    let results = recorder.sources.filter { sourceQuery.isEmpty || $0.title.localizedCaseInsensitiveContains(sourceQuery) || $0.subtitle.localizedCaseInsensitiveContains(sourceQuery) }
+                    if results.isEmpty { Text(T("没有匹配的录制源")).font(.caption).foregroundStyle(.secondary) }
                     ScrollView {
-                        VStack(spacing: 3) {
-                            ForEach(recorder.sources) { source in
+                        LazyVStack(spacing: 3) {
+                            ForEach(results) { source in
                                 sourceRow(source)
                             }
                         }
@@ -624,6 +634,11 @@ struct RecorderView: View {
                 HStack(spacing: 6) {
                     SectionLabel(text: T("最近录像"), symbol: "movie")
                     Spacer()
+                    Button(T("打开录像…")) {
+                        let panel = NSOpenPanel()
+                        panel.allowedContentTypes = [.movie]
+                        if panel.runModal() == .OK, let url = panel.url { ZoomTimelineWindow.open(url, library: state.wallpapers) }
+                    }.buttonStyle(SoftButtonStyle())
                     Button(T("打开文件夹")) {
                         NSWorkspace.shared.open(recorder.outputDirectory)
                     }
@@ -693,7 +708,7 @@ struct RecorderView: View {
             .buttonStyle(.plain)
 
             if ["mp4", "mov"].contains(url.pathExtension) {
-                Button(T("缩放时间线")) { ZoomTimelineWindow.open(url) }
+                Button(T("剪辑与后期")) { ZoomTimelineWindow.open(url, library: state.wallpapers) }
                     .buttonStyle(.plain)
                     .disabled(recorder.exportingZoom != nil)
             }

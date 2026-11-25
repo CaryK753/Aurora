@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct RecordingAppearanceView: View {
     @Binding var appearance: RecordingAppearance
+    let library: WallpaperLibrary
     let hasTrace: Bool
     let embeddedCursor: Bool
     @ObservedObject private var screenshots = ScreenshotService.shared
@@ -12,14 +13,21 @@ struct RecordingAppearanceView: View {
             Section(T("背景")) {
                 HStack {
                     Button(T("无")) {
+                        appearance.wallpaper = nil
                         appearance.backdrop = nil
                         appearance.solidBackdrop = false
                     }
                     Button(T("深蓝底色")) {
+                        appearance.wallpaper = nil
                         appearance.backdrop = nil
                         appearance.solidBackdrop = true
                     }
-                    Button(T("选择图片或视频…")) { selectBackground() }
+                }
+                Button(T("选择图片或视频…")) { selectBackground() }
+                RecordingWallpaperPicker(library: library, selection: appearance.wallpaper) { item in
+                    appearance.backdrop = nil
+                    appearance.solidBackdrop = false
+                    appearance.wallpaper = item
                 }
                 if let file = appearance.backdrop {
                     Text(file.lastPathComponent)
@@ -43,6 +51,9 @@ struct RecordingAppearanceView: View {
                     Text(T("箭头")).tag(RecordingAppearance.Cursor.arrow)
                     Text(T("圆点")).tag(RecordingAppearance.Cursor.dot)
                     Text(T("圆环")).tag(RecordingAppearance.Cursor.ring)
+                    Text(T("准星")).tag(RecordingAppearance.Cursor.crosshair)
+                    Text(T("菱形")).tag(RecordingAppearance.Cursor.diamond)
+                    Text(T("文本指针")).tag(RecordingAppearance.Cursor.beam)
                     if appearance.cursorImage != nil { Text(T("自定义 PNG")).tag(RecordingAppearance.Cursor.image) }
                 }
                 Button(T("导入光标 PNG…")) { selectCursor() }
@@ -55,7 +66,14 @@ struct RecordingAppearanceView: View {
                             Text(T("橙色")).tag(RecordingAppearance.CursorTint.orange)
                         }
                     }
-                    Slider(value: $appearance.cursorSize, in: 0.5...2) { Text(T("光标大小")) }
+                    Picker(T("光标特效"), selection: $appearance.cursorEffect) {
+                        Text(T("无")).tag(nil as RecordingAppearance.CursorEffect?)
+                        Text(T("点击波纹")).tag(Optional(RecordingAppearance.CursorEffect.ripple))
+                        Text(T("移动拖尾")).tag(Optional(RecordingAppearance.CursorEffect.trail))
+                    }
+                    LabeledContent(T("光标大小"), value: appearance.cursorSize.formatted(.percent))
+                    Slider(value: $appearance.cursorSize, in: 0.5...3, step: 0.05)
+                        .accessibilityLabel(T("光标大小"))
                 }
             }.disabled(!hasTrace)
             if !hasTrace {
@@ -67,8 +85,7 @@ struct RecordingAppearanceView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 380)
-        .frame(maxHeight: 570)
+
     }
 
     private func selectBackground() {
@@ -76,6 +93,7 @@ struct RecordingAppearanceView: View {
         panel.allowedContentTypes = [.image, .movie]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         appearance.solidBackdrop = false
+        appearance.wallpaper = nil
         appearance.backdrop = url
     }
 

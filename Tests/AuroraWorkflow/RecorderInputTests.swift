@@ -111,6 +111,11 @@ final class RecorderInputTests: XCTestCase {
         try await waitUntil { !service.isStarting }
         XCTAssertTrue(service.isRecording, service.lastError ?? "")
         try await Task.sleep(for: .milliseconds(500))
+        service.togglePause()
+        XCTAssertTrue(service.isPaused)
+        try await Task.sleep(for: .milliseconds(250))
+        service.togglePause()
+        XCTAssertFalse(service.isPaused)
         panel.backgroundColor = .systemGreen
         try await Task.sleep(for: .milliseconds(500))
         service.stop()

@@ -203,7 +203,10 @@ final class PanelController {
     }
 
     private func setPanelVisible(_ visible: Bool) {
-        if !visible { isOpening = false }
+        if !visible {
+            isOpening = false
+            state.hotkeys.endRecording()
+        }
         if isVisible != visible {
             isVisible = visible
             if visible { installMonitors() } else { removeMonitors() }

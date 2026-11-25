@@ -16,6 +16,14 @@ struct HotkeyConfig: Codable, Equatable {
     /// 录制时顺手记下的显示文案，界面直接用
     var display: String
 
+    static func captureShortcut(_ code: Int, _ letter: String) -> HotkeyConfig {
+        HotkeyConfig(keyCode: UInt32(code), modifiers: UInt32(controlKey | optionKey | cmdKey), display: "⌃⌥⌘" + letter)
+    }
+
+    func matches(_ other: HotkeyConfig) -> Bool {
+        keyCode == other.keyCode && modifiers == other.modifiers
+    }
+
     static let panel = HotkeyConfig(keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(cmdKey | optionKey), display: "⌥⌘A")
     /// 早期版本默认 ⇧⌘3，与系统截图热键冲突导致热键收不到，已改为 ⇧⌘V
     static let miniClipboard = HotkeyConfig(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(cmdKey | shiftKey), display: "⇧⌘V")
@@ -35,6 +43,7 @@ final class HotkeyService: ObservableObject {
         case miniClipboard  // mini 剪切板
         case screenshot     // 区域截图
         case recorder       // 开始 / 停止录屏
+        case screenshotWindow, screenshotFullscreen, screenshotLong, recorderPause, recorderBar
 
         var id: String { rawValue }
 
@@ -44,6 +53,11 @@ final class HotkeyService: ObservableObject {
             case .miniClipboard: return T("唤起 mini 剪切板")
             case .screenshot: return T("区域截图")
             case .recorder: return T("开始 / 停止录屏")
+            case .screenshotWindow: return T("窗口截图")
+            case .screenshotFullscreen: return T("全屏截图")
+            case .screenshotLong: return T("长截图")
+            case .recorderPause: return T("暂停 / 继续录屏")
+            case .recorderBar: return T("显示 / 隐藏录屏悬浮条")
             }
         }
 
@@ -53,6 +67,11 @@ final class HotkeyService: ObservableObject {
             case .miniClipboard: return "doc.on.clipboard"
             case .screenshot: return "viewfinder"
             case .recorder: return "record.circle"
+            case .screenshotWindow: return "macwindow.on.rectangle"
+            case .screenshotFullscreen: return "rectangle.inset.filled"
+            case .screenshotLong: return "arrow.down.forward.and.arrow.up.backward"
+            case .recorderPause: return "pause.circle"
+            case .recorderBar: return "rectangle.3.group.bubble"
             }
         }
 
@@ -62,6 +81,11 @@ final class HotkeyService: ObservableObject {
             case .miniClipboard: return .miniClipboard
             case .screenshot: return .screenshotRegion
             case .recorder: return .recorderToggle
+            case .screenshotWindow: return .captureShortcut(kVK_ANSI_W, "W")
+            case .screenshotFullscreen: return .captureShortcut(kVK_ANSI_F, "F")
+            case .screenshotLong: return .captureShortcut(kVK_ANSI_L, "L")
+            case .recorderPause: return .captureShortcut(kVK_ANSI_P, "P")
+            case .recorderBar: return .captureShortcut(kVK_ANSI_B, "B")
             }
         }
 
@@ -72,6 +96,11 @@ final class HotkeyService: ObservableObject {
             case .miniClipboard: return 10
             case .screenshot: return 11
             case .recorder: return 12
+            case .screenshotWindow: return 13
+            case .screenshotFullscreen: return 14
+            case .screenshotLong: return 15
+            case .recorderPause: return 16
+            case .recorderBar: return 17
             }
         }
     }
@@ -89,22 +118,29 @@ final class HotkeyService: ObservableObject {
     /// 后装的处理器返回 noErr 会把事件吞掉，导致所有热键失灵。
     var onBrightness: ((Bool) -> Void)?
 
-    private var hotKeyRefs: [Action: EventHotKeyRef?] = [:]
-    private var handlerInstalled = false
+    @Published private(set) var registrationErrors: [Action: String] = [:]
+    @Published private(set) var editErrors: [Action: String] = [:]
+    private var hotKeyRefs: [Action: EventHotKeyRef] = [:]
+    private let preferences: UserDefaults
+    private var handler: EventHandlerRef?
     /// 录制期间的本地键盘监听
     private var recordMonitor: Any?
-    /// 面板热键走旧 id=1 注册时占用的 ref（迁移用，保留兼容）
-    private var legacyPanelRef: EventHotKeyRef?
 
-    init() {
+    init(preferences: UserDefaults = .standard) {
+        self.preferences = preferences
         load()
-        Self.current = self
+    }
+
+    deinit {
+        if let handler { RemoveEventHandler(handler) }
+        for ref in hotKeyRefs.values { UnregisterEventHotKey(ref) }
+        if let recordMonitor { NSEvent.removeMonitor(recordMonitor) }
     }
 
     // MARK: - 持久化
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: Self.storageKey),
+        guard let data = preferences.data(forKey: Self.storageKey),
               let raw = try? JSONDecoder().decode([String: HotkeyConfig].self, from: data) else {
             configs = Action.allCases.reduce(into: [:]) { $0[$1] = $1.defaultConfig }
             return
@@ -123,7 +159,7 @@ final class HotkeyService: ObservableObject {
     private func save() {
         let raw = Dictionary(uniqueKeysWithValues: configs.map { ($0.key.rawValue, $0.value) })
         if let data = try? JSONEncoder().encode(raw) {
-            UserDefaults.standard.set(data, forKey: Self.storageKey)
+            preferences.set(data, forKey: Self.storageKey)
         }
     }
 
@@ -131,61 +167,68 @@ final class HotkeyService: ObservableObject {
 
     func config(for action: Action) -> HotkeyConfig { configs[action] ?? action.defaultConfig }
 
-    /// 某个组合键是否已被其它动作占用
-    func conflict(of config: HotkeyConfig, excluding action: Action) -> Action? {
-        configs.first(where: { $0.key != action && $0.value.keyCode == config.keyCode && $0.value.modifiers == config.modifiers })?.key
+    private func conflictMessage(_ config: HotkeyConfig, excluding action: Action) -> String? {
+        if config.modifiers == UInt32(controlKey | optionKey),
+           [UInt32(kVK_UpArrow), UInt32(kVK_DownArrow)].contains(config.keyCode) {
+            return T("此组合键用于调节亮度")
+        }
+        if let other = Action.allCases.first(where: {
+            $0 != action && hotKeyRefs[$0] != nil && config.matches(self.config(for: $0))
+        }) { return TF("与「%@」冲突", other.title) }
+        return nil
     }
 
-    // MARK: - 注册
-
-    /// 启动时注册全部；AppDelegate 原来的 registerHotKey() 由这里接管
     func registerAll() {
         installHandlerIfNeeded()
-        for action in Action.allCases {
-            register(action, config: config(for: action))
+        // 旧用户已经分配的键优先于本版新增的默认组合。
+        let custom = Action.allCases.filter { !config(for: $0).matches($0.defaultConfig) }
+        for action in custom + Action.allCases.filter({ !custom.contains($0) }) where hotKeyRefs[action] == nil {
+            registrationErrors[action] = bind(config(for: action), to: action)
         }
     }
 
-    private func register(_ action: Action, config: HotkeyConfig) {
+    private func bind(_ config: HotkeyConfig, to action: Action) -> String? {
+        if let error = conflictMessage(config, excluding: action) { return error }
+        if hotKeyRefs[action] != nil && config.matches(self.config(for: action)) { return nil }
+
         var ref: EventHotKeyRef?
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4155_5241), id: action.hotKeyID) // 'AURA'
-        let status = RegisterEventHotKey(
-            config.keyCode,
-            config.modifiers,
-            hotKeyID,
-            GetApplicationEventTarget(),
-            0,
-            &ref
-        )
-        hotKeyRefs[action] = ref
-        if status != noErr {
-            Debug.log("hotkey \(action.rawValue) register failed: \(status)（多半与系统或其它 App 冲突）")
+        let keyID = EventHotKeyID(signature: OSType(0x4155_5241), id: action.hotKeyID)
+        let status = RegisterEventHotKey(config.keyCode, config.modifiers, keyID, GetApplicationEventTarget(), OptionBits(kEventHotKeyExclusive), &ref)
+        guard status == noErr, let ref else {
+            Debug.log("hotkey registration failed for \(action.rawValue): \(status)")
+            return TF("无法注册 %@，请尝试其他组合键", config.display)
         }
+        if let previous = hotKeyRefs.updateValue(ref, forKey: action) { UnregisterEventHotKey(previous) }
+        return nil
     }
 
-    private func unregister(_ action: Action) {
-        if let ref = hotKeyRefs[action] {
-            UnregisterEventHotKey(ref)
-        }
-        hotKeyRefs[action] = nil
-    }
-
-    /// 改键：注销旧的 → 持久化 → 注册新的
     func set(_ config: HotkeyConfig?, for action: Action) {
-        unregister(action)
-        if let config {
-            configs[action] = config
-        } else {
-            configs[action] = action.defaultConfig
-        }
-        save()
+        let desired = config ?? action.defaultConfig
         installHandlerIfNeeded()
-        register(action, config: configs[action]!)
+        if let error = bind(desired, to: action) {
+            editErrors[action] = error
+            return
+        }
+        configs[action] = desired
+        editErrors[action] = nil
+        registrationErrors[action] = nil
+        save()
+        // 改键可能释放了另一个动作原本需要的键位。
+        for pending in Action.allCases where registrationErrors[pending] != nil {
+            registrationErrors[pending] = bind(self.config(for: pending), to: pending)
+        }
+    }
+
+    private func receive(_ action: Action) {
+        if let recording {
+            endRecording()
+            set(config(for: action), for: recording)
+        } else { onAction?(action) }
     }
 
     private func installHandlerIfNeeded() {
-        guard !handlerInstalled else { return }
-        handlerInstalled = true
+        guard handler == nil else { return }
+        Self.current = self
         var eventType = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
             eventKind: UInt32(kEventHotKeyPressed)
@@ -204,26 +247,30 @@ final class HotkeyService: ObservableObject {
                     &hotKeyID
                 )
                 Debug.log("hotkey event sig=0x\(String(hotKeyID.signature, radix: 16)) id=\(hotKeyID.id)")
+                guard hotKeyID.signature == OSType(0x4155_5241) else { return OSStatus(eventNotHandledErr) }
                 // 亮度热键（AppDelegate 以同一签名注册的 id 2/3）
                 if hotKeyID.id == 2 || hotKeyID.id == 3 {
                     let up = hotKeyID.id == 2
                     Task { @MainActor in
-                        HotkeyService.current?.onBrightness?(up)
+                        guard let service = HotkeyService.current else { return }
+                        if let recording = service.recording {
+                            service.endRecording()
+                            service.editErrors[recording] = T("此组合键用于调节亮度")
+                        } else { service.onBrightness?(up) }
                     }
                     return noErr
                 }
-                guard hotKeyID.signature == OSType(0x4155_5241) else { return OSStatus(eventNotHandledErr) }
                 let action = Action.allCases.first { $0.hotKeyID == hotKeyID.id }
                 guard let action else { return OSStatus(eventNotHandledErr) }
                 Task { @MainActor in
-                    HotkeyService.current?.onAction?(action)
+                    HotkeyService.current?.receive(action)
                 }
                 return noErr
             },
             1,
             &eventType,
             nil,
-            nil
+            &handler
         )
     }
 
@@ -231,6 +278,7 @@ final class HotkeyService: ObservableObject {
 
     func startRecording(_ action: Action) {
         endRecording()
+        editErrors[action] = nil
         recording = action
         recordMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.recording == action else { return event }
@@ -262,7 +310,7 @@ final class HotkeyService: ObservableObject {
     func endRecording() {
         if let recordMonitor { NSEvent.removeMonitor(recordMonitor) }
         recordMonitor = nil
-        recording = nil
+        if recording != nil { recording = nil }
     }
 
     // MARK: - 显示与转换

@@ -40,6 +40,14 @@ final class ZoomTimelineDraft: ObservableObject {
         catch let error as CocoaError where error.code == .fileReadNoSuchFile { return nil }
         let draft = try JSONDecoder().decode(ZoomDraftFile.self, from: data)
         guard draft.version == 1 else { throw CocoaError(.fileReadUnsupportedScheme) }
+        if let clips = draft.appearance?.clipOrder {
+            var last = 0.0
+            for clip in clips.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+                guard clip.lowerBound >= last, clip.lowerBound < clip.upperBound,
+                      clip.upperBound <= duration else { throw CocoaError(.fileReadCorruptFile) }
+                last = clip.upperBound
+            }
+        }
         var previousEnd = 0.0
         var ids = Set<UUID>()
         for segment in draft.segments {

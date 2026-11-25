@@ -137,6 +137,12 @@ struct RecordingZoom {
         return CGPoint(x: p.x + (next.x - p.x) * fraction, y: p.y + (next.y - p.y) * fraction)
     }
 
+    func recentClick(at time: Double, within duration: Double) -> ZoomPoint? {
+        let index = upperBound(clicks, time)
+        guard index > 0, time - clicks[index - 1].time < duration else { return nil }
+        return clicks[index - 1]
+    }
+
     func cursor(at time: Double) -> CGPoint? {
         let index = upperBound(points, time)
         guard index > 0, points[index - 1].hidden != true else { return nil }

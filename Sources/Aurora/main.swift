@@ -601,16 +601,33 @@ if CommandLine.arguments.contains("--keyboard-report") {
 if CommandLine.arguments.contains("--frames-report") {
     var code: Int32 = 0
     MainActor.assumeIsolated {
-        let frames = ScreenshotService.shared.frames
-        print("清单：\(ScreenshotService.resourceURL("frames.json")?.path ?? "未找到")")
-        print("设备外壳 \(frames.count) 款")
+        let service = ScreenshotService.shared
+        let frames = service.frames
+        let directory = ScreenshotService.resourceURL("frames.json")?.deletingLastPathComponent().path ?? "未找到"
+        print("清单：\(directory)")
+        print("设备外壳 \(frames.count) 款（导入 \(frames.filter { $0.id.hasPrefix("imported-") }.count) 款）")
         for frame in frames {
-            print("  · \(frame.id) — \(frame.device) · \(Int(frame.pixelWidth))×\(Int(frame.pixelHeight))")
+            print("  · \(frame.id) — \(frame.device) · \(Int(frame.pixelWidth))×\(Int(frame.pixelHeight)) · 孔洞 \(Int(frame.screen.width))×\(Int(frame.screen.height))")
         }
+        // 清单里列了、包里没有的 PNG：打包漏了才会出现，直接列出来
+        let missing = checkMissingFrameFiles(in: directory)
+        if !missing.isEmpty {
+            print("✗ 清单里有 \(missing.count) 张 PNG 没打进来：\(missing.joined(separator: "、"))")
+        }
+        print("默认外壳：\(service.defaultFrame.map { "\($0.device)（\(service.isDefaultAuto ? "自动识别" : "手动指定")）" } ?? "无")")
+        print("同款配色：\(service.defaultFrameVariants.map(\.device).joined(separator: "、"))")
         if frames.isEmpty { print("✗ 没读到最后壳资源，检查 Contents/Resources/DeviceFrames") }
-        code = frames.isEmpty ? 1 : 0
+        code = frames.isEmpty || !missing.isEmpty ? 1 : 0
     }
     exit(code)
+}
+
+/// frames.json 里列到、但包内找不到的 PNG
+func checkMissingFrameFiles(in directory: String) -> [String] {
+    let manifest = URL(fileURLWithPath: directory).appendingPathComponent("frames.json")
+    guard let data = try? Data(contentsOf: manifest),
+          let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+    return list.compactMap { $0["file"] as? String }.filter { ScreenshotService.resourceURL($0) == nil }
 }
 
 /// 更新说明解析自检：打印当前版本的结构化说明，顺带跑一段截图里那种 HTML 的回归用例

@@ -46,6 +46,19 @@ struct ProceduralWallpaperView: View {
     @ObservedObject private var clock = ProceduralClock.shared
 
     var body: some View {
+        ProceduralSceneFrame(style: style, hueShift: hueShift, time: clock.time)
+            .onAppear { clock.retain() }
+            .onDisappear { clock.release() }
+    }
+}
+
+/// 桌面与录屏合成共用场景，导出时由视频时间驱动动画。
+struct ProceduralSceneFrame: View {
+    let style: String
+    let hueShift: Double
+    let time: Double
+
+    var body: some View {
         // 所有场景都按画布尺寸算坐标：之前用 0.5 / 0.32 这种「比例」直接喂给
         // .position，那是点数不是百分比，元素全被塞在左上角 0.5pt 处，
         // 位移也只有 0.16pt，肉眼就是一张静止的背景色。
@@ -53,14 +66,12 @@ struct ProceduralWallpaperView: View {
             let size = geo.size
             ZStack {
                 backdrop
-                scene(t: clock.time, size: size)
+                scene(t: time, size: size)
             }
             .frame(width: size.width, height: size.height)
             .clipped()
         }
         .ignoresSafeArea()
-        .onAppear { clock.retain() }
-        .onDisappear { clock.release() }
     }
 
     private var backdrop: some View {
